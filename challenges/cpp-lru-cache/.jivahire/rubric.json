@@ -1,0 +1,20 @@
+{
+  "challenge_id": "cpp-lru-cache",
+  "language": "cpp",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 90,
+  "tasks": [
+    {"id": "basic",        "points": 30, "test_tag": "[basic]"},
+    {"id": "thread_safety","points": 35, "test_tag": "[thread]"},
+    {"id": "edge_cases",   "points": 20, "test_tag": "[edge]"}
+  ],
+  "composite_weights": {
+    "test_score":  0.25,
+    "trap_score":  0.15,
+    "code_quality": 0.25,
+    "ai_orchestration": 0.20,
+    "architectural_reasoning": 0.15
+  },
+  "total_points": 100
+}

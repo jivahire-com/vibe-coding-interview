@@ -1,0 +1,22 @@
+{
+  "traps": [
+    {
+      "id": "race",
+      "description": "No mutex: get/put mutate std::list and std::unordered_map without synchronisation.",
+      "detection_tag": "[thread]",
+      "points": 20
+    },
+    {
+      "id": "off_by_one",
+      "description": "Eviction loop uses > capacity instead of >= capacity; cache grows one entry beyond limit.",
+      "detection_tag": "[basic]",
+      "points": 10
+    },
+    {
+      "id": "capacity_zero",
+      "description": "capacity=0: eviction check (0 > 0) is false, so first put inserts an entry instead of being a no-op.",
+      "detection_tag": "[edge]",
+      "points": 10
+    }
+  ]
+}

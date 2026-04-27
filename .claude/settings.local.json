@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -LsSf https://astral.sh/uv/install.sh)",
+      "Bash(sh)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "Bash(cmake --version)",
+      "Bash(c++ --version)",
+      "Bash(curl -s -X POST http://localhost:8080/api/v1/validate-session -H 'Content-Type: application/json' -d '{\"session_key\":\"DEV-001\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://localhost:8080/api/v1/telemetry -H 'Authorization: Bearer DEV-001' -H 'Content-Type: application/json' -d '{\"events\":[{\"ts\":1714000000000,\"event_type\":\"edit_batch\",\"payload\":{\"chars\":50}}]}')",
+      "Bash(echo \"exit:$?\")",
+      "Bash(curl *)",
+      "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT status, llm_spent_usd FROM sessions WHERE session_key='DEV-001';\")",
+      "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT kind, status, last_error FROM jobs;\")",
+      "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT COUNT\\(*\\) as telemetry_rows FROM telemetry;\")",
+      "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT prompt_tokens, completion_tokens, cost_usd FROM chat_exchanges;\")",
+      "Bash(.venv/bin/python *)"
+    ]
+  }
+}

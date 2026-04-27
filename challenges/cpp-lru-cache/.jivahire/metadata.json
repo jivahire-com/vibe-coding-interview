@@ -1,0 +1,12 @@
+{
+  "challenge_id": "cpp-lru-cache",
+  "title": "Thread-Safe LRU Cache",
+  "language": "cpp",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 90,
+  "tags": ["data-structures", "concurrency", "templates"],
+  "public_test_file": "tests/public_test.cpp",
+  "hidden_test_file": "tests/hidden_test.cpp",
+  "grader": "cpp"
+}
