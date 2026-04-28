@@ -12,23 +12,33 @@ def build_and_test(clone_dir: Path, hidden_test_src: Path) -> tuple[dict[str, bo
 
     output_lines = []
 
-    def run(cmd: list[str], timeout: int, cwd: Path = clone_dir) -> subprocess.CompletedProcess:
+    def run(cmd: list[str], timeout: int, cwd: Path = clone_dir, build_step: bool = False) -> subprocess.CompletedProcess:
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
         )
         output_lines.append(f"$ {' '.join(cmd)}")
-        output_lines.append(r.stdout)
-        if r.stderr:
-            output_lines.append(r.stderr)
+        # For build steps, skip verbose stdout and only keep stderr (compile errors)
+        if build_step:
+            if r.stderr:
+                output_lines.append(r.stderr)
+            elif r.returncode != 0:
+                output_lines.append(r.stdout[-2000:])  # last 2k of stdout if no stderr
+        else:
+            output_lines.append(r.stdout)
+            if r.stderr:
+                output_lines.append(r.stderr)
         return r
 
     build_dir = clone_dir / "build"
+    challenge_build = Path(hidden_test_src).parent.parent / "build" / "_deps"
     run(
         ["cmake", "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Debug",
-         "-DCMAKE_CXX_FLAGS=-fsanitize=thread -fno-omit-frame-pointer"],
+         "-DCMAKE_CXX_FLAGS=-fsanitize=thread -fno-omit-frame-pointer",
+         f"-DFETCHCONTENT_BASE_DIR={challenge_build.parent}"],
         timeout=90,
+        build_step=True,
     )
-    result = run(["cmake", "--build", str(build_dir), "-j1"], timeout=180)
+    result = run(["cmake", "--build", str(build_dir), "-j4"], timeout=180, build_step=True)
     if result.returncode != 0:
         return {}, "\n".join(output_lines)
 

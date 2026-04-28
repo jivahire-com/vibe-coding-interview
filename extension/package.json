@@ -1,40 +1,65 @@
 {
-  "name": "vibe-interview",
-  "displayName": "Vibe Interview",
-  "description": "AI-aware coding interview assistant",
+  "name": "jivahire-vibe-coding-interview",
+  "displayName": "JivaHire Vibe Coding Interview",
+  "description": "AI-aware coding interview platform by JivaHire",
   "version": "0.1.0",
   "publisher": "jivahire",
-  "engines": {"vscode": "^1.85.0"},
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
-      {"command": "vibe.enterSessionKey", "title": "Vibe: Enter Session Key"},
-      {"command": "vibe.showBrief",       "title": "Vibe: Show Challenge Brief"},
-      {"command": "vibe.runTests",        "title": "Vibe: Run Tests"},
-      {"command": "vibe.submit",          "title": "Vibe: Submit"}
+      {
+        "command": "vibe.enterSessionKey",
+        "title": "JivaHire: Enter Session Key"
+      },
+      {
+        "command": "vibe.showBrief",
+        "title": "JivaHire: Show Challenge Brief"
+      },
+      {
+        "command": "vibe.runTests",
+        "title": "JivaHire: Run Tests"
+      },
+      {
+        "command": "vibe.submit",
+        "title": "JivaHire: Submit"
+      }
     ],
     "viewsContainers": {
       "activitybar": [
-        {"id": "vibe-sidebar", "title": "Vibe AI", "icon": "$(comment-discussion)"}
+        {
+          "id": "vibe-sidebar",
+          "title": "JivaHire AI",
+          "icon": "$(comment-discussion)"
+        }
       ]
     },
     "views": {
       "vibe-sidebar": [
-        {"id": "vibe.chat", "name": "AI Chat", "type": "webview"}
+        {
+          "id": "vibe.chat",
+          "name": "AI Chat",
+          "type": "webview"
+        }
       ]
     }
   },
   "scripts": {
-    "build":   "node esbuild.js",
-    "watch":   "node esbuild.js --watch",
-    "lint":    "tsc --noEmit",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "lint": "tsc --noEmit",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@types/node": "^25.6.0",
     "@types/vscode": "^1.85.0",
-    "typescript":    "^5.4.0",
-    "esbuild":       "^0.20.0",
-    "@vscode/vsce":  "^2.24.0"
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
   }
 }

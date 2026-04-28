@@ -29,7 +29,7 @@ def run(session_id: str) -> None:
         tags_passed = sum(1 for v in tag_results.values() if v)
         tests_total = len(tag_results)
 
-        llm_scores = llm_eval.evaluate(session_id, session["challenge_id"], tag_results)
+        llm_scores = llm_eval.evaluate(session_id, session["challenge_id"], tag_results, clone_dir)
 
         total_score = _composite_score(
             tags_passed, tests_total, traps_detected, traps_total, llm_scores
@@ -39,17 +39,20 @@ def run(session_id: str) -> None:
             "INSERT OR REPLACE INTO grades "
             "(session_id, tests_passed, tests_total, traps_detected, traps_total, "
             "code_quality_score, ai_orchestration_score, architectural_reasoning_score, "
+            "prompt_quality_score, token_efficiency_score, "
             "total_score, grader_summary, raw_output) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, tags_passed, tests_total,
                 traps_detected, traps_total,
                 llm_scores["code_quality_score"],
                 llm_scores["ai_orchestration_score"],
                 llm_scores["architectural_reasoning_score"],
+                llm_scores["prompt_quality_score"],
+                llm_scores["token_efficiency_score"],
                 round(total_score, 2),
                 llm_scores["summary"],
-                raw_output[:10_000],
+                raw_output[:50_000],
             ),
         )
         execute("UPDATE sessions SET status='graded' WHERE id=?", (session_id,))
@@ -67,10 +70,12 @@ def _composite_score(
 ) -> float:
     test_score = (tests_passed / tests_total * 10) if tests_total else 0
     trap_score = (traps_detected / traps_total * 10) if traps_total else 0
-    automated = test_score * 0.25 + trap_score * 0.15
+    automated = test_score * 0.20 + trap_score * 0.10
     llm = (
-        llm_scores["code_quality_score"] * 0.25
-        + llm_scores["ai_orchestration_score"] * 0.20
-        + llm_scores["architectural_reasoning_score"] * 0.15
+        llm_scores["code_quality_score"] * 0.20
+        + llm_scores["ai_orchestration_score"] * 0.15
+        + llm_scores["architectural_reasoning_score"] * 0.10
+        + llm_scores["prompt_quality_score"] * 0.15
+        + llm_scores["token_efficiency_score"] * 0.10
     )
     return automated + llm

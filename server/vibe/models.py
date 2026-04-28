@@ -23,6 +23,7 @@ class ValidateSessionResponse(BaseModel):
     max_minutes: int
     llm_budget_usd: float
     challenge_id: str
+    chat_model: str
 
 
 class TelemetryEvent(BaseModel):

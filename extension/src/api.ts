@@ -11,6 +11,7 @@ export interface SessionConfig {
   maxMinutes: number;
   llmBudgetUsd: number;
   challengeId: string;
+  chatModel: string;
   startedAt: number; // epoch ms, recorded client-side on validate
 }
 
@@ -18,8 +19,9 @@ export async function validateSession(
   serverUrl: string,
   sessionKey: string
 ): Promise<SessionConfig> {
+  const base = serverUrl.replace(/\/+$/, "");
   const body = JSON.stringify({ session_key: sessionKey });
-  const res = await post(`${serverUrl}/api/v1/validate-session`, body);
+  const res = await post(`${base}/api/v1/validate-session`, body);
   return {
     sessionId: res.session_id,
     sessionKey,
@@ -30,6 +32,7 @@ export async function validateSession(
     maxMinutes: res.max_minutes,
     llmBudgetUsd: res.llm_budget_usd,
     challengeId: res.challenge_id,
+    chatModel: res.chat_model ?? "openai/gpt-4o-mini",
     startedAt: Date.now(),
   };
 }

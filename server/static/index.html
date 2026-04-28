@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JivaHire Dashboard</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="/app.js"></script>
+</head>
+<body x-data="App" x-init="init()">
+
+  <!-- ═══════════════════════ NAV ═══════════════════════ -->
+  <nav class="nav">
+    <div class="nav-logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+      </svg>
+      JivaHire <span>Dashboard</span>
+    </div>
+
+    <div class="ml-auto flex items-center gap-2" x-show="view !== 'login'">
+      <button class="btn btn-primary btn-sm" @click="openInvite()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Send Invite
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="logout()">Logout</button>
+    </div>
+  </nav>
+
+  <!-- ═══════════════════════ LOGIN ═══════════════════════ -->
+  <div x-show="view === 'login'" x-transition class="login-wrap">
+    <div class="login-card">
+      <h1>Recruiter Login</h1>
+      <p>Enter your admin token to access the dashboard.</p>
+
+      <div x-show="authError" class="error-banner" x-text="authError"></div>
+
+      <div class="field">
+        <label for="token">Admin Token</label>
+        <input id="token" type="password" class="input" placeholder="••••••••••••"
+               x-model="adminToken" @keydown.enter="login()" autocomplete="current-password" />
+      </div>
+      <button class="btn btn-primary w-full" @click="login()">Sign In →</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════ SESSIONS LIST ═══════════════════════ -->
+  <div x-show="view === 'list'" x-transition class="page">
+
+    <div class="list-header">
+      <h2>Sessions</h2>
+      <span class="count-chip" x-text="filteredSessions.length"></span>
+
+      <div class="search-bar">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input class="input" type="search" placeholder="Search by email or challenge…" x-model="search" />
+      </div>
+
+      <select class="input" style="width:150px" x-model="statusFilter">
+        <option value="">All statuses</option>
+        <option value="pending">Pending</option>
+        <option value="active">Active</option>
+        <option value="submitted">Submitted</option>
+        <option value="graded">Graded</option>
+      </select>
+
+      <button class="btn btn-ghost btn-sm ml-auto" @click="loadSessions()" title="Refresh">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Refresh
+      </button>
+    </div>
+
+    <div x-show="listError" class="error-banner" x-text="listError"></div>
+
+    <div class="table-wrap">
+      <!-- Loading -->
+      <div x-show="loading" style="padding:40px">
+        <div class="spinner"></div>
+      </div>
+
+      <!-- Empty -->
+      <div x-show="!loading && filteredSessions.length === 0" class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        <p>No sessions found</p>
+        <p class="hint">Send an invite to get started.</p>
+      </div>
+
+      <!-- Table -->
+      <table x-show="!loading && filteredSessions.length > 0">
+        <thead>
+          <tr>
+            <th>Candidate</th>
+            <th>Challenge</th>
+            <th>Status</th>
+            <th>Score</th>
+            <th>Time spent</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="s in filteredSessions" :key="s.id">
+            <tr @click="openDetail(s.id)">
+              <td>
+                <div x-text="s.candidate_email" class="truncate" style="max-width:200px"></div>
+                <div class="text-sm text-muted font-mono" x-text="s.session_key"></div>
+              </td>
+              <td x-text="s.challenge_id"></td>
+              <td>
+                <span class="badge" :class="`badge-${s.status}`" x-text="s.status"></span>
+              </td>
+              <td>
+                <template x-if="s.total_score != null">
+                  <span class="score-pill" :class="scoreCssClass(s.total_score)">
+                    <span x-text="Number(s.total_score).toFixed(1)"></span>
+                    <span class="denom">/10</span>
+                  </span>
+                </template>
+                <template x-if="s.total_score == null">
+                  <span class="text-muted">—</span>
+                </template>
+              </td>
+              <td x-text="elapsed(s.started_at, s.submitted_at)" class="text-muted"></td>
+              <td x-text="formatDate(s.created_at)" class="text-muted text-sm"></td>
+              <td class="arrow-btn">›</td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════ SESSION DETAIL ═══════════════════════ -->
+  <div x-show="view === 'detail'" x-transition class="page">
+
+    <div class="back-link" @click="backToList()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      All Sessions
+    </div>
+
+    <div x-show="detailError" class="error-banner" x-text="detailError"></div>
+
+    <!-- Loading skeleton -->
+    <div x-show="!selectedSession && !detailError" style="text-align:center;padding:60px">
+      <div class="spinner"></div>
+    </div>
+
+    <template x-if="selectedSession">
+      <div>
+        <!-- Hero -->
+        <div class="detail-hero">
+          <div>
+            <div class="hero-score" :class="scoreCssClass(selectedSession.grade?.total_score)">
+              <span x-text="selectedSession.grade ? Number(selectedSession.grade.total_score).toFixed(1) : '—'"></span>
+              <span class="hero-denom" x-show="selectedSession.grade">/10</span>
+            </div>
+          </div>
+          <div class="hero-meta">
+            <h2 x-text="selectedSession.session.candidate_email"></h2>
+            <p>
+              <span x-text="selectedSession.session.challenge_id"></span>
+              &nbsp;·&nbsp;
+              <span class="badge" :class="`badge-${selectedSession.session.status}`" x-text="selectedSession.session.status"></span>
+            </p>
+            <p class="text-sm text-muted" style="margin-top:6px">
+              Started: <span x-text="formatDate(selectedSession.session.started_at)"></span>
+              &nbsp;·&nbsp;
+              Submitted: <span x-text="formatDate(selectedSession.session.submitted_at)"></span>
+            </p>
+          </div>
+        </div>
+
+        <!-- Score grids -->
+        <div class="detail-grid">
+
+          <!-- Automated -->
+          <div class="card">
+            <h3>Automated Tests</h3>
+            <template x-if="selectedSession.grade">
+              <div>
+                <div class="score-row">
+                  <span class="score-label">Tests passed</span>
+                  <div class="score-bar-wrap">
+                    <div class="score-bar" :class="scoreColor(selectedSession.grade.tests_passed / (selectedSession.grade.tests_total || 1) * 10)"
+                         :style="`width:${Math.round(selectedSession.grade.tests_passed / (selectedSession.grade.tests_total || 1) * 100)}%`"></div>
+                  </div>
+                  <span class="score-val text-muted" x-text="`${selectedSession.grade.tests_passed}/${selectedSession.grade.tests_total}`"></span>
+                </div>
+                <div class="score-row">
+                  <span class="score-label">Traps detected</span>
+                  <div class="score-bar-wrap">
+                    <div class="score-bar" :class="scoreColor(selectedSession.grade.traps_detected / (selectedSession.grade.traps_total || 1) * 10)"
+                         :style="`width:${Math.round(selectedSession.grade.traps_detected / (selectedSession.grade.traps_total || 1) * 100)}%`"></div>
+                  </div>
+                  <span class="score-val text-muted" x-text="`${selectedSession.grade.traps_detected}/${selectedSession.grade.traps_total}`"></span>
+                </div>
+              </div>
+            </template>
+            <template x-if="!selectedSession.grade">
+              <p class="text-muted" style="font-size:13px">Not yet graded.</p>
+            </template>
+          </div>
+
+          <!-- LLM Scores -->
+          <div class="card">
+            <h3>LLM Evaluation</h3>
+            <template x-if="selectedSession.grade">
+              <div>
+                <template x-for="[label, key] in [
+                  ['Code Quality', 'code_quality_score'],
+                  ['AI Orchestration', 'ai_orchestration_score'],
+                  ['Architectural', 'architectural_reasoning_score'],
+                  ['Prompt Quality', 'prompt_quality_score'],
+                  ['Token Efficiency', 'token_efficiency_score'],
+                ]" :key="key">
+                  <div class="score-row">
+                    <span class="score-label" x-text="label"></span>
+                    <div class="score-bar-wrap">
+                      <div class="score-bar" :class="scoreColor(selectedSession.grade[key])"
+                           :style="`width:${scoreBarWidth(selectedSession.grade[key])}`"></div>
+                    </div>
+                    <span class="score-val" :class="scoreCssClass(selectedSession.grade[key])"
+                          x-text="selectedSession.grade[key] ?? '—'"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!selectedSession.grade">
+              <p class="text-muted" style="font-size:13px">Not yet graded.</p>
+            </template>
+          </div>
+
+          <!-- Activity -->
+          <div class="card">
+            <h3>Editing Activity</h3>
+            <div class="stat-grid">
+              <div class="stat-item">
+                <div class="stat-label">Typed</div>
+                <div class="stat-val" x-text="fmtNum(selectedSession.session.typed_chars)"></div>
+                <div class="stat-sub">characters</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Pasted</div>
+                <div class="stat-val" x-text="fmtNum(selectedSession.session.pasted_chars)"></div>
+                <div class="stat-sub">characters</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">AI-applied</div>
+                <div class="stat-val" x-text="fmtNum(selectedSession.session.ai_applied_chars)"></div>
+                <div class="stat-sub">characters</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Chat turns</div>
+                <div class="stat-val" x-text="selectedSession.chat_exchanges.length"></div>
+                <div class="stat-sub">exchanges</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Token usage -->
+          <div class="card">
+            <h3>Token Usage</h3>
+            <div class="stat-grid">
+              <div class="stat-item">
+                <div class="stat-label">Input</div>
+                <div class="stat-val" x-text="fmtNum(totalTokens(selectedSession).input)"></div>
+                <div class="stat-sub">tokens</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Output</div>
+                <div class="stat-val" x-text="fmtNum(totalTokens(selectedSession).output)"></div>
+                <div class="stat-sub">tokens</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Cached</div>
+                <div class="stat-val" x-text="fmtNum(totalTokens(selectedSession).cached)"></div>
+                <div class="stat-sub">tokens</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Spent</div>
+                <div class="stat-val" x-text="`$${Number(selectedSession.session.llm_spent_usd).toFixed(2)}`"></div>
+                <div class="stat-sub" x-text="`of $${Number(selectedSession.session.llm_budget_usd).toFixed(2)} budget`"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Grader Summary -->
+        <template x-if="selectedSession.grade?.grader_summary">
+          <div class="card summary-card">
+            <h3>Grader Summary</h3>
+            <p class="summary-text" x-text="selectedSession.grade.grader_summary"></p>
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+
+  <!-- ═══════════════════════ INVITE DRAWER ═══════════════════════ -->
+  <div x-show="showInvitePanel" x-transition.opacity class="overlay" @click.self="closeInvite()">
+    <div class="drawer" @click.stop>
+      <div class="drawer-header">
+        <h2>Send Interview Invite</h2>
+        <button class="close-btn" @click="closeInvite()">✕</button>
+      </div>
+
+      <!-- Success state -->
+      <template x-if="inviteResult">
+        <div class="invite-result">
+          <p>Session created! Share this key with the candidate (also emailed):</p>
+          <div class="key-row">
+            <div class="key-display" x-text="inviteResult.sessionKey"></div>
+            <button class="btn btn-ghost btn-sm" @click="copyKey()">
+              <span x-text="copied ? '✓ Copied' : 'Copy'"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <div x-show="inviteError" class="error-banner" x-text="inviteError"></div>
+
+      <div class="field">
+        <label>Candidate Email</label>
+        <input type="email" class="input" placeholder="alice@example.com"
+               x-model="inviteForm.email" :disabled="!!inviteResult" />
+      </div>
+
+      <div class="field">
+        <label>Session Key</label>
+        <input type="text" class="input" placeholder="e.g. ABC-1234"
+               x-model="inviteForm.sessionKey" :disabled="!!inviteResult" />
+      </div>
+
+      <div class="field">
+        <label>Challenge</label>
+        <template x-if="challenges.length > 0">
+          <select class="input" x-model="inviteForm.challengeId" :disabled="!!inviteResult">
+            <template x-for="c in challenges" :key="c">
+              <option :value="c" x-text="c"></option>
+            </template>
+          </select>
+        </template>
+        <template x-if="challenges.length === 0">
+          <input type="text" class="input" placeholder="cpp-lru-cache"
+                 x-model="inviteForm.challengeId" :disabled="!!inviteResult" />
+        </template>
+      </div>
+
+      <div class="input-row">
+        <div class="field" style="margin-bottom:0">
+          <label>Duration (minutes)</label>
+          <input type="number" class="input" min="15" max="480"
+                 x-model.number="inviteForm.maxMinutes" :disabled="!!inviteResult" />
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label>AI Budget (USD)</label>
+          <input type="number" class="input" min="0.50" max="20" step="0.50"
+                 x-model.number="inviteForm.budgetUsd" :disabled="!!inviteResult" />
+        </div>
+      </div>
+
+      <div class="drawer-actions">
+        <button class="btn btn-ghost" @click="closeInvite()">
+          <span x-text="inviteResult ? 'Close' : 'Cancel'"></span>
+        </button>
+        <template x-if="!inviteResult">
+          <button class="btn btn-primary" @click="sendInvite()" :disabled="inviteLoading">
+            <template x-if="inviteLoading">
+              <span>Sending…</span>
+            </template>
+            <template x-if="!inviteLoading">
+              <span>Send Invite →</span>
+            </template>
+          </button>
+        </template>
+        <template x-if="inviteResult">
+          <button class="btn btn-ghost" @click="openInvite()">Send another →</button>
+        </template>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

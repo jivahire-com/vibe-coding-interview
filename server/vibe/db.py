@@ -44,3 +44,25 @@ def immediate_transaction():
 def bootstrap() -> None:
     schema = Path(__file__).parent / "schema.sql"
     _conn().executescript(schema.read_text())
+    _migrate()
+
+
+def _migrate() -> None:
+    """Idempotent ALTER TABLE migrations for columns added after initial schema."""
+    migrations = [
+        ("sessions", "typed_chars", "INTEGER NOT NULL DEFAULT 0"),
+        ("sessions", "pasted_chars", "INTEGER NOT NULL DEFAULT 0"),
+        ("sessions", "ai_applied_chars", "INTEGER NOT NULL DEFAULT 0"),
+        ("chat_exchanges", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("chat_exchanges", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
+        ("chat_exchanges", "prompt_text", "TEXT"),
+        ("chat_exchanges", "prompt_classification", "TEXT"),
+        ("grades", "prompt_quality_score", "INTEGER"),
+        ("grades", "token_efficiency_score", "INTEGER"),
+    ]
+    conn = _conn()
+    for table, column, col_def in migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+        except Exception:
+            pass  # column already exists

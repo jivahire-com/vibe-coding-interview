@@ -35,7 +35,11 @@ CREATE TABLE IF NOT EXISTS chat_exchanges (
     prompt_tokens INTEGER NOT NULL,
     completion_tokens INTEGER NOT NULL,
     cost_usd REAL NOT NULL,
-    aborted_over_budget INTEGER NOT NULL DEFAULT 0
+    aborted_over_budget INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    prompt_text TEXT,
+    prompt_classification TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session_ts ON chat_exchanges(session_id, ts);
 
@@ -48,6 +52,8 @@ CREATE TABLE IF NOT EXISTS grades (
     code_quality_score INTEGER,
     ai_orchestration_score INTEGER,
     architectural_reasoning_score INTEGER,
+    prompt_quality_score INTEGER,
+    token_efficiency_score INTEGER,
     total_score REAL,
     grader_summary TEXT,
     raw_output TEXT,

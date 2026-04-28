@@ -16,7 +16,23 @@
       "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT kind, status, last_error FROM jobs;\")",
       "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT COUNT\\(*\\) as telemetry_rows FROM telemetry;\")",
       "Bash(sqlite3 /home/ubuntu/vibe-coding-test/vibe.db \"SELECT prompt_tokens, completion_tokens, cost_usd FROM chat_exchanges;\")",
-      "Bash(.venv/bin/python *)"
+      "Bash(.venv/bin/python *)",
+      "Bash(PYTHONPATH=server .venv/bin/uvicorn vibe.main:app --host 0.0.0.0 --port 8080)",
+      "Bash(PYTHONPATH=server .venv/bin/python *)",
+      "Bash(npm run *)",
+      "Bash(grep -r \"keystroke\\\\|typed.*pasted\\\\|input.*tracking\" /home/ubuntu/vibe-coding-test --include=\"*.ts\" --include=\"*.py\" ! -path \"*/node_modules/*\" ! -path \"*/.git/*\")",
+      "Bash(grep -r \"TelemetryRequest\\\\|event_type\\\\|keystroke\\\\|typed\\\\|pasted\" /home/ubuntu/vibe-coding-test/server --include=\"*.py\" ! -path \"*/.venv/*\")",
+      "Bash(python -c ' *)",
+      "Bash(python3 -c ' *)",
+      "Bash(pip3 install *)",
+      "Bash(python3 -m pip --version)",
+      "Read(//home/ubuntu/.local/bin/**)",
+      "Bash(uv pip *)",
+      "Bash(echo \"Worker PID: $!\")",
+      "Bash(pkill -f \"uvicorn vibe.main\")",
+      "Bash(pkill -f \"vibe.worker\")",
+      "Bash(pkill -f uvicorn)",
+      "Bash(echo \"server=$! worker=$!\" sleep 4)"
     ]
   }
 }

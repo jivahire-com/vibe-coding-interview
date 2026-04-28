@@ -16,5 +16,6 @@
     "ai_orchestration": 0.20,
     "architectural_reasoning": 0.15
   },
-  "total_points": 100
+  "total_points": 100,
+  "expected_tokens": 30000
 }
