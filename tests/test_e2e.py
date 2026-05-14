@@ -12,6 +12,7 @@ os.environ.update({
     "OPENAI_API_KEY": "sk-test",
     "GITHUB_BOT_PAT": "ghp-test",
     "GITHUB_CHALLENGES_REPO": "test-org/test-repo",
+    "GITHUB_CHALLENGES_OWNER": "",
     "ADMIN_TOKEN": "admin-secret",
     "DB_PATH": _db_path,
     "LLM_BASE_URL": "https://openrouter.ai/api/v1",
@@ -32,7 +33,7 @@ _GH_REFS = f"https://api.github.com/repos/{_REPO}/git/refs"
 @pytest.fixture(autouse=True)
 def _clean():
     _auth._rate_limits.clear()
-    for tbl in ("grades", "jobs", "chat_exchanges", "telemetry", "sessions"):
+    for tbl in ("grading_errors", "grades", "jobs", "chat_exchanges", "telemetry", "sessions"):
         execute(f"DELETE FROM {tbl}")
     yield
 
@@ -94,10 +95,10 @@ async def test_telemetry_bulk_insert(client, active_session):
     assert query("SELECT COUNT(*) as n FROM telemetry")[0]["n"] == 5
 
 
-async def test_budget_exhausted_preflight(client, active_session):
-    """Pre-flight budget check returns 402 before touching OpenRouter."""
+async def test_budget_exhausted_gate(client, active_session):
+    """Budget gate returns 402 when llm_spent_usd >= llm_budget_usd."""
     key, sid = active_session
-    execute("UPDATE sessions SET llm_budget_usd = 0.0 WHERE id = ?", (sid,))
+    execute("UPDATE sessions SET llm_spent_usd = llm_budget_usd WHERE id = ?", (sid,))
     r = await client.post(
         "/api/v1/llm/chat/completions",
         json={"messages": [{"role": "user", "content": "hello"}]},
@@ -112,6 +113,41 @@ async def test_submit_enqueues_grade_job(client, active_session):
     assert r.status_code == 202
     jobs = query("SELECT status FROM jobs WHERE session_id = ?", (sid,))
     assert len(jobs) == 1 and jobs[0]["status"] == "pending"
+
+
+async def test_admin_invites_alias(client):
+    """POST /api/v1/admin/invites is equivalent to POST /api/v1/sessions."""
+    with respx.mock:
+        _mock_github()
+        r = await client.post(
+            "/api/v1/admin/invites",
+            json={"session_key": "INV-001", "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"},
+            headers=_ADMIN,
+        )
+    assert r.status_code == 201
+    assert "session_id" in r.json()
+    assert "branch" in r.json()
+
+
+async def test_telemetry_window_events(client, active_session):
+    """app_focused with time_away_seconds and edit_pasted with suspicious_paste are stored."""
+    key, _ = active_session
+    events = [
+        {"ts": 2_000_000, "event_type": "app_unfocused", "payload": {"ts": 2_000_000}},
+        {"ts": 2_005_000, "event_type": "app_focused", "payload": {"time_away_seconds": 5.0}},
+        {"ts": 2_005_500, "event_type": "edit_pasted", "payload": {"chars": 50, "suspicious_paste": True}},
+    ]
+    r = await client.post(
+        "/api/v1/telemetry",
+        json={"events": events},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert r.status_code == 204
+    rows = query("SELECT event_type FROM telemetry ORDER BY ts")
+    types = [row["event_type"] for row in rows]
+    assert "app_unfocused" in types
+    assert "app_focused" in types
+    assert "edit_pasted" in types
 
 
 async def test_job_claim_atomicity():

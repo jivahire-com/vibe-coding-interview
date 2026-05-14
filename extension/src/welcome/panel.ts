@@ -1,66 +1,156 @@
 import * as vscode from "vscode";
+import * as https from "https";
+import * as crypto from "crypto";
+import { execSync } from "child_process";
 import { SessionConfig } from "../api";
 import { runChecklist, TestChecklist } from "./tests";
 
-export class WelcomePanel {
-  private static current: WelcomePanel | undefined;
-  private readonly panel: vscode.WebviewPanel;
+interface PrereqChecks {
+  git: boolean | null;
+  internet: boolean | null;
+  cmake: boolean | null;
+}
+
+/** Escape user/server-supplied strings before they are interpolated into HTML. */
+export function escapeHtml(s: string): string {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export class DashboardViewProvider implements vscode.WebviewViewProvider {
+  private view?: vscode.WebviewView;
+  private config: SessionConfig | null = null;
+  private submitted = false;
   private checklist: TestChecklist = { basic: null, thread: null, edge: null };
+  private prereqs: PrereqChecks = { git: null, internet: null, cmake: null };
   private refreshInterval: ReturnType<typeof setInterval> | undefined;
+  private _prereqRequest: ReturnType<typeof https.request> | undefined;
+  private disposed = false;
 
-  private constructor(
-    private config: SessionConfig | null,
-    private context: vscode.ExtensionContext
-  ) {
-    const isActive = config !== null;
-    this.panel = vscode.window.createWebviewPanel(
-      "vibeBrief",
-      isActive ? "JivaHire: Challenge Brief" : "JivaHire: Welcome",
-      isActive ? vscode.ViewColumn.Beside : vscode.ViewColumn.One,
-      { enableScripts: true }
-    );
-    this.panel.onDidDispose(() => {
-      WelcomePanel.current = undefined;
-      this.dispose();
-    });
-    this.panel.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+  constructor(private readonly context: vscode.ExtensionContext) {
+    this._runPrereqChecks();
+  }
+
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView;
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, "dist")],
+    };
+    webviewView.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+    // If activate() hasn't called setConfig() yet (timing gap on workspace reload),
+    // restore config directly from globalState so we show the session page immediately.
+    if (!this.config) {
+      const saved = this.context.globalState.get<SessionConfig>("vibe.session");
+      if (saved && Date.now() - saved.startedAt <= saved.maxMinutes * 60_000) {
+        this.config = saved;
+        // setConfig() arms the refresh interval; ensure it is armed on restore too.
+        this._armRefresh();
+      }
+    }
     this.render();
-    if (isActive) {
-      this.refreshInterval = setInterval(() => this.render(), 5000);
+  }
+
+  reportSessionError(message: string): void {
+    this.view?.webview.postMessage({ command: "sessionError", message });
+  }
+
+  /**
+   * Mark the session as submitted. Stops the refresh interval and re-renders
+   * the brief in a read-only state. Without this, the dashboard buttons stay
+   * active and the candidate can resubmit / keep using AI budget after the
+   * server-side state machine has already advanced to DONE.
+   */
+  markSubmitted(): void {
+    this.submitted = true;
+    this._stopRefresh();
+    this.render();
+  }
+
+  setConfig(config: SessionConfig): void {
+    this.config = config;
+    this.submitted = false;
+    this._armRefresh();
+    this.render();
+  }
+
+  private _armRefresh(): void {
+    this._stopRefresh();
+    if (this.disposed) return;
+    this.refreshInterval = setInterval(() => {
+      if (this._sessionExpired()) {
+        this._stopRefresh();
+      }
+      this.render();
+    }, 5000);
+  }
+
+  private _stopRefresh(): void {
+    if (this.refreshInterval) {
+      clearInterval(this.refreshInterval);
+      this.refreshInterval = undefined;
     }
   }
 
-  static show(config: SessionConfig, context: vscode.ExtensionContext): void {
-    if (WelcomePanel.current) {
-      WelcomePanel.current.config = config;
-      WelcomePanel.current.panel.reveal();
-      WelcomePanel.current.render();
+  private _sessionExpired(): boolean {
+    if (!this.config) return false;
+    const deadline = this.config.startedAt + this.config.maxMinutes * 60_000;
+    return Date.now() >= deadline;
+  }
+
+  private _runPrereqChecks(): void {
+    try { execSync("git --version", { stdio: "pipe" }); this.prereqs.git = true; }
+    catch { this.prereqs.git = false; }
+
+    try { execSync("cmake --version", { stdio: "pipe" }); this.prereqs.cmake = true; }
+    catch { this.prereqs.cmake = false; }
+
+    const finish = (ok: boolean) => {
+      if (this.disposed) return;
+      this.prereqs.internet = ok;
+      this.render();
+    };
+    const req = https.request(
+      { hostname: "api.github.com", path: "/", method: "HEAD", timeout: 4000 },
+      (res) => { finish((res.statusCode ?? 0) < 500); }
+    );
+    this._prereqRequest = req;
+    req.on("error", () => finish(false));
+    req.on("timeout", () => { req.destroy(); finish(false); });
+    req.end();
+  }
+
+  private handleMessage(msg: { command: string; sessionKey?: string }): void {
+    if (this.submitted && (msg.command === "runTests" || msg.command === "submit" || msg.command === "openChat")) {
+      vscode.window.showInformationMessage("Session already submitted. Further actions are disabled.");
       return;
     }
-    WelcomePanel.current = new WelcomePanel(config, context);
-  }
-
-  static showOnboarding(context: vscode.ExtensionContext): void {
-    if (WelcomePanel.current) {
-      WelcomePanel.current.panel.reveal();
-      return;
-    }
-    WelcomePanel.current = new WelcomePanel(null, context);
-  }
-
-  private handleMessage(msg: { command: string }): void {
     switch (msg.command) {
       case "startTest":
-        vscode.commands.executeCommand("vibe.enterSessionKey");
+        vscode.commands.executeCommand("vibe.enterSessionKey", msg.sessionKey);
         break;
       case "runTests": {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-        this.checklist = runChecklist(ws);
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!ws) {
+          vscode.window.showErrorMessage(
+            "Open the challenge workspace before running tests."
+          );
+          return;
+        }
+        this.checklist = { basic: null, thread: null, edge: null };
         this.render();
+        runChecklist(ws, this.config?.challengeId).then((result) => {
+          this.checklist = result;
+          this.render();
+        });
         break;
       }
       case "openChat":
-        vscode.commands.executeCommand("vibe.chat.focus");
+        vscode.commands.executeCommand("vibe.openChat");
         break;
       case "submit":
         vscode.commands.executeCommand("vibe.submit");
@@ -68,240 +158,403 @@ export class WelcomePanel {
     }
   }
 
-  private render(): void {
-    this.panel.webview.html = this.config
-      ? this.renderBrief()
-      : this.renderOnboarding();
+  private _toolkitUri(): string {
+    if (!this.view) return "";
+    return this.view.webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "dist", "toolkit.min.js")
+    ).toString();
+  }
+
+  private _cspSource(): string {
+    return this.view?.webview.cspSource ?? "";
+  }
+
+  render(): void {
+    if (!this.view) return;
+    // Bug fix: render decision must be based on session-config presence, not on
+    // whether `workspaceFolders` is populated. When VS Code is reopening the
+    // window after a crash/close, `workspaceFolders` is transiently empty —
+    // gating on it caused the welcome page to flash even though a valid
+    // session was already restored.
+    this.view.webview.html = this.config ? this.renderBrief() : this.renderOnboarding();
+  }
+
+  /** Generate a cryptographically-random CSP nonce for inline scripts. */
+  private _nonce(): string {
+    return crypto.randomBytes(16).toString("base64");
   }
 
   private renderOnboarding(): string {
+    const toolkitUri = this._toolkitUri();
+    const cspSource = this._cspSource();
+    const nonce = this._nonce();
+
+    const prereqRow = (state: boolean | null, label: string, cmd: string) => {
+      const icon = state === true
+        ? `<span class="prereq-ok">&#10003;</span>`
+        : state === false
+        ? `<span class="prereq-fail">&#10007;</span>`
+        : `<span class="prereq-pending">&#8226;</span>`;
+      return `<div class="prereq-row">${icon}<span class="prereq-label">${label}</span><code class="prereq-cmd">${cmd}</code></div>`;
+    };
+
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>JivaHire Vibe Coding Interview</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'nonce-${nonce}'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource};">
+<title>JivaHire — Welcome</title>
+<script type="module" nonce="${nonce}" src="${toolkitUri}"></script>
 <style>
-  * { box-sizing: border-box; }
+  *, *::before, *::after { box-sizing: border-box; }
   body {
     font-family: var(--vscode-font-family);
     background: var(--vscode-editor-background);
     color: var(--vscode-foreground);
     margin: 0; padding: 0;
-    font-size: 13px;
-    line-height: 1.55;
+    font-size: 13px; line-height: 1.6;
   }
-  .page { max-width: 640px; margin: 0 auto; padding: 28px 24px 52px; }
+  .page { max-width: 620px; margin: 0 auto; padding: 16px 12px 40px; }
 
-  /* Hero */
-  .hero {
-    text-align: center;
-    padding: 24px 20px 20px;
-    background: var(--vscode-editor-selectionHighlightBackground, rgba(100,100,255,0.06));
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 10px;
-    margin-bottom: 24px;
-    box-shadow: 0 1px 4px var(--vscode-widget-shadow, rgba(0,0,0,0.12));
+  .brand-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 16px;
   }
-  .hero-badge {
-    display: inline-block;
-    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
-    border-radius: 20px; padding: 3px 10px; margin-bottom: 12px;
-  }
-  .hero h1 { font-size: 19px; font-weight: 700; margin: 0 0 6px; }
-  .hero p { color: var(--vscode-descriptionForeground); margin: 0; font-size: 12.5px; }
-
-  /* Section headers */
-  .section-label {
-    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--vscode-descriptionForeground);
-    margin: 20px 0 8px;
-  }
-
-  /* Step list */
-  .steps { display: flex; flex-direction: column; gap: 1px; }
-  .step {
-    display: flex; gap: 14px; padding: 10px 12px;
-    border-radius: 8px; align-items: flex-start;
-    border: 1px solid transparent;
-    transition: background 0.1s;
-  }
-  .step:hover {
-    background: var(--vscode-list-hoverBackground);
-    border-color: var(--vscode-panel-border);
-  }
-  .step-icon {
-    width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+  .brand-logo {
+    width: 32px; height: 32px; border-radius: 8px;
     background: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     display: flex; align-items: center; justify-content: center;
-    font-size: 14px; margin-top: 1px;
+    font-size: 17px; flex-shrink: 0;
   }
-  .step-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
-  .step-desc { font-size: 12px; color: var(--vscode-descriptionForeground); line-height: 1.55; }
+  .brand-text { display: flex; flex-direction: column; gap: 1px; }
+  .brand-name { font-size: 14px; font-weight: 700; line-height: 1; }
+  .brand-sub { font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1; }
+
+  .card {
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 8px;
+    background: var(--vscode-input-background);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .card-header {
+    display: flex; align-items: center; gap: 7px;
+    padding: 8px 12px 7px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--vscode-descriptionForeground);
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-editor-background);
+  }
+  .card-body { padding: 12px; }
+
+  .session-card {
+    border: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+    border-radius: 8px;
+    background: var(--vscode-input-background);
+    margin-bottom: 10px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-button-background)) inset,
+                0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,0.15));
+  }
+  .session-card-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px 9px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .session-card-header .icon { font-size: 15px; }
+  .session-card-header .title { font-size: 13px; font-weight: 700; }
+  .session-card-body { padding: 12px; }
+  .session-desc {
+    font-size: 12px; color: var(--vscode-descriptionForeground);
+    margin: 0 0 10px; line-height: 1.5;
+  }
+  .input-row { display: flex; gap: 6px; align-items: stretch; }
+  .session-input {
+    flex: 1; min-width: 0;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    border-radius: 4px;
+    padding: 6px 9px;
+    font-size: 12px; font-family: var(--vscode-font-family);
+    outline: none;
+    transition: border-color 0.1s;
+  }
+  .session-input:focus {
+    border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+    outline: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+    outline-offset: -1px;
+  }
+  .session-input::placeholder { color: var(--vscode-input-placeholderForeground); }
+  .session-input.error { border-color: var(--vscode-inputValidation-errorBorder, #f44336); }
+  .start-btn {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none; border-radius: 4px;
+    padding: 6px 13px; font-size: 12px; font-weight: 600;
+    font-family: var(--vscode-font-family);
+    cursor: pointer; white-space: nowrap;
+    transition: opacity 0.1s;
+  }
+  .start-btn:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+  .start-btn:disabled { opacity: 0.6; cursor: default; }
+  .input-hint {
+    margin: 6px 0 0; font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .input-hint kbd {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 10px;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 3px; padding: 1px 4px;
+  }
+
+  .prereq-list { display: flex; flex-direction: column; gap: 2px; }
+  .prereq-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0; font-size: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+  }
+  .prereq-row:last-child { border-bottom: none; }
+  .prereq-ok   { color: #4caf50; font-size: 13px; width: 15px; text-align: center; flex-shrink: 0; }
+  .prereq-fail { color: #f44336; font-size: 13px; width: 15px; text-align: center; flex-shrink: 0; }
+  .prereq-pending { color: var(--vscode-descriptionForeground); font-size: 13px; width: 15px; text-align: center; flex-shrink: 0; }
+  .prereq-label { flex: 1; }
+  .prereq-cmd {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 10.5px; color: var(--vscode-descriptionForeground);
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border);
+    padding: 1px 5px; border-radius: 3px;
+  }
+
+  .steps-list { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex; gap: 10px; padding: 9px 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    align-items: flex-start;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-num {
+    width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; margin-top: 1px;
+  }
+  .step-title { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+  .step-desc { font-size: 11.5px; color: var(--vscode-descriptionForeground); line-height: 1.5; }
   .step-desc strong { color: var(--vscode-foreground); font-weight: 600; }
   .step-desc code {
     font-family: var(--vscode-editor-font-family, monospace);
-    background: var(--vscode-input-background);
-    padding: 1px 5px; border-radius: 3px; font-size: 11px;
-  }
-
-  /* Apply-diff tip callout */
-  .tip {
-    margin: 12px 0;
-    padding: 12px 14px;
-    border-left: 3px solid var(--vscode-button-background);
-    background: var(--vscode-editor-selectionHighlightBackground, rgba(100,100,255,0.05));
-    border-radius: 0 7px 7px 0;
-    font-size: 12px;
-    color: var(--vscode-descriptionForeground);
-  }
-  .tip strong { color: var(--vscode-foreground); }
-  .tip pre {
-    margin: 8px 0 0;
-    font-family: var(--vscode-editor-font-family, monospace);
-    font-size: 11px;
-    background: var(--vscode-input-background);
+    background: var(--vscode-editor-background);
     border: 1px solid var(--vscode-panel-border);
-    border-radius: 5px;
-    padding: 8px 10px;
-    white-space: pre;
-    overflow-x: auto;
-    line-height: 1.5;
+    padding: 1px 4px; border-radius: 3px; font-size: 10.5px;
   }
 
-  /* What gets recorded */
-  .record-list { padding: 0; margin: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+  .tip-card {
+    border-left: 3px solid var(--vscode-button-background);
+    background: var(--vscode-input-background);
+    border-radius: 0 6px 6px 0;
+    padding: 10px 12px; margin-bottom: 10px;
+    border-top: 1px solid var(--vscode-panel-border);
+    border-right: 1px solid var(--vscode-panel-border);
+    border-bottom: 1px solid var(--vscode-panel-border);
+  }
+  .tip-title { font-weight: 600; font-size: 12px; margin-bottom: 5px; }
+  .tip-body { font-size: 11.5px; color: var(--vscode-descriptionForeground); margin: 0 0 7px; line-height: 1.5; }
+  .tip-body strong { color: var(--vscode-foreground); }
+  .tip-pre {
+    margin: 0; font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 10.5px; background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border); border-radius: 4px;
+    padding: 7px 9px; white-space: pre; overflow-x: auto; line-height: 1.5;
+    color: var(--vscode-foreground);
+  }
+
+  .record-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0; }
   .record-list li {
     display: flex; align-items: flex-start; gap: 8px;
-    font-size: 12.5px; color: var(--vscode-descriptionForeground);
-    padding: 4px 0;
+    font-size: 11.5px; color: var(--vscode-descriptionForeground);
+    padding: 5px 12px; border-bottom: 1px solid var(--vscode-panel-border);
   }
-  .record-icon { flex-shrink: 0; font-size: 13px; margin-top: 1px; }
-
-  hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 20px 0; }
-
-  /* CTA */
-  .cta {
-    text-align: center; margin-top: 8px; padding: 22px 20px;
-    background: var(--vscode-editor-selectionHighlightBackground, rgba(100,100,255,0.04));
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 10px;
-    box-shadow: 0 1px 4px var(--vscode-widget-shadow, rgba(0,0,0,0.1));
-  }
-  .cta p { color: var(--vscode-descriptionForeground); font-size: 12.5px; margin: 0 0 14px; }
-  .btn-start {
-    padding: 11px 36px; font-size: 14px; font-weight: 700;
-    cursor: pointer;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none; border-radius: 8px; font-family: inherit;
-    letter-spacing: 0.01em;
-  }
-  .btn-start:hover { background: var(--vscode-button-hoverBackground); }
-  .btn-start:focus-visible {
-    outline: 2px solid var(--vscode-focusBorder);
-    outline-offset: 2px;
+  .record-list li:last-child { border-bottom: none; }
+  .record-list li::before {
+    content: '·'; color: var(--vscode-button-background);
+    font-size: 17px; line-height: 1; flex-shrink: 0; margin-top: -2px;
   }
 </style>
 </head>
 <body>
 <div class="page">
-  <div class="hero">
-    <div class="hero-badge">JivaHire Vibe Coding Interview</div>
-    <h1>Welcome to Your Technical Challenge</h1>
-    <p>A timed, AI-assisted coding challenge. Read this guide carefully before starting.</p>
-  </div>
 
-  <div class="section-label">How It Works</div>
-  <div class="steps">
-    <div class="step">
-      <div class="step-icon">🔑</div>
-      <div class="step-body">
-        <div class="step-title">Enter Your Session Key</div>
-        <div class="step-desc">Click <strong>Start Test</strong> below and enter the session key provided by your recruiter. This validates your access and fetches your workspace configuration.</div>
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-icon">⬇</div>
-      <div class="step-body">
-        <div class="step-title">Workspace Clones Automatically</div>
-        <div class="step-desc">VS Code automatically clones your private challenge repository and reopens in that workspace. <strong>You don't need to do anything</strong> — after a few seconds you'll land directly in the challenge folder with <code>README.md</code> ready to read.</div>
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-icon">📖</div>
-      <div class="step-body">
-        <div class="step-title">Read the Challenge</div>
-        <div class="step-desc">Open <strong>README.md</strong> first. It contains the full problem statement, constraints, and build instructions. The starter code has intentional bugs and gaps — your job is to find and fix them. Plan before you code.</div>
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-icon">🤖</div>
-      <div class="step-body">
-        <div class="step-title">Use the AI Chat Sidebar (GPT-4o-mini)</div>
-        <div class="step-desc">Click the <strong>JivaHire AI</strong> icon in the left activity bar to open the AI chat. Ask the LLM for help, explanations, or code suggestions. You have a fixed dollar budget — use it wisely. <strong>Your prompts are evaluated as part of grading.</strong></div>
-      </div>
+  <div class="brand-header">
+    <div class="brand-logo">&#127381;</div>
+    <div class="brand-text">
+      <div class="brand-name">JivaHire</div>
+      <div class="brand-sub">Technical Interview Platform</div>
     </div>
   </div>
 
-  <div class="tip">
-    <strong>✨ Apply AI code directly to files</strong> — When the AI returns a code block, you'll see an <strong>[Apply]</strong> button. Click it to open a diff view (red = removed, green = added) and accept the change with one click. If no file can be inferred, use <strong>[Copy]</strong> and paste manually.
-    <pre>AI response  ───────────────────────
- \`\`\`cpp file=include/lru_cache.hpp
- class LruCache { ... }
- \`\`\`
- [Apply]  [Copy]
-
-Click Apply  ──▶  Diff editor opens
- Current file  │  AI suggestion
- ──────────────┼─────────────────
- - old_line    │ + new_line
-               │
- [✓ Accept]  [✗ Reject]</pre>
+  <div class="session-card">
+    <div class="session-card-header">
+      <span class="icon">&#128273;</span>
+      <span class="title">Enter Your Session ID to Begin</span>
+    </div>
+    <div class="session-card-body">
+      <p class="session-desc">
+        Paste the session ID your recruiter sent you. Your challenge workspace
+        will clone automatically and the timer will start once validated.
+      </p>
+      <div class="input-row">
+        <input
+          id="sessionKeyInput"
+          type="text"
+          class="session-input"
+          placeholder="Session ID — e.g. ABC-123-XYZ"
+          autofocus
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button class="start-btn" id="startBtn">
+          Begin &#8594;
+        </button>
+      </div>
+      <p class="input-hint">Press <kbd>Enter</kbd> to begin &nbsp;·&nbsp; Contact your recruiter if you don't have a session ID.</p>
+    </div>
   </div>
 
-  <div class="steps" style="margin-top:4px;">
-    <div class="step">
-      <div class="step-icon">🧪</div>
-      <div class="step-body">
-        <div class="step-title">Run Tests &amp; Iterate</div>
-        <div class="step-desc">Use the <strong>Run Tests</strong> button in the Challenge Brief panel (opens automatically after cloning). Fix failures, refine with the AI, repeat. Green = passing, red = failing.</div>
-      </div>
-    </div>
-    <div class="step">
-      <div class="step-icon">🚀</div>
-      <div class="step-body">
-        <div class="step-title">Submit When Ready</div>
-        <div class="step-desc">Click <strong>Submit</strong> in the Challenge Brief. If the timer expires, your work is auto-submitted. Don't wait for the last second — submit early if you're done.</div>
+  <div class="card">
+    <div class="card-header">&#10004; System Requirements</div>
+    <div class="card-body" style="padding:0;">
+      <div class="prereq-list">
+        ${prereqRow(this.prereqs.git, "Git installed", "git --version")}
+        ${prereqRow(this.prereqs.internet, "Internet access", "api.github.com")}
+        ${prereqRow(this.prereqs.cmake, "CMake + C++ compiler", "cmake --version")}
       </div>
     </div>
   </div>
 
-  <hr>
-
-  <div class="section-label">What Gets Recorded</div>
-  <ul class="record-list">
-    <li><span class="record-icon">⌨</span>Typed vs pasted vs AI-applied character counts — the ratio matters for grading.</li>
-    <li><span class="record-icon">💬</span>All AI chat exchanges (<code>.jivahire_chat_log.json</code>) committed to your branch, including prompt quality analysis.</li>
-    <li><span class="record-icon">🔢</span>Token usage per chat turn: input, output, cached, and reasoning tokens.</li>
-    <li><span class="record-icon">📸</span>Automatic code snapshots committed every 3 minutes — creates a tamper-evident timeline.</li>
-    <li><span class="record-icon">✅</span>Test run results and final submission timestamp.</li>
-  </ul>
-
-  <div class="cta">
-    <p>Ready? Enter your session key to begin. The timer starts once your session is validated.</p>
-    <button class="btn-start" onclick="vscode.postMessage({command:'startTest'})">Start Test →</button>
+  <div class="card">
+    <div class="card-header">&#9432; How the Interview Works</div>
+    <div class="steps-list">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div>
+          <div class="step-title">Enter your session ID above</div>
+          <div class="step-desc">VS Code clones your private challenge repo and reopens in that workspace automatically. No manual setup needed.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div>
+          <div class="step-title">Read <strong>README.md</strong> first</div>
+          <div class="step-desc">It contains the full problem statement, constraints, and build instructions. The starter code has intentional bugs and gaps to fix. Plan before you code.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div>
+          <div class="step-title">Use the AI chat</div>
+          <div class="step-desc">Click <strong>Open AI Chat</strong> in the session panel. You have a fixed dollar budget — use it wisely. <strong>Your prompts are evaluated as part of grading.</strong></div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div>
+          <div class="step-title">Run tests and iterate</div>
+          <div class="step-desc">Use <strong>Run Tests</strong> in this panel. Green = passing, red = failing. Fix failures, refine with the AI, repeat.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">5</div>
+        <div>
+          <div class="step-title">Submit when ready</div>
+          <div class="step-desc">Click <strong>Submit</strong> in this panel. Work is auto-submitted when the timer expires — don't wait for the last second.</div>
+        </div>
+      </div>
+    </div>
   </div>
+
+  <div class="tip-card">
+    <div class="tip-title">&#9889; Applying AI Code Suggestions</div>
+    <p class="tip-body">When the AI returns a code block, click <strong>[Apply]</strong> to open a diff view. Use the <strong>Accept AI changes</strong> / <strong>Reject</strong> CodeLens buttons at the top of the diff.</p>
+    <pre class="tip-pre">AI response  ──────────────────────
+\`\`\`cpp file=include/lru_cache.hpp
+class LruCache { ... }
+\`\`\`
+[Apply]  [Copy]
+
+Click Apply ──▶ Diff editor opens
+&#10003; Accept AI changes   &#10007; Reject   ← CodeLens above diff</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-header">&#128247; What Gets Recorded</div>
+    <ul class="record-list">
+      <li>Typed vs pasted vs AI-applied character counts — the ratio matters for grading</li>
+      <li>All AI chat exchanges committed to your branch, including prompt quality analysis</li>
+      <li>Token usage per turn: input, output, cached, and reasoning tokens</li>
+      <li>Automatic code snapshots committed every 3 minutes (tamper-evident timeline)</li>
+      <li>Test results and final submission timestamp</li>
+    </ul>
+  </div>
+
 </div>
-<script>const vscode = acquireVsCodeApi();</script>
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+
+  function startSession() {
+    const input = document.getElementById('sessionKeyInput');
+    const btn   = document.getElementById('startBtn');
+    const key   = input.value.trim();
+    if (!key) {
+      input.classList.add('error');
+      input.focus();
+      input.placeholder = 'Please enter your session ID first';
+      return;
+    }
+    btn.textContent = 'Connecting…';
+    btn.disabled = true;
+    input.disabled = true;
+    vscode.postMessage({ command: 'startTest', sessionKey: key });
+  }
+
+  document.getElementById('sessionKeyInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { startSession(); }
+    else { this.classList.remove('error'); this.placeholder = 'Session ID — e.g. ABC-123-XYZ'; }
+  });
+  // CSP forbids inline event handlers (script-src has no 'unsafe-inline');
+  // wire the Begin button explicitly so a click — not just Enter — works.
+  document.getElementById('startBtn').addEventListener('click', startSession);
+
+  window.addEventListener('message', function(e) {
+    var msg = e.data;
+    if (msg.command === 'sessionError') {
+      var btn = document.getElementById('startBtn');
+      var input = document.getElementById('sessionKeyInput');
+      btn.textContent = 'Begin →';
+      btn.disabled = false;
+      input.disabled = false;
+      input.classList.add('error');
+      input.focus();
+      input.select();
+    }
+  });
+</script>
 </body>
 </html>`;
   }
 
   private renderBrief(): string {
     const config = this.config!;
+    const toolkitUri = this._toolkitUri();
+    const cspSource = this._cspSource();
+    const nonce = this._nonce();
+
     const remaining = Math.max(
       0,
       config.startedAt + config.maxMinutes * 60_000 - Date.now()
@@ -324,7 +577,7 @@ Click Apply  ──▶  Diff editor opens
 
     const checkItem = (label: string, tag: string, state: boolean | null) => {
       const cls = state === true ? "pass" : state === false ? "fail" : "pending";
-      const icon = state === true ? "✓" : state === false ? "✗" : "○";
+      const icon = state === true ? "&#10003;" : state === false ? "&#10007;" : "&#9675;";
       return `<div class="check-item ${cls}">
         <span class="check-icon">${icon}</span>
         <span class="check-label">${label}</span>
@@ -336,124 +589,214 @@ Click Apply  ──▶  Diff editor opens
       ? config.chatModel.replace(/^openai\//, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
       : "GPT-4o-mini";
 
+    // All values below are interpolated into HTML — every server-supplied
+    // string must be HTML-escaped to prevent XSS via challenge metadata.
+    const safeChallengeId = escapeHtml(config.challengeId ?? "");
+    const safeChallengeDesc = escapeHtml(config.challengeDescription || config.challengeId || "");
+    const safeModelLabel = escapeHtml(modelLabel);
+    const submittedBanner = this.submitted
+      ? `<div class="card" style="border-color:#4caf50;"><div class="card-header" style="color:#4caf50;">&#10003; Submitted</div><p class="desc">Session submitted. Grading is in progress — further edits are locked.</p></div>`
+      : "";
+    const actionDisabled = this.submitted ? "disabled" : "";
+
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>JivaHire: Challenge Brief</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'nonce-${nonce}'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource};">
+<title>JivaHire: Session</title>
+<script type="module" nonce="${nonce}" src="${toolkitUri}"></script>
 <style>
-  * { box-sizing: border-box; }
+  *, *::before, *::after { box-sizing: border-box; }
   body {
     font-family: var(--vscode-font-family);
     background: var(--vscode-editor-background);
     color: var(--vscode-foreground);
-    margin: 0; padding: 18px;
+    margin: 0; padding: 12px;
     font-size: 13px; line-height: 1.5;
   }
-  .header {
-    display: flex; justify-content: space-between;
-    align-items: flex-start; margin-bottom: 12px; gap: 12px;
+
+  .topbar {
+    display: flex; align-items: center;
+    justify-content: space-between; gap: 10px;
+    margin-bottom: 10px;
   }
-  .challenge-name { font-size: 15px; font-weight: 700; margin: 0 0 5px; }
-  .meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+  .challenge-info { min-width: 0; }
+  .challenge-name {
+    font-size: 14px; font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 4px;
+  }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px; }
   .badge {
     display: inline-flex; align-items: center; gap: 4px;
-    font-size: 11px; color: var(--vscode-descriptionForeground);
+    font-size: 10.5px; color: var(--vscode-descriptionForeground);
     background: var(--vscode-input-background);
     border: 1px solid var(--vscode-panel-border);
-    border-radius: 10px; padding: 2px 8px;
+    border-radius: 12px; padding: 2px 8px;
   }
-  .timer {
-    font-size: 22px; font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: ${timerColor};
+  .badge-accent {
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-background);
+    border-color: transparent;
+  }
+  .timer-box {
+    flex-shrink: 0; text-align: center;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 7px; padding: 6px 11px;
     background: ${timerBg};
+  }
+  .timer-label {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: ${timerColor}; font-weight: 700; margin-bottom: 2px;
+  }
+  .timer-value {
+    font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;
+    color: ${timerColor}; line-height: 1;
+  }
+
+  .card {
     border: 1px solid var(--vscode-panel-border);
-    border-radius: 8px; padding: 6px 12px; white-space: nowrap;
-    flex-shrink: 0;
+    border-radius: 7px; background: var(--vscode-input-background);
+    margin-bottom: 8px; overflow: hidden;
   }
+  .card-header {
+    padding: 7px 11px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--vscode-descriptionForeground);
+    background: var(--vscode-editor-background);
+    border-bottom: 1px solid var(--vscode-panel-border);
+  }
+
   .desc {
-    font-size: 12.5px; color: var(--vscode-descriptionForeground);
-    margin: 0 0 14px; line-height: 1.55; padding: 10px 12px;
-    background: var(--vscode-input-background);
-    border-left: 3px solid var(--vscode-button-background);
-    border-radius: 0 6px 6px 0;
+    font-size: 12px; color: var(--vscode-descriptionForeground);
+    line-height: 1.5; padding: 9px 11px; margin: 0;
   }
-  hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 14px 0; }
-  .section-title {
-    font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: 0.08em; color: var(--vscode-descriptionForeground); margin-bottom: 8px;
-  }
+  .desc strong { color: var(--vscode-foreground); }
+
+  .check-list { display: flex; flex-direction: column; }
   .check-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 10px; border-radius: 6px; margin-bottom: 4px;
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-panel-border); font-size: 12.5px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 11px; font-size: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
   }
+  .check-item:last-child { border-bottom: none; }
   .check-icon { font-size: 13px; flex-shrink: 0; width: 16px; text-align: center; }
   .check-label { flex: 1; }
-  .check-tag { font-size: 11px; color: var(--vscode-descriptionForeground);
-    font-family: var(--vscode-editor-font-family, monospace); }
+  .check-tag {
+    font-size: 10px; color: var(--vscode-descriptionForeground);
+    font-family: var(--vscode-editor-font-family, monospace);
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border);
+    padding: 1px 5px; border-radius: 3px;
+  }
   .pass .check-icon { color: #4caf50; }
   .fail .check-icon { color: #f44336; }
   .pending .check-icon { color: var(--vscode-descriptionForeground); }
-  .actions { display: flex; flex-direction: column; gap: 7px; margin-top: 18px; }
-  .btn {
-    padding: 9px 14px; cursor: pointer; border: none; border-radius: 7px;
-    font-size: 12.5px; font-weight: 500; font-family: inherit;
-    text-align: left; display: flex; align-items: center; gap: 8px;
-  }
-  .btn:hover { opacity: 0.85; }
-  .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .btn-secondary {
-    background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
-    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+
+  .actions { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .action-btn {
+    width: 100%; padding: 8px 12px;
     border: 1px solid var(--vscode-panel-border);
+    border-radius: 6px; cursor: pointer;
+    font-size: 12.5px; font-family: var(--vscode-font-family);
+    font-weight: 600; text-align: left;
+    display: flex; align-items: center; gap: 8px;
+    transition: background 0.1s;
   }
-  .btn-danger {
-    background: var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.12));
-    color: var(--vscode-errorForeground, #f48771);
-    border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(244,67,54,0.4));
+  .action-btn.primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: transparent;
   }
-  .model-pill {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 11px; padding: 2px 9px;
+  .action-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+  .action-btn.secondary {
     background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 10px;
-    color: var(--vscode-descriptionForeground);
+    color: var(--vscode-foreground);
   }
-  .model-pill span { color: var(--vscode-foreground); font-weight: 600; }
+  .action-btn.secondary:hover { background: var(--vscode-list-hoverBackground); }
+  .action-btn.danger {
+    background: var(--vscode-input-background);
+    color: var(--vscode-foreground);
+    border-color: var(--vscode-panel-border);
+  }
+  .action-btn.danger:hover { background: var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.08)); border-color: #f44336; color: #f44336; }
+  .btn-label { flex: 1; }
+  .btn-hint { font-size: 10.5px; font-weight: 400; opacity: 0.75; }
 </style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <div class="challenge-name">${config.challengeId}</div>
-    <div class="meta">
-      <span class="badge">💰 Budget: $${config.llmBudgetUsd.toFixed(2)}</span>
-      <span class="model-pill">Model: <span>${modelLabel}</span></span>
+
+  <div class="topbar">
+    <div class="challenge-info">
+      <div class="challenge-name">${safeChallengeId}</div>
+      <div class="meta">
+        <span class="badge badge-accent">&#128176; $${config.llmBudgetUsd.toFixed(2)} budget</span>
+        <span class="badge">&#129302; ${safeModelLabel}</span>
+      </div>
+    </div>
+    <div class="timer-box">
+      <div class="timer-label">Time left</div>
+      <div class="timer-value">${timeStr}</div>
     </div>
   </div>
-  <div class="timer">⏱ ${timeStr}</div>
-</div>
-<p class="desc">Deliver a correct, thread-safe, templated LRU cache. See <strong>README.md</strong> for the full spec and build instructions.</p>
-<hr>
-<div class="section-title">Test Checklist</div>
-${checkItem("Single-threaded correctness", "[basic]", this.checklist.basic)}
-${checkItem("Concurrent get/put", "[thread]", this.checklist.thread)}
-${checkItem("Capacity edge cases", "[edge]", this.checklist.edge)}
-<div class="actions">
-  <button class="btn btn-primary" onclick="vscode.postMessage({command:'runTests'})">▶ Run Tests</button>
-  <button class="btn btn-secondary" onclick="vscode.postMessage({command:'openChat'})">💬 Open AI Chat</button>
-  <button class="btn btn-danger" onclick="vscode.postMessage({command:'submit'})">✓ Submit Solution</button>
-</div>
-<script>const vscode = acquireVsCodeApi();</script>
+
+  ${submittedBanner}
+
+  <div class="card">
+    <div class="card-header">Challenge</div>
+    <p class="desc">${safeChallengeDesc}. See <strong>README.md</strong> for the full spec and build instructions.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-header">Test Checklist</div>
+    <div class="check-list">
+      ${checkItem("Single-threaded correctness", "[basic]", this.checklist.basic)}
+      ${checkItem("Concurrent get/put", "[thread]", this.checklist.thread)}
+      ${checkItem("Capacity edge cases", "[edge]", this.checklist.edge)}
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="action-btn primary" data-action="runTests" ${actionDisabled}>
+      <span>&#9654;</span>
+      <span class="btn-label">Run Tests</span>
+      <span class="btn-hint">build &amp; execute test suite</span>
+    </button>
+    <button class="action-btn secondary" data-action="openChat" ${actionDisabled}>
+      <span>&#128172;</span>
+      <span class="btn-label">Open AI Chat</span>
+      <span class="btn-hint">opens in right sidebar →</span>
+    </button>
+    <button class="action-btn danger" data-action="submit" ${actionDisabled}>
+      <span>&#10003;</span>
+      <span class="btn-label">Submit Solution</span>
+      <span class="btn-hint">finalises &amp; locks your branch</span>
+    </button>
+  </div>
+
+<script nonce="${nonce}">
+  const vscode = acquireVsCodeApi();
+  // CSP forbids inline event handlers; wire actions via data-action attributes.
+  document.querySelectorAll('button[data-action]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (btn.hasAttribute('disabled')) return;
+      vscode.postMessage({ command: btn.getAttribute('data-action') });
+    });
+  });
+</script>
 </body>
 </html>`;
   }
 
   dispose(): void {
-    if (this.refreshInterval) clearInterval(this.refreshInterval);
+    this.disposed = true;
+    this._stopRefresh();
+    // Cancel the in-flight prereq HTTPS request so its callbacks don't fire on
+    // a disposed provider (and so we don't leak the underlying socket).
+    if (this._prereqRequest) {
+      try { this._prereqRequest.destroy(); } catch { /* swallow */ }
+      this._prereqRequest = undefined;
+    }
   }
 }

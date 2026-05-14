@@ -32,7 +32,16 @@
       "Bash(pkill -f \"uvicorn vibe.main\")",
       "Bash(pkill -f \"vibe.worker\")",
       "Bash(pkill -f uvicorn)",
-      "Bash(echo \"server=$! worker=$!\" sleep 4)"
-    ]
-  }
+      "Bash(echo \"server=$! worker=$!\" sleep 4)",
+      "Bash(python -m pytest tests/test_e2e.py -v)",
+      "Bash(npm install *)",
+      "Bash(docker compose up *)",
+      "Bash(docker compose *)",
+      "Bash(grep -n -E \"^#{1,4} \" /home/ubuntu/vibe-coding-test/vibe_interview_plan_enhanced.md)",
+      "Skill(update-config)",
+      "Bash(grep -E \"\\\\.py$\")"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true
 }

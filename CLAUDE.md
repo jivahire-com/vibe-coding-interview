@@ -12,7 +12,7 @@ This repository currently contains a single specification document: `vibe_interv
 
 1. **VS Code Extension** (TypeScript) — installs on the candidate's machine; handles session auth, challenge workspace setup, AI chat proxying, telemetry collection, auto-commits, and a countdown timer.
 2. **Django Backend** (Python) — manages interview sessions, ingests telemetry, triggers async grading, and serves recruiter dashboards.
-3. **LLM Sidecar** — proxies candidate chat to OpenAI GPT-4o, enforces per-session token budgets.
+3. **LLM Proxy** (`server/vibe/llm_proxy.py`) — proxies candidate chat to the configured model via OpenRouter, enforces per-session token budgets in-process against SQLite (`sessions.llm_spent_usd` vs `llm_budget_usd`).
 4. **Challenge Repos** — private GitHub repos, one per challenge; candidate gets an isolated `interview/<session_id>` branch.
 
 ## Extension: Build Commands
@@ -117,4 +117,4 @@ These apply whenever writing code in this repo:
 - Session keys must be rate-limited (5 attempts/IP/hour) before any DB lookup.
 - The `.jivahire/` directory in challenge repos (rubric, traps, hidden tests) must be stripped before creating the candidate branch — verify this in branch-creation logic.
 - GitHub tokens are short-lived installation tokens (~1 hour); never store long-lived PATs.
-- Per-session LLM budget ($2.00 default) is enforced by the sidecar, not the extension — the extension should respect 402 responses from the sidecar.
+- Per-session LLM budget ($2.00 default) is enforced by `llm_proxy.py` against `sessions.llm_spent_usd` — the extension should respect 402 responses from `POST /api/v1/llm/chat/completions`.

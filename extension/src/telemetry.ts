@@ -8,14 +8,20 @@ interface TelemetryEvent {
   ts: number;
   event_type: string;
   payload: Record<string, unknown>;
+  // Bug #12: a per-event identity so an unshift-on-failure cannot duplicate
+  // an event that was already accepted by the server in a concurrent flush.
+  id: string;
 }
 
 const BUFFER_KEY = "vibe.telemetry.buffer";
 const FLUSH_INTERVAL_MS = 10_000;
 const FLUSH_THRESHOLD = 500;
 
-// Tracks per-file typed-char aggregates flushed every ~1s
-const _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
+let _idCounter = 0;
+function _nextId(): string {
+  _idCounter += 1;
+  return `${Date.now()}.${process.pid}.${_idCounter}`;
+}
 
 // Flag set by apply.ts before WorkspaceEdit so the change-listener skips it
 let _suppressNextApply = false;
@@ -30,6 +36,11 @@ export class TelemetryTracker implements vscode.Disposable {
   private _disposables: vscode.Disposable[] = [];
   private _config: SessionConfig;
   private _context: vscode.ExtensionContext;
+  private _lastUnfocusedAt: number | null = null;
+  private _justRefocusedUntil: number = 0;
+  private _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
+  /** Bug #12: prevents overlapping flushes from double-sending the same batch. */
+  private _flushInFlight = false;
 
   constructor(config: SessionConfig, context: vscode.ExtensionContext) {
     this._config = config;
@@ -37,19 +48,34 @@ export class TelemetryTracker implements vscode.Disposable {
 
     // Restore any buffered events from previous session
     const saved = context.globalState.get<TelemetryEvent[]>(BUFFER_KEY, []);
-    this._buffer = saved;
+    // Migration: older buffers may not have `id`. Assign synthetic ids so the
+    // dedup logic still works for old events.
+    this._buffer = saved.map((e) => (e.id ? e : { ...e, id: _nextId() }));
 
     this._disposables.push(
-      vscode.workspace.onDidChangeTextDocument((e) => this._onDocChange(e))
+      vscode.workspace.onDidChangeTextDocument((e) => this._onDocChange(e)),
+      vscode.window.onDidChangeWindowState((state) => this._onWindowState(state))
     );
 
-    this._flushTimer = setInterval(() => this._flush(), FLUSH_INTERVAL_MS);
+    this._flushTimer = setInterval(() => { void this._flush(); }, FLUSH_INTERVAL_MS);
   }
 
   emit(event_type: string, payload: Record<string, unknown>): void {
-    this._buffer.push({ ts: Date.now(), event_type, payload });
+    this._buffer.push({ ts: Date.now(), event_type, payload, id: _nextId() });
     if (this._buffer.length >= FLUSH_THRESHOLD) {
-      this._flush();
+      void this._flush();
+    }
+  }
+
+  private _onWindowState(state: vscode.WindowState): void {
+    if (!state.focused) {
+      this._lastUnfocusedAt = Date.now();
+      this.emit("app_unfocused", { ts: this._lastUnfocusedAt });
+    } else if (this._lastUnfocusedAt !== null) {
+      const time_away_seconds = (Date.now() - this._lastUnfocusedAt) / 1000;
+      this._justRefocusedUntil = Date.now() + 3000;
+      this._lastUnfocusedAt = null;
+      this.emit("app_focused", { time_away_seconds });
     }
   }
 
@@ -71,7 +97,8 @@ export class TelemetryTracker implements vscode.Disposable {
           this.emit("edit_ai_applied", { file: rel, chars: change.text.length });
           continue;
         }
-        this.emit("edit_pasted", { file: rel, chars: change.text.length });
+        const suspicious_paste = Date.now() < this._justRefocusedUntil;
+        this.emit("edit_pasted", { file: rel, chars: change.text.length, suspicious_paste });
       } else if (change.text.length > 0 || change.rangeLength > 0) {
         if (_suppressNextApply) {
           _suppressNextApply = false;
@@ -79,38 +106,51 @@ export class TelemetryTracker implements vscode.Disposable {
           continue;
         }
         // Aggregate per-file to avoid one event per keystroke
-        this._aggregateTyped(rel, change.text.length || change.rangeLength);
+        if (change.text.length > 0) {
+          this._aggregateTyped(rel, change.text.length);
+        }
       }
     }
   }
 
   private _aggregateTyped(file: string, chars: number): void {
-    const existing = _typedAgg.get(file);
+    const existing = this._typedAgg.get(file);
     if (existing) {
       existing.chars += chars;
     } else {
       const timer = setTimeout(() => {
-        const agg = _typedAgg.get(file);
+        const agg = this._typedAgg.get(file);
         if (agg) {
           this.emit("edit_typed", { file, chars: agg.chars });
-          _typedAgg.delete(file);
+          this._typedAgg.delete(file);
         }
       }, 1000);
-      _typedAgg.set(file, { chars, timer });
+      this._typedAgg.set(file, { chars, timer });
     }
   }
 
-  private _flush(): void {
+  private async _flush(): Promise<void> {
+    if (this._flushInFlight) return;
     if (this._buffer.length === 0) return;
+    this._flushInFlight = true;
     const batch = this._buffer.splice(0, this._buffer.length);
-    // Persist remainder to globalState (offline safety)
-    this._context.globalState.update(BUFFER_KEY, this._buffer);
-
-    this._post(batch).catch(() => {
-      // Put failed events back at front of buffer
-      this._buffer.unshift(...batch);
-      this._context.globalState.update(BUFFER_KEY, this._buffer);
-    });
+    try {
+      // Bug fix: AWAIT globalState.update so an extension-host crash mid-post
+      // doesn't lose events that we'd already removed from in-memory state.
+      await this._context.globalState.update(BUFFER_KEY, this._buffer);
+      try {
+        await this._post(batch);
+      } catch {
+        // Put failed events back at the front, but dedup against anything that
+        // came in during the in-flight POST so we don't double-count.
+        const seen = new Set(this._buffer.map((e) => e.id));
+        const restored = batch.filter((e) => !seen.has(e.id));
+        this._buffer = restored.concat(this._buffer);
+        await this._context.globalState.update(BUFFER_KEY, this._buffer);
+      }
+    } finally {
+      this._flushInFlight = false;
+    }
   }
 
   private _post(events: TelemetryEvent[]): Promise<void> {
@@ -123,7 +163,7 @@ export class TelemetryTracker implements vscode.Disposable {
         {
           hostname: url.hostname,
           port: url.port,
-          path: url.pathname,
+          path: url.pathname + url.search,
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -135,7 +175,6 @@ export class TelemetryTracker implements vscode.Disposable {
           res.on("data", () => {});
           res.on("end", () => {
             if (res.statusCode && res.statusCode < 300) {
-              this._context.globalState.update(BUFFER_KEY, []);
               resolve();
             } else {
               reject(new Error(`Telemetry HTTP ${res.statusCode}`));
@@ -153,7 +192,7 @@ export class TelemetryTracker implements vscode.Disposable {
     if (this._flushTimer) clearInterval(this._flushTimer);
     this._flush();
     for (const d of this._disposables) d.dispose();
-    for (const agg of _typedAgg.values()) clearTimeout(agg.timer);
-    _typedAgg.clear();
+    for (const agg of this._typedAgg.values()) clearTimeout(agg.timer);
+    this._typedAgg.clear();
   }
 }

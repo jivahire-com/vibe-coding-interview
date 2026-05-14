@@ -2,13 +2,15 @@
   "name": "jivahire-vibe-coding-interview",
   "displayName": "JivaHire Vibe Coding Interview",
   "description": "AI-aware coding interview platform by JivaHire",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "publisher": "jivahire",
   "engines": {
     "vscode": "^1.85.0"
   },
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:vibe.dashboard",
+    "onView:vibe.chat"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -28,6 +30,18 @@
       {
         "command": "vibe.submit",
         "title": "JivaHire: Submit"
+      },
+      {
+        "command": "vibe.acceptAiChanges",
+        "title": "Accept AI changes"
+      },
+      {
+        "command": "vibe.rejectAiChanges",
+        "title": "Reject"
+      },
+      {
+        "command": "vibe.openChat",
+        "title": "JivaHire: Open AI Chat"
       }
     ],
     "viewsContainers": {
@@ -37,13 +51,27 @@
           "title": "JivaHire AI",
           "icon": "$(comment-discussion)"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "vibe-chat-panel",
+          "title": "JivaHire Chat",
+          "icon": "$(comment-discussion)"
+        }
       ]
     },
     "views": {
       "vibe-sidebar": [
         {
+          "id": "vibe.dashboard",
+          "name": "JivaHire",
+          "type": "webview"
+        }
+      ],
+      "vibe-chat-panel": [
+        {
           "id": "vibe.chat",
-          "name": "AI Chat",
+          "name": "JivaHire Chat",
           "type": "webview"
         }
       ]
@@ -53,13 +81,20 @@
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "lint": "tsc --noEmit",
-    "package": "vsce package --no-dependencies"
+    "package": "vsce package --no-dependencies",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@vscode/webview-ui-toolkit": "^1.4.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^25.6.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.24.0",
     "esbuild": "^0.20.0",
+    "jest": "^30.4.0",
+    "ts-jest": "^29.4.9",
     "typescript": "^5.4.0"
   }
 }

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ttl-cache-challenge"
+version = "0.1.0"
+description = "Thread-safe TTL cache coding challenge"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["ttl_cache"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "basic: basic single-threaded correctness",
+    "thread: concurrent access correctness",
+    "edge: edge cases (capacity=0, update semantics)",
+    "ttl: TTL expiry behaviour",
+]

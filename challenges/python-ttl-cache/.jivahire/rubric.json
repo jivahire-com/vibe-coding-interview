@@ -1,0 +1,40 @@
+{
+  "challenge_id": "python-ttl-cache",
+  "title": "Thread-Safe TTL Cache",
+  "description": "Make an existing TTL cache implementation thread-safe, enforce TTL expiry on reads, and fix planted bugs in eviction and edge-case handling. Get/put must remain amortised O(1).",
+  "language": "python",
+  "code_fence": "python",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 90,
+  "submission_files": ["src/ttl_cache.py"],
+  "starter_code_note": "The data-structure choice (collections.OrderedDict with move_to_end-based promotion) is provided in the starter code. The candidate is expected to add synchronisation, fix the off-by-one in the eviction loop, handle capacity=0, and enforce TTL on get(). Do NOT credit them for the algorithm or data-structure choice.",
+  "code_quality_criteria": [
+    "Correctness (does it pass the tests and fix the planted traps?)",
+    "Thread safety (lock placement, no data races on OrderedDict)",
+    "Idiomatic Python (typing, context managers, time.monotonic for TTL)",
+    "Clarity and naming"
+  ],
+  "architectural_criteria": [
+    "Synchronisation primitive choice (threading.Lock vs threading.RLock)",
+    "Lock placement and granularity (per-method, scope of critical section)",
+    "Deadlock avoidance (no nested locking, careful with reentrant calls)",
+    "Edge case handling (capacity=0 no-op, eviction boundary off-by-one, TTL on get)",
+    "Monotonic time source (time.monotonic vs time.time for TTL comparisons)"
+  ],
+  "tasks": [
+    {"id": "basic",         "points": 25, "test_tag": "basic"},
+    {"id": "thread_safety", "points": 30, "test_tag": "thread"},
+    {"id": "edge_cases",    "points": 20, "test_tag": "edge"},
+    {"id": "ttl_expiry",    "points": 25, "test_tag": "ttl"}
+  ],
+  "composite_weights": {
+    "test_score":  0.25,
+    "trap_score":  0.15,
+    "code_quality": 0.25,
+    "ai_orchestration": 0.20,
+    "architectural_reasoning": 0.15
+  },
+  "total_points": 100,
+  "expected_tokens": 30000
+}

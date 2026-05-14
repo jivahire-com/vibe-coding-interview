@@ -24,12 +24,20 @@ app.include_router(llm_router)
 from fastapi.responses import FileResponse
 
 _static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
-_vsix_path = os.path.join(os.path.dirname(__file__), "..", "..", "extension",
-                          "jivahire-vibe-coding-interview-0.1.0.vsix")
+_ext_dir = os.path.join(os.path.dirname(__file__), "..", "..", "extension")
+
+def _find_vsix() -> str:
+    import glob
+    matches = sorted(glob.glob(os.path.join(_ext_dir, "jivahire-vibe-coding-interview-*.vsix")))
+    return os.path.abspath(matches[-1]) if matches else ""
 
 @app.get("/jivahire-vibe-coding-interview.vsix", include_in_schema=False)
 def download_vsix():
-    return FileResponse(os.path.abspath(_vsix_path),
+    vsix = _find_vsix()
+    if not vsix:
+        from fastapi import HTTPException
+        raise HTTPException(404, "VSIX not found")
+    return FileResponse(vsix,
                         media_type="application/octet-stream",
                         filename="jivahire-vibe-coding-interview.vsix")
 

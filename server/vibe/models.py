@@ -24,6 +24,7 @@ class ValidateSessionResponse(BaseModel):
     llm_budget_usd: float
     challenge_id: str
     chat_model: str
+    available_chat_models: list[str]
 
 
 class TelemetryEvent(BaseModel):
@@ -43,3 +44,4 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
+    model: str | None = None

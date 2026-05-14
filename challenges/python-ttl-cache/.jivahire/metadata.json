@@ -1,0 +1,12 @@
+{
+  "challenge_id": "python-ttl-cache",
+  "title": "Thread-Safe TTL Cache",
+  "language": "python",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 90,
+  "tags": ["data-structures", "concurrency", "caching"],
+  "public_test_file": "tests/test_public.py",
+  "hidden_test_file": "tests/test_hidden.py",
+  "grader": "python"
+}

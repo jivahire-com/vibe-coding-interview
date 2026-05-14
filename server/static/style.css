@@ -307,13 +307,18 @@ tbody td { padding: 12px 16px; vertical-align: middle; }
 .stat-item .stat-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
 
 .summary-card { margin-bottom: 16px; }
-.summary-text {
-  font-size: 14px;
-  line-height: 1.65;
+.summary-line {
+  font-size: 13.5px;
+  line-height: 1.6;
   color: var(--text);
-  white-space: pre-wrap;
   word-break: break-word;
+  padding: 10px 14px;
+  border-left: 3px solid var(--border);
+  margin-bottom: 8px;
+  background: var(--bg);
+  border-radius: 0 6px 6px 0;
 }
+.summary-line:last-child { margin-bottom: 0; }
 
 /* ─── Invite Drawer ─── */
 .overlay {

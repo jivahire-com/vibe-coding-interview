@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./extension:/app/extension:ro
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/vibe.db
+      CHALLENGES_DIR: /app/challenges
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    volumes:
+      - ./data:/app/data
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/vibe.db
+      CHALLENGES_DIR: /app/challenges
+    depends_on:
+      - backend
+    restart: unless-stopped

@@ -72,3 +72,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status, created_at);
+
+CREATE TABLE IF NOT EXISTS grading_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    ts INTEGER NOT NULL,
+    user_message TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    error_class TEXT,
+    traceback TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_grading_errors_session ON grading_errors(session_id, ts);

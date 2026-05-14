@@ -1,0 +1,32 @@
+{
+  "traps": [
+    {
+      "id": "race",
+      "description": "No lock: get/put mutate OrderedDict (move_to_end, popitem, __setitem__) without synchronisation. CPython's GIL does not make these compound operations atomic.",
+      "detection_tag": "thread",
+      "points": 20,
+      "severity": 2
+    },
+    {
+      "id": "off_by_one",
+      "description": "Eviction loop uses > capacity instead of >= capacity; cache grows one entry beyond limit before evicting.",
+      "detection_tag": "basic",
+      "points": 10,
+      "severity": 2
+    },
+    {
+      "id": "capacity_zero",
+      "description": "capacity=0: eviction check (0 > 0) is false, so first put inserts an entry instead of being a no-op.",
+      "detection_tag": "edge",
+      "points": 10,
+      "severity": 3
+    },
+    {
+      "id": "ttl_not_enforced",
+      "description": "get() does not check TTL; expired entries are returned as if still valid. The starter stores inserted_at but never compares it to time.monotonic() - ttl.",
+      "detection_tag": "ttl",
+      "points": 15,
+      "severity": 2
+    }
+  ]
+}

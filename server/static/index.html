@@ -63,6 +63,7 @@
         <option value="active">Active</option>
         <option value="submitted">Submitted</option>
         <option value="graded">Graded</option>
+        <option value="grading_failed">Grading Failed</option>
       </select>
 
       <button class="btn btn-ghost btn-sm ml-auto" @click="loadSessions()" title="Refresh">
@@ -142,6 +143,24 @@
     </div>
 
     <div x-show="detailError" class="error-banner" x-text="detailError"></div>
+
+    <!-- Grading errors -->
+    <template x-if="selectedSession?.grading_errors?.length > 0">
+      <div>
+        <template x-for="err in selectedSession.grading_errors" :key="err.id">
+          <div class="error-banner" style="margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+              <span x-text="err.user_message"></span>
+              <span class="text-sm text-muted" style="white-space:nowrap" x-text="formatDate(err.ts / 1000)"></span>
+            </div>
+            <details style="margin-top:6px">
+              <summary style="cursor:pointer;font-size:12px;opacity:0.8">Show details (stage: <span x-text="err.stage"></span>)</summary>
+              <pre style="margin:6px 0 0;font-size:11px;white-space:pre-wrap;word-break:break-all;opacity:0.85" x-text="err.traceback || '(no traceback)'"></pre>
+            </details>
+          </div>
+        </template>
+      </div>
+    </template>
 
     <!-- Loading skeleton -->
     <div x-show="!selectedSession && !detailError" style="text-align:center;padding:60px">
@@ -257,6 +276,16 @@
                 <div class="stat-val" x-text="selectedSession.chat_exchanges.length"></div>
                 <div class="stat-sub">exchanges</div>
               </div>
+              <div class="stat-item">
+                <div class="stat-label">Window switches</div>
+                <div class="stat-val" :class="selectedSession.window_switches > 0 ? 'score-warn' : ''" x-text="selectedSession.window_switches ?? 0"></div>
+                <div class="stat-sub">focus losses</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Suspicious pastes</div>
+                <div class="stat-val" :class="selectedSession.suspicious_pastes > 0 ? 'score-poor' : ''" x-text="selectedSession.suspicious_pastes ?? 0"></div>
+                <div class="stat-sub">paste after refocus</div>
+              </div>
             </div>
           </div>
 
@@ -292,7 +321,9 @@
         <template x-if="selectedSession.grade?.grader_summary">
           <div class="card summary-card">
             <h3>Grader Summary</h3>
-            <p class="summary-text" x-text="selectedSession.grade.grader_summary"></p>
+            <template x-for="line in selectedSession.grade.grader_summary.split(' | ')" :key="line">
+              <p class="summary-line" x-text="line"></p>
+            </template>
           </div>
         </template>
       </div>

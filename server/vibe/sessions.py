@@ -4,7 +4,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from vibe.auth import check_rate_limit, get_session
-from vibe.config import settings
+from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
 from vibe.email import send_invite
 from vibe.models import (
@@ -48,6 +48,7 @@ def list_challenges(x_admin_token: str = Header(None)):
 
 
 @router.post("/sessions", status_code=201)
+@router.post("/admin/invites", status_code=201)
 async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(None)):
     if x_admin_token != settings.admin_token:
         raise HTTPException(403, "Forbidden")
@@ -83,24 +84,30 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
     if session["status"] not in ("pending", "active"):
         raise HTTPException(409, f"Session is {session['status']}")
 
+    repo = repo_for_challenge(session["challenge_id"])
+    if not repo:
+        raise HTTPException(500, "Server misconfigured: no challenge repo configured")
+
     if session["status"] == "pending":
-        await _create_github_branch(session["branch_name"])
+        await _create_github_branch(repo, session["branch_name"])
         execute(
             "UPDATE sessions SET status='active', started_at=? WHERE id=?",
             (int(time.time()), session["id"]),
         )
 
-    repo_url = f"https://github.com/{settings.github_challenges_repo}"
+    repo_url = f"https://github.com/{repo}"
+    allowed_models = [m.strip() for m in settings.candidate_chat_models.split(",")]
     return ValidateSessionResponse(
         session_id=session["id"],
         repo_url=repo_url,
         branch=session["branch_name"],
         github_clone_token=settings.github_bot_pat,
-        llm_proxy_url=str(request.base_url).rstrip("/"),
+        llm_proxy_url=settings.app_public_url.rstrip("/"),
         max_minutes=session["max_minutes"],
         llm_budget_usd=session["llm_budget_usd"],
         challenge_id=session["challenge_id"],
         chat_model=settings.chat_model,
+        available_chat_models=allowed_models,
     )
 
 
@@ -118,20 +125,38 @@ def get_session_detail(session_id: str, x_admin_token: str = Header(None)):
         "WHERE session_id = ? ORDER BY ts",
         (session_id,),
     )
+    focus_rows = query(
+        "SELECT event_type, payload FROM telemetry "
+        "WHERE session_id = ? AND event_type IN ('app_unfocused', 'app_focused') ORDER BY ts",
+        (session_id,),
+    )
+    window_switches = sum(1 for r in focus_rows if r["event_type"] == "app_unfocused")
+    suspicious_pastes = query(
+        "SELECT COUNT(*) as cnt FROM telemetry "
+        "WHERE session_id = ? AND event_type = 'edit_pasted' "
+        "AND json_extract(payload, '$.suspicious_paste') = 1",
+        (session_id,),
+    )
+    grading_errors = query(
+        "SELECT id, ts, user_message, stage, error_class, traceback FROM grading_errors WHERE session_id = ? ORDER BY ts",
+        (session_id,),
+    )
     return {
         "session": rows[0],
         "grade": grades[0] if grades else None,
         "chat_exchanges": exchanges,
+        "window_switches": window_switches,
+        "suspicious_pastes": suspicious_pastes[0]["cnt"] if suspicious_pastes else 0,
+        "grading_errors": grading_errors,
     }
 
 
-async def _create_github_branch(branch_name: str) -> None:
+async def _create_github_branch(repo: str, branch_name: str) -> None:
     headers = {
         "Authorization": f"Bearer {settings.github_bot_pat}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    repo = settings.github_challenges_repo
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             f"https://api.github.com/repos/{repo}/git/ref/heads/main",

@@ -3,12 +3,13 @@ import subprocess
 from pathlib import Path
 
 
-def build_and_test(clone_dir: Path, hidden_test_src: Path) -> tuple[dict[str, bool], str]:
+def build_and_test(clone_dir: Path, hidden_test_src: Path, tags: list[str]) -> tuple[dict[str, bool], str]:
     """
     Copy hidden tests into clone, build with CMake + TSan, run per-tag.
     Returns (tag_results, raw_output).
     """
-    shutil.copy(hidden_test_src, clone_dir / "tests" / "hidden_test.cpp")
+    # CMake glob in challenge CMakeLists requires the `.cpp` extension; keep the source name.
+    shutil.copy(hidden_test_src, clone_dir / "tests" / hidden_test_src.name)
 
     output_lines = []
 
@@ -44,7 +45,7 @@ def build_and_test(clone_dir: Path, hidden_test_src: Path) -> tuple[dict[str, bo
 
     test_bin = build_dir / "tests"
     tag_results: dict[str, bool] = {}
-    for tag in ["[basic]", "[thread]", "[edge]"]:
+    for tag in tags:
         r = run([str(test_bin), tag], timeout=30)
         tag_results[tag] = r.returncode == 0
 
