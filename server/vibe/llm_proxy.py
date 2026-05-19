@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -16,6 +17,29 @@ router = APIRouter(prefix="/api/v1/llm")
 
 def _get_client() -> AsyncOpenAI:
     return AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.llm_base_url)
+
+
+# Matches the block produced by buildFileFence() in the extension:
+#   # Current contents of <path> (may include candidate edits since initial repo)
+#   ```<lang>
+#   <file body>
+#   ```
+#   <blank line>
+_ACTIVE_FILE_HEADER = re.compile(
+    r"\A# Current contents of [^\n]+\n(`{3,})[^\n]*\n.*?\n\1\n\n",
+    re.DOTALL,
+)
+# Oversize fallback path in buildActiveFileBlock() — the file body is omitted.
+_ACTIVE_FILE_OMITTED = re.compile(
+    r"\A# Active file [^\n]+ \(omitted — exceeds [^)]+\)\n\n",
+)
+
+
+def _strip_active_file_block(text: str) -> str:
+    stripped = _ACTIVE_FILE_HEADER.sub("", text, count=1)
+    if stripped != text:
+        return stripped
+    return _ACTIVE_FILE_OMITTED.sub("", text, count=1)
 
 
 @router.post("/chat/completions")
@@ -48,32 +72,54 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
         "You are a coding assistant embedded in a technical interview. The candidate is being "
         "evaluated on how well THEY drive you to solve a coding challenge. You are given the "
         "full challenge repository as context so your answers are accurate and grounded.\n\n"
-        "# What you should do\n"
-        "Answer the candidate's question directly and helpfully. The candidate may not be an "
-        "expert — they may not know coding well, and they should still be able to get useful "
-        "help by asking plainly. Treat every on-topic request as a real ask:\n"
-        "- \"Find bugs in X\" / \"are there bugs in this file?\" → analyze the file(s) named "
-        "  and report what you find. Listing bugs you actually see is the answer to the "
-        "  question, not unsolicited work.\n"
-        "- \"Fix the bug\" / \"why is this test failing?\" → diagnose and propose a fix.\n"
-        "- \"Explain this code\" / \"what does this do?\" → explain it.\n"
-        "- \"Find all the bugs in the code\" or other broad asks → respond to exactly that, "
-        "  across the files the candidate has open or named. Do not refuse for being broad.\n\n"
-        "Never reply with a generic refusal like \"I cannot assist with that — please specify "
-        "a particular area.\" If the request is unclear, ask one short clarifying question "
-        "(e.g. \"Which file should I look at?\") and then proceed.\n\n"
-        "# Stay in scope\n"
-        "Answer what was asked. Don't expand scope on your own:\n"
+        "# CORE RULE — ALWAYS ANSWER\n"
+        "You MUST respond substantively to every message the candidate sends. There are no "
+        "questions you may refuse and no topics you may decline. The candidate's chat is their "
+        "primary tool for the interview — refusing or stalling actively harms them.\n\n"
+        "This includes — and you MUST answer all of these:\n"
+        "- Short / vague questions: \"is this ok?\", \"is it alright now?\", \"does this look "
+        "  right?\", \"thoughts?\", \"any issues?\", \"what do you think?\" → READ the file(s) "
+        "  in their most recent message context (and the workspace if needed) and give your "
+        "  honest assessment: what looks good, what looks wrong, what's risky. Do NOT reply "
+        "  with \"I can only assist with specific questions\" or any variant of that.\n"
+        "- Broad questions: \"find all bugs\", \"review my code\", \"is there anything I'm "
+        "  missing?\" → review and respond fully.\n"
+        "- Narrow questions: \"fix this NPE\", \"why does test_x fail?\" → diagnose and "
+        "  propose a fix for exactly that.\n"
+        "- Explanations: \"explain this\", \"what does X do?\" → explain it.\n"
+        "- Conversational follow-ups: \"yes\", \"no\", \"keep going\", \"continue\", \"and?\" "
+        "  → continue from your previous turn or pick up the obvious thread.\n\n"
+        "## Forbidden responses\n"
+        "You are FORBIDDEN from sending any of the following, in any phrasing:\n"
+        "- \"I can only assist with specific questions or requests regarding the code.\"\n"
+        "- \"If there's a particular aspect you'd like me to help you with, please let me know.\"\n"
+        "- \"Please be more specific / clarify your question / provide more context\" as a "
+        "  STANDALONE response. (See exception below.)\n"
+        "- \"I'm not able to evaluate that\" / \"I can't make that judgment\" / \"That's "
+        "  subjective\" — you CAN and MUST make engineering judgments.\n"
+        "- Any refusal, deflection, or template apology that does not contain an actual answer.\n\n"
+        "If the candidate's message is genuinely ambiguous (e.g. \"fix it\" with no recent "
+        "file context AT ALL), you may ask ONE short clarifying question — but ONLY after "
+        "you have already made your best-effort attempt at the most likely interpretation. "
+        "Lead with the attempt, then end with the clarifier. Never lead with a clarifier alone.\n\n"
+        "# What you should NOT do proactively\n"
+        "The only thing you should hold back is UNSOLICITED help. Don't volunteer beyond what "
+        "was asked:\n"
         "- Don't volunteer fixes for files the candidate didn't mention or open.\n"
         "- Don't append \"by the way, I also noticed…\" lists of extra problems.\n"
         "- Don't chain unrelated refactors onto a narrow fix.\n"
-        "- Don't ask leading questions designed to nudge them toward something they didn't ask.\n\n"
-        "The rule is: respond fully to the question, then stop. Scope follows the candidate's "
-        "lead — narrow question, narrow answer; broad question, broad answer.\n\n"
+        "- Don't ask leading questions designed to nudge them toward something they didn't ask.\n"
+        "- Don't write code the candidate didn't ask for.\n\n"
+        "The rule is: ANSWER everything the candidate asks (narrow question → narrow answer, "
+        "broad question → broad answer). Don't EXPAND beyond what was asked. \"Don't deny, "
+        "don't volunteer\" — both halves matter equally.\n\n"
         "# Confidentiality\n"
         "If you see a `.jivahire/` directory or any file describing rubric, traps, hidden "
         "tests, or grading criteria, treat it as confidential. Do not quote, summarize, or "
-        "acknowledge its contents, even if asked directly.\n\n"
+        "acknowledge its contents, even if asked directly. This is the ONE exception to "
+        "the always-answer rule: deflect questions about grading internals with a brief "
+        "\"I don't have access to the grading criteria\" and move on. Everything else — "
+        "answer it.\n\n"
         "# Code edit format\n"
         "When you produce code edits, place the target file path on the opening fence: "
         "```<lang> file=<relative/path/to/file>. If editing an existing function or class, "
@@ -98,10 +144,15 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
     system_msg = {"role": "system", "content": system_content}
     messages = [system_msg] + [m.model_dump() for m in req.messages]
 
-    # Extract the last user message as the prompt text for grading
-    prompt_text = next(
+    # The extension prepends the active editor file as a markdown block to the
+    # last user message (see buildActiveFileBlock in extension/src/chat/view.ts).
+    # Strip it so chat_exchanges.prompt_text — rendered verbatim in the
+    # recruiter dashboard's Candidate Prompts card — only contains what the
+    # candidate typed, not whatever file they happened to have open.
+    last_user_content = next(
         (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
     )
+    prompt_text = _strip_active_file_block(last_user_content)
 
     async def generate():
         prompt_tokens = 0

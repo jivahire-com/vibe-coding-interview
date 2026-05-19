@@ -13,6 +13,18 @@
   --danger: #ef4444;
   --warn: #f59e0b;
   --success: #10b981;
+  --badge-pending-bg: #f3f4f6;
+  --badge-active-bg: #dbeafe;
+  --badge-active-fg: #1d4ed8;
+  --badge-submitted-bg: #fef3c7;
+  --badge-submitted-fg: #92400e;
+  --badge-graded-bg: #d1fae5;
+  --badge-graded-fg: #065f46;
+  --badge-poor-bg: #fee2e2;
+  --badge-poor-fg: #991b1b;
+  --error-bg: #fef2f2;
+  --error-border: #fecaca;
+  --error-fg: #b91c1c;
   --radius: 8px;
   --shadow-sm: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
   --shadow: 0 4px 12px rgba(0,0,0,.1);
@@ -21,6 +33,34 @@
   font-size: 14px;
   color: var(--text);
   background: var(--surface-alt);
+}
+
+[data-theme="dark"] {
+  --accent: #818cf8;
+  --accent-dark: #6366f1;
+  --accent-light: #312e81;
+  --surface: #1f2937;
+  --surface-alt: #111827;
+  --border: #374151;
+  --text: #f3f4f6;
+  --text-muted: #9ca3af;
+  --text-xmuted: #6b7280;
+  --badge-pending-bg: #374151;
+  --badge-active-bg: #1e3a8a;
+  --badge-active-fg: #bfdbfe;
+  --badge-submitted-bg: #78350f;
+  --badge-submitted-fg: #fde68a;
+  --badge-graded-bg: #064e3b;
+  --badge-graded-fg: #a7f3d0;
+  --badge-poor-bg: #7f1d1d;
+  --badge-poor-fg: #fecaca;
+  --error-bg: #450a0a;
+  --error-border: #7f1d1d;
+  --error-fg: #fca5a5;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.4), 0 1px 2px rgba(0,0,0,.3);
+  --shadow: 0 4px 12px rgba(0,0,0,.5);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,.6);
+  color-scheme: dark;
 }
 
 /* ─── Utilities ─── */
@@ -109,7 +149,15 @@ body { min-height: 100vh; }
 
 /* ─── Forms ─── */
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 16px; }
-.field label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+.field label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 6px; }
+.info-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-muted); color: var(--bg, #1e1e1e);
+  font-size: 10px; font-weight: 700; font-family: serif; font-style: italic;
+  text-transform: none; cursor: help; user-select: none; opacity: 0.7;
+}
+.info-icon:hover { opacity: 1; }
 .input {
   width: 100%;
   padding: 9px 12px;
@@ -135,10 +183,11 @@ body { min-height: 100vh; }
   letter-spacing: .2px;
   text-transform: capitalize;
 }
-.badge-pending { background: #f3f4f6; color: var(--text-muted); }
-.badge-active { background: #dbeafe; color: #1d4ed8; }
-.badge-submitted { background: #fef3c7; color: #92400e; }
-.badge-graded { background: #d1fae5; color: #065f46; }
+.badge-pending { background: var(--badge-pending-bg); color: var(--text-muted); }
+.badge-active { background: var(--badge-active-bg); color: var(--badge-active-fg); }
+.badge-submitted { background: var(--badge-submitted-bg); color: var(--badge-submitted-fg); }
+.badge-graded { background: var(--badge-graded-bg); color: var(--badge-graded-fg); }
+.badge-poor { background: var(--badge-poor-bg); color: var(--badge-poor-fg); }
 
 /* ─── Sessions list ─── */
 .list-header {
@@ -320,6 +369,41 @@ tbody td { padding: 12px 16px; vertical-align: middle; }
 }
 .summary-line:last-child { margin-bottom: 0; }
 
+.prompts-card { margin-bottom: 16px; }
+.prompts-card h3 { display: flex; align-items: center; gap: 8px; }
+.prompt-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface-alt);
+}
+.prompt-row:last-child { margin-bottom: 0; }
+.prompt-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.prompt-index {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+.prompt-text {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 /* ─── Invite Drawer ─── */
 .overlay {
   position: fixed; inset: 0; z-index: 50;
@@ -392,11 +476,11 @@ tbody td { padding: 12px 16px; vertical-align: middle; }
 
 /* ─── Error banner ─── */
 .error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
   border-radius: var(--radius);
   padding: 10px 14px;
-  color: #b91c1c;
+  color: var(--error-fg);
   font-size: 13px;
   margin-bottom: 16px;
 }

@@ -3,7 +3,8 @@ import * as https from "https";
 import * as crypto from "crypto";
 import { execSync } from "child_process";
 import { SessionConfig } from "../api";
-import { runChecklist, TestChecklist } from "./tests";
+import { _friendlyErrorMessage } from "../submit";
+import { runChecklist, TestChecklist, TestRunnerError } from "./tests";
 
 interface PrereqChecks {
   git: boolean | null;
@@ -30,6 +31,13 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private refreshInterval: ReturnType<typeof setInterval> | undefined;
   private _prereqRequest: ReturnType<typeof https.request> | undefined;
   private disposed = false;
+  // When the candidate dismisses the "Reopen vs. Start Fresh" dialog at
+  // activation, we render the welcome page and must NOT snap back to the
+  // brief on subsequent resolveWebviewView calls (which happen whenever the
+  // dashboard view re-resolves — e.g., the candidate toggles activity bar
+  // views and returns to JivaHire). Reset by setConfig (a fresh session
+  // explicitly overrides the dismissal).
+  private _dismissed = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this._runPrereqChecks();
@@ -44,7 +52,9 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
     // If activate() hasn't called setConfig() yet (timing gap on workspace reload),
     // restore config directly from globalState so we show the session page immediately.
-    if (!this.config) {
+    // If the saved session is expired, drop it now so the welcome page renders
+    // instead of leaving the panel stuck on a stale brief.
+    if (!this.config && !this._dismissed) {
       const saved = this.context.globalState.get<SessionConfig>("vibe.session");
       if (saved && Date.now() - saved.startedAt <= saved.maxMinutes * 60_000) {
         this.config = saved;
@@ -52,6 +62,24 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         this._armRefresh();
       }
     }
+    // Bug fix: ALWAYS write webview.html on resolve. The render() guard further
+    // down also covers the !this.view case (early calls from setConfig before
+    // resolve), but the failure mode we keep hitting is "panel stuck on the VS
+    // Code loading spinner" — that only happens when webview.html was never
+    // assigned. Writing it unconditionally here closes that hole.
+    this.render();
+  }
+
+  /**
+   * Drop the current session config and re-render the onboarding/welcome page.
+   * Called when the candidate elects to abandon a previously-saved session.
+   * Without this the brief HTML stays on screen even after globalState is
+   * cleared, because no render() tick is scheduled.
+   */
+  clearConfig(): void {
+    this.config = null;
+    this.submitted = false;
+    this._stopRefresh();
     this.render();
   }
 
@@ -71,7 +99,78 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     this.render();
   }
 
+  /**
+   * Run the challenge test checklist. Public so the always-visible
+   * "Run tests" status bar item can invoke it without going through the
+   * webview message channel — which is needed because the dashboard webview
+   * is hidden whenever the user switches to another activity bar view.
+   */
+  runTests(): void {
+    if (this.submitted) {
+      vscode.window.showInformationMessage("Session already submitted. Further actions are disabled.");
+      return;
+    }
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!ws) {
+      vscode.window.showErrorMessage("Open the challenge workspace before running tests.");
+      return;
+    }
+    this.checklist = { basic: null, thread: null, edge: null };
+    this.render();
+    runChecklist(ws, this.config?.challengeId)
+      .then((result) => {
+        this.checklist = result;
+        this.render();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof TestRunnerError
+          ? err.message
+          : _friendlyErrorMessage(err, "tests");
+        vscode.window.showErrorMessage(message);
+        this.checklist = { basic: null, thread: null, edge: null };
+        this.render();
+      });
+  }
+
+  /**
+   * Force the dashboard into the welcome/onboarding state and prevent
+   * resolveWebviewView from self-restoring the saved session config.
+   * Used when the candidate dismisses the activation-time "Reopen vs.
+   * Start Fresh" dialog: the saved session stays in globalState (so the
+   * next activation re-prompts), but the UI in this VS Code instance
+   * stops pretending the session is active.
+   */
+  dismiss(): void {
+    this._dismissed = true;
+    this.clearConfig();
+  }
+
   setConfig(config: SessionConfig): void {
+    if (this.disposed) return;
+    // An explicit setConfig means "session IS active now" — that overrides
+    // any prior in-instance dismissal.
+    this._dismissed = false;
+    this.config = config;
+    // Bug fix: do NOT clobber `submitted` if the session has already advanced
+    // to DONE. The state machine is IDLE → ACTIVE → SUBMITTING → DONE — once
+    // DONE the dashboard must stay locked even if a stray setConfig fires
+    // (e.g. an extension-host reactivation that re-restores the config from
+    // globalState before the session is cleared). Callers that genuinely want
+    // to reset the dashboard for a brand-new session should call
+    // resetForNewSession() instead.
+    if (!this.submitted) {
+      this._armRefresh();
+    }
+    this.render();
+  }
+
+  /**
+   * Explicitly reset the dashboard for a fresh session — clears `submitted`
+   * and re-arms the refresh interval. Use this when the candidate enters a
+   * new session key after submitting (or when clearConfig() has run).
+   */
+  resetForNewSession(config: SessionConfig): void {
+    if (this.disposed) return;
     this.config = config;
     this.submitted = false;
     this._armRefresh();
@@ -81,12 +180,50 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private _armRefresh(): void {
     this._stopRefresh();
     if (this.disposed) return;
+    // Tick every second so the countdown decrements one second at a time
+    // (the old 5s interval made the timer jump by 5). We deliberately do NOT
+    // call render() on each tick — re-assigning webview.html reloads the
+    // entire webview, which flickers at 1Hz and would lose focus / scroll
+    // state. Instead, post a small 'tick' message and let the brief's
+    // inline script patch the timer DOM in-place. render() still fires on
+    // state changes (setConfig, markSubmitted, runTests) and once more when
+    // the session expires to swap to the locked layout.
     this.refreshInterval = setInterval(() => {
       if (this._sessionExpired()) {
         this._stopRefresh();
+        this.render();
+        return;
       }
-      this.render();
-    }, 5000);
+      this._postTimerTick();
+    }, 1000);
+  }
+
+  /**
+   * Compute the current timer text + urgency level and post it to the
+   * webview. Mirrors the logic in renderBrief() so initial render and
+   * subsequent ticks stay in sync. Safe to call when no config is set or
+   * the webview hasn't resolved yet — it just no-ops.
+   */
+  private _postTimerTick(): void {
+    if (!this.view || !this.config) return;
+    const tick = this._computeTimerView(this.config);
+    this.view.webview.postMessage({ command: "tick", ...tick });
+  }
+
+  private _computeTimerView(config: SessionConfig): {
+    timeStr: string;
+    urgent: "critical" | "warn" | "normal";
+  } {
+    const remaining = Math.max(
+      0,
+      config.startedAt + config.maxMinutes * 60_000 - Date.now(),
+    );
+    const mins = Math.floor(remaining / 60_000);
+    const secs = Math.floor((remaining % 60_000) / 1000);
+    const timeStr = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    const urgent =
+      remaining < 2 * 60_000 ? "critical" : remaining < 10 * 60_000 ? "warn" : "normal";
+    return { timeStr, urgent };
   }
 
   private _stopRefresh(): void {
@@ -125,7 +262,14 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   }
 
   private handleMessage(msg: { command: string; sessionKey?: string }): void {
-    if (this.submitted && (msg.command === "runTests" || msg.command === "submit" || msg.command === "openChat")) {
+    // Bug fix: post-submit guard used to enumerate the BLOCKED commands, which
+    // meant any new command (including "startTest" — which re-enters the
+    // session-key prompt) silently bypassed the lock. Invert to an allowlist
+    // and enumerate ONLY the commands that remain valid after submission.
+    // joinMeet stays available so the candidate can rejoin the panel call
+    // during a post-submission debrief with the interviewers.
+    const POST_SUBMIT_ALLOWED = new Set<string>(["joinMeet"]);
+    if (this.submitted && !POST_SUBMIT_ALLOWED.has(msg.command)) {
       vscode.window.showInformationMessage("Session already submitted. Further actions are disabled.");
       return;
     }
@@ -133,27 +277,17 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       case "startTest":
         vscode.commands.executeCommand("vibe.enterSessionKey", msg.sessionKey);
         break;
-      case "runTests": {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!ws) {
-          vscode.window.showErrorMessage(
-            "Open the challenge workspace before running tests."
-          );
-          return;
-        }
-        this.checklist = { basic: null, thread: null, edge: null };
-        this.render();
-        runChecklist(ws, this.config?.challengeId).then((result) => {
-          this.checklist = result;
-          this.render();
-        });
+      case "runTests":
+        this.runTests();
         break;
-      }
       case "openChat":
         vscode.commands.executeCommand("vibe.openChat");
         break;
       case "submit":
         vscode.commands.executeCommand("vibe.submit");
+        break;
+      case "joinMeet":
+        vscode.commands.executeCommand("vibe.joinMeet");
         break;
     }
   }
@@ -555,23 +689,17 @@ Click Apply ──▶ Diff editor opens
     const cspSource = this._cspSource();
     const nonce = this._nonce();
 
-    const remaining = Math.max(
-      0,
-      config.startedAt + config.maxMinutes * 60_000 - Date.now()
-    );
-    const mins = Math.floor(remaining / 60_000);
-    const secs = Math.floor((remaining % 60_000) / 1000);
-    const timeStr = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    const { timeStr, urgent } = this._computeTimerView(config);
     const timerColor =
-      remaining < 2 * 60_000
+      urgent === "critical"
         ? "var(--vscode-errorForeground, #f44336)"
-        : remaining < 10 * 60_000
+        : urgent === "warn"
         ? "#e8c000"
         : "var(--vscode-foreground)";
     const timerBg =
-      remaining < 2 * 60_000
+      urgent === "critical"
         ? "var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.1))"
-        : remaining < 10 * 60_000
+        : urgent === "warn"
         ? "rgba(232,192,0,0.1)"
         : "var(--vscode-input-background)";
 
@@ -598,6 +726,56 @@ Click Apply ──▶ Diff editor opens
       ? `<div class="card" style="border-color:#4caf50;"><div class="card-header" style="color:#4caf50;">&#10003; Submitted</div><p class="desc">Session submitted. Grading is in progress — further edits are locked.</p></div>`
       : "";
     const actionDisabled = this.submitted ? "disabled" : "";
+
+    // Panel-interview card: only rendered when the recruiter attached a
+    // video-meeting link. The actual URL is never inlined into the HTML —
+    // clicking the button posts a message back to the extension host, which
+    // opens the URL via vscode.env.openExternal. Avoids any chance of HTML
+    // injection from a hostile validate-session response.
+    let scheduleLine = "";
+    if (config.meetLink && typeof config.scheduledAt === "number") {
+      const startMs = config.scheduledAt * 1000;
+      const diffMin = Math.round((startMs - Date.now()) / 60_000);
+      // Friendly local-time string. toLocaleString uses the candidate's
+      // OS timezone, which is what they actually care about.
+      const startLocal = escapeHtml(
+        new Date(startMs).toLocaleString(undefined, {
+          weekday: "short", month: "short", day: "numeric",
+          hour: "2-digit", minute: "2-digit",
+        }),
+      );
+      let label: string;
+      if (diffMin > 60) {
+        label = `Starts ${startLocal} (in ${Math.round(diffMin / 60)}h ${diffMin % 60}m)`;
+      } else if (diffMin > 0) {
+        label = `Starts in ${diffMin} min &mdash; ${startLocal}`;
+      } else if (diffMin > -5) {
+        label = `Starting now &mdash; ${startLocal}`;
+      } else {
+        label = `Scheduled ${startLocal}`;
+      }
+      scheduleLine = `<p class="desc" style="padding: 0; margin: 0 0 6px; font-weight: 600;">&#128197; ${label}</p>`;
+    }
+
+    const meetCard = config.meetLink
+      ? `<div class="card" style="border-color: var(--vscode-button-background);">
+          <div class="card-header" style="color: var(--vscode-button-foreground); background: var(--vscode-button-background);">
+            &#128249; Panel Interview &mdash; Live Video Call
+          </div>
+          <div style="padding: 10px 11px;">
+            ${scheduleLine}
+            <p class="desc" style="padding: 0; margin: 0 0 8px;">
+              Join the video call below and <strong>share your screen</strong> so the
+              interviewer(s) can follow along while you code.
+            </p>
+            <button class="action-btn primary" data-action="joinMeet" style="margin: 0;">
+              <span>&#128249;</span>
+              <span class="btn-label">Join video call</span>
+              <span class="btn-hint">opens in your browser</span>
+            </button>
+          </div>
+        </div>`
+      : "";
 
     return `<!DOCTYPE html>
 <html>
@@ -743,6 +921,8 @@ Click Apply ──▶ Diff editor opens
 
   ${submittedBanner}
 
+  ${meetCard}
+
   <div class="card">
     <div class="card-header">Challenge</div>
     <p class="desc">${safeChallengeDesc}. See <strong>README.md</strong> for the full spec and build instructions.</p>
@@ -761,7 +941,7 @@ Click Apply ──▶ Diff editor opens
     <button class="action-btn primary" data-action="runTests" ${actionDisabled}>
       <span>&#9654;</span>
       <span class="btn-label">Run Tests</span>
-      <span class="btn-hint">build &amp; execute test suite</span>
+      <span class="btn-hint">execute compiled test suite</span>
     </button>
     <button class="action-btn secondary" data-action="openChat" ${actionDisabled}>
       <span>&#128172;</span>
@@ -783,6 +963,30 @@ Click Apply ──▶ Diff editor opens
       if (btn.hasAttribute('disabled')) return;
       vscode.postMessage({ command: btn.getAttribute('data-action') });
     });
+  });
+
+  // Live countdown: the extension posts a 'tick' message every second. We
+  // patch the timer DOM in place rather than re-rendering the whole panel
+  // — re-assigning webview.html reloads the entire view and would flicker.
+  var TIMER_PALETTE = {
+    critical: {
+      color: 'var(--vscode-errorForeground, #f44336)',
+      bg: 'var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.1))'
+    },
+    warn: { color: '#e8c000', bg: 'rgba(232,192,0,0.1)' },
+    normal: { color: 'var(--vscode-foreground)', bg: 'var(--vscode-input-background)' }
+  };
+  window.addEventListener('message', function(e) {
+    var msg = e.data || {};
+    if (msg.command !== 'tick') return;
+    var value = document.querySelector('.timer-value');
+    var label = document.querySelector('.timer-label');
+    var box = document.querySelector('.timer-box');
+    if (value) value.textContent = msg.timeStr;
+    var palette = TIMER_PALETTE[msg.urgent] || TIMER_PALETTE.normal;
+    if (value) value.style.color = palette.color;
+    if (label) label.style.color = palette.color;
+    if (box) box.style.background = palette.bg;
   });
 </script>
 </body>

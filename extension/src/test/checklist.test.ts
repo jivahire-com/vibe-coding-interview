@@ -11,7 +11,7 @@ jest.mock('fs', () => ({ existsSync: jest.fn() }));
 
 import { execFile } from 'child_process';
 import * as fs from 'fs';
-import { runChecklist, detectLanguage } from '../welcome/tests';
+import { runChecklist, detectLanguage, TestRunnerError } from '../welcome/tests';
 
 const mockExecFile = execFile as unknown as jest.Mock;
 const mockExistsSync = fs.existsSync as unknown as jest.Mock;
@@ -38,7 +38,12 @@ describe('detectLanguage', () => {
     expect(detectLanguage('/ws')).toBe('cpp');
   });
 
-  test('returns "unknown" when neither marker is present', () => {
+  test('detects TypeScript by package.json', () => {
+    existsOnly(['/ws/package.json']);
+    expect(detectLanguage('/ws')).toBe('typescript');
+  });
+
+  test('returns "unknown" when no language marker is present', () => {
     existsOnly([]);
     expect(detectLanguage('/ws')).toBe('unknown');
   });
@@ -53,7 +58,7 @@ describe('runChecklist (C++)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
     mockExistsSync.mockReset();
-    existsOnly(['/ws/CMakeLists.txt']);
+    existsOnly(['/ws/CMakeLists.txt', '/ws/build/tests']);
   });
 
   test('all tags pass when the binary exits 0', async () => {
@@ -69,11 +74,11 @@ describe('runChecklist (C++)', () => {
     expect(result).toEqual({ basic: false, thread: false, edge: false });
   });
 
-  test('missing binary → null (indeterminate)', async () => {
-    const err = Object.assign(new Error('not found'), { code: 127 });
-    mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(err));
-    const result = await runChecklist('/ws');
-    expect(result).toEqual({ basic: null, thread: null, edge: null });
+  test('missing test binary rejects with build instructions', async () => {
+    existsOnly(['/ws/CMakeLists.txt']); // no build/tests
+    await expect(runChecklist('/ws')).rejects.toThrow(/not built/i);
+    await expect(runChecklist('/ws')).rejects.toThrow(/cmake --build build/);
+    expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   test('passes [basic]/[thread]/[edge] Catch2 tags', async () => {
@@ -84,7 +89,7 @@ describe('runChecklist (C++)', () => {
   });
 
   test('runs the binary at <root>/build/tests', async () => {
-    existsOnly(['/project/CMakeLists.txt']);
+    existsOnly(['/project/CMakeLists.txt', '/project/build/tests']);
     mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(null));
     await runChecklist('/project');
     const bin: string = mockExecFile.mock.calls[0][0];
@@ -131,6 +136,69 @@ describe('runChecklist (Python)', () => {
   });
 });
 
+describe('runChecklist (TypeScript)', () => {
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExistsSync.mockReset();
+  });
+
+  test('uses vitest tags @basic / @concurrent / @edge when package.json + vitest are present', async () => {
+    existsOnly(['/ws/package.json', '/ws/node_modules/vitest/vitest.mjs']);
+    mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(null));
+    const result = await runChecklist('/ws');
+    expect(result).toEqual({ basic: true, thread: true, edge: true });
+
+    const calls = mockExecFile.mock.calls;
+    expect(calls).toHaveLength(3);
+    for (const [bin, args] of calls) {
+      expect(bin).toBe('node');
+      expect(args[0]).toBe(path.join('/ws', 'node_modules', 'vitest', 'vitest.mjs'));
+      expect(args[1]).toBe('run');
+      expect(args[2]).toBe('-t');
+    }
+    const tags = calls.map((c) => c[1][3]).sort();
+    expect(tags).toEqual(['@basic', '@concurrent', '@edge']);
+  });
+
+  test('missing node_modules rejects with `npm install` instructions', async () => {
+    existsOnly(['/ws/package.json']); // no node_modules
+    await expect(runChecklist('/ws')).rejects.toBeInstanceOf(TestRunnerError);
+    await expect(runChecklist('/ws')).rejects.toThrow(/npm install/);
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  test('vitest exit 1 → tag reported as failed', async () => {
+    existsOnly(['/ws/package.json', '/ws/node_modules/vitest/vitest.mjs']);
+    const err = Object.assign(new Error('failed'), { code: 1 });
+    mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(err));
+    const result = await runChecklist('/ws');
+    expect(result).toEqual({ basic: false, thread: false, edge: false });
+  });
+});
+
+describe('runChecklist (spawn failures)', () => {
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExistsSync.mockReset();
+  });
+
+  test('python3 ENOENT rejects with an actionable TestRunnerError instead of silent nulls', async () => {
+    existsOnly(['/ws/pyproject.toml']);
+    const err = Object.assign(new Error('spawn python3 ENOENT'), { code: 'ENOENT' });
+    mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(err));
+    await expect(runChecklist('/ws')).rejects.toBeInstanceOf(TestRunnerError);
+    await expect(runChecklist('/ws')).rejects.toThrow(/python/i);
+  });
+
+  test('node ENOENT for TypeScript rejects with an actionable TestRunnerError', async () => {
+    existsOnly(['/ws/package.json', '/ws/node_modules/vitest/vitest.mjs']);
+    const err = Object.assign(new Error('spawn node ENOENT'), { code: 'ENOENT' });
+    mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(err));
+    await expect(runChecklist('/ws')).rejects.toBeInstanceOf(TestRunnerError);
+    await expect(runChecklist('/ws')).rejects.toThrow(/node/i);
+  });
+});
+
 describe('runChecklist (monorepo / unknown)', () => {
   beforeEach(() => {
     mockExecFile.mockReset();
@@ -143,6 +211,7 @@ describe('runChecklist (monorepo / unknown)', () => {
       '/ws/python-ttl-cache/pyproject.toml',
       '/ws/cpp-lru-cache',
       '/ws/cpp-lru-cache/CMakeLists.txt',
+      '/ws/cpp-lru-cache/build/tests',
     ]);
     mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(null));
 
@@ -153,10 +222,9 @@ describe('runChecklist (monorepo / unknown)', () => {
     expect(bin === 'python3' || bin.endsWith('/python')).toBe(true);
   });
 
-  test('unknown layout returns all-null and skips execFile', async () => {
+  test('unknown layout rejects with a "wrong folder" hint', async () => {
     existsOnly([]);
-    const result = await runChecklist('/ws');
-    expect(result).toEqual({ basic: null, thread: null, edge: null });
+    await expect(runChecklist('/ws')).rejects.toThrow(/No challenge detected/);
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 });

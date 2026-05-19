@@ -1,0 +1,22 @@
+# Build artefacts
+dist/
+build/
+*.tsbuildinfo
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+coverage/
+
+# Generated lockfile — npm install regenerates from package.json (versions are pinned)
+package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

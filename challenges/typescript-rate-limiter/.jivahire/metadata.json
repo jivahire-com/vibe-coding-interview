@@ -1,0 +1,12 @@
+{
+  "challenge_id": "typescript-rate-limiter",
+  "title": "Per-Key Token-Bucket Rate Limiter",
+  "language": "typescript",
+  "difficulty": "mid",
+  "estimated_minutes": 60,
+  "max_minutes": 90,
+  "tags": ["concurrency", "rate-limiting", "async", "data-structures"],
+  "public_test_file": "tests/rate_limiter.public.test.ts",
+  "hidden_test_file": "tests/rate_limiter.hidden.test.ts",
+  "grader": "typescript"
+}

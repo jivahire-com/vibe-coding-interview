@@ -113,7 +113,7 @@ These apply whenever writing code in this repo:
 
 ## Privacy and Security Constraints
 
-- Candidate prompt history lives only in the git branch (`.jivahire_chat_log.json`) — it is deleted when the branch is deleted. Never persist it in the DB.
+- Candidate prompt history is persisted in `chat_exchanges.prompt_text` (alongside token/cost metadata) and is also written to `.jivahire_chat_log.json` in the candidate's git branch. The DB copy is what the recruiter dashboard renders in the Candidate Prompts card on the session detail view; the git-branch copy is what the grader parses for AI-orchestration / prompt-quality evaluation. When deleting a session, drop the `chat_exchanges` rows too — the git branch alone is no longer the sole copy.
 - Session keys must be rate-limited (5 attempts/IP/hour) before any DB lookup.
 - The `.jivahire/` directory in challenge repos (rubric, traps, hidden tests) must be stripped before creating the candidate branch — verify this in branch-creation logic.
 - GitHub tokens are short-lived installation tokens (~1 hour); never store long-lived PATs.

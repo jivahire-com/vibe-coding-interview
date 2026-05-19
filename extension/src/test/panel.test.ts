@@ -77,19 +77,19 @@ describe('DashboardViewProvider', () => {
     provider.setConfig(config);
     provider.setConfig(config);
 
-    // Record render count right after the three calls (3 renders for 3 setConfig calls)
-    const htmlAfterSetup = view.webview.html;
+    // Each tick now posts a single 'tick' message instead of rewriting
+    // webview.html (which would reload the entire panel and flicker). If
+    // three intervals had stacked, the tick listener would fire 3× per
+    // second — assert it fires exactly once per second.
+    (view.webview.postMessage as jest.Mock).mockClear();
+    jest.advanceTimersByTime(1001);
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(1);
+    expect(view.webview.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ command: 'tick' }),
+    );
 
-    // Advance time by one interval (5 s) — only ONE timer should fire, not three
-    view.webview.html = '__reset__';
-    jest.advanceTimersByTime(5001);
-    // One re-render happened (html changed from reset value)
-    expect(view.webview.html).not.toBe('__reset__');
-
-    // Advance by 5 s more — still only one fire per interval
-    view.webview.html = '__reset2__';
-    jest.advanceTimersByTime(5001);
-    expect(view.webview.html).not.toBe('__reset2__');
+    jest.advanceTimersByTime(1001);
+    expect(view.webview.postMessage).toHaveBeenCalledTimes(2);
   });
 
   // ── Bug #11 ───────────────────────────────────────────────────────────────
@@ -280,6 +280,144 @@ describe('DashboardViewProvider', () => {
     (vscode.commands.executeCommand as jest.Mock).mockClear();
     handler({ command: 'submit' });
     expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith('vibe.submit');
+  });
+
+  // ── Review-Bug 7: setConfig must NOT clear submitted ────────────────────
+
+  test('Review-Bug 7: a stray setConfig() after markSubmitted does not unlock the dashboard', () => {
+    provider.resolveWebviewView(view);
+    provider.setConfig(makeConfig());
+    provider.markSubmitted();
+
+    // Sanity: brief is locked.
+    expect(view.webview.html).toContain('Submitted');
+
+    // Some unrelated activate() / restore code re-fires setConfig with the
+    // same session. Pre-fix, this clobbered submitted=false and re-enabled
+    // every action button (resubmit, run-tests, open-chat).
+    provider.setConfig(makeConfig());
+    const html: string = view.webview.html;
+    expect(html).toContain('Submitted');
+    const actionBtns = html.match(/<button class="action-btn[^"]*"[^>]*>/g) ?? [];
+    expect(actionBtns.length).toBeGreaterThan(0);
+    for (const btn of actionBtns) {
+      expect(btn).toContain('disabled');
+    }
+  });
+
+  test('Review-Bug 7: resetForNewSession() is the explicit unlock path for a brand-new session', () => {
+    provider.resolveWebviewView(view);
+    provider.setConfig(makeConfig());
+    provider.markSubmitted();
+    provider.resetForNewSession(makeConfig({ challengeId: 'next-challenge' }));
+    const html: string = view.webview.html;
+    expect(html).not.toContain('Submitted');
+    expect(html).toContain('next-challenge');
+    const actionBtns = html.match(/<button class="action-btn[^"]*"[^>]*>/g) ?? [];
+    for (const btn of actionBtns) {
+      expect(btn).not.toContain('disabled');
+    }
+  });
+
+  // ── Review-Bug 8: post-submit guard uses an allowlist ───────────────────
+
+  test('Review-Bug 8: startTest is BLOCKED after markSubmitted (not on the post-submit allowlist)', () => {
+    provider.resolveWebviewView(view);
+    provider.setConfig(makeConfig());
+    provider.markSubmitted();
+    const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
+    const vscode = require('vscode');
+    (vscode.commands.executeCommand as jest.Mock).mockClear();
+    handler({ command: 'startTest', sessionKey: 'NEW-KEY' });
+    // Pre-fix, the enumerate-blocked-commands list omitted "startTest" so this
+    // call would re-enter the session-key prompt despite an active submission.
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith('vibe.enterSessionKey', expect.anything());
+  });
+
+  test('Review-Bug 8: any unknown command after submit is also blocked', () => {
+    provider.resolveWebviewView(view);
+    provider.setConfig(makeConfig());
+    provider.markSubmitted();
+    const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
+    const vscode = require('vscode');
+    (vscode.commands.executeCommand as jest.Mock).mockClear();
+    handler({ command: 'someFutureCommand' });
+    expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
+  });
+
+  // ── Review-Bug 11: runChecklist rejection is caught + surfaced ──────────
+
+  test('Review-Bug 11: a rejected runChecklist surfaces an error and resets checklist UI', async () => {
+    // Use real timers — promise microtasks need to run for the .catch branch
+    // to fire, and the surrounding describe-block's beforeEach uses fake.
+    jest.useRealTimers();
+    // Swap the runChecklist export on the loaded module so the panel's
+    // bound `runChecklist` (after CommonJS interop) sees the rejecting fn.
+    const testsMod = require('../welcome/tests');
+    const original = testsMod.runChecklist;
+    const fakeRunChecklist = jest.fn().mockRejectedValue(new Error('fs unreachable'));
+    testsMod.runChecklist = fakeRunChecklist;
+    try {
+      const vscode = require('vscode');
+      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+        { uri: { fsPath: '/ws' } },
+      ];
+      provider.resolveWebviewView(view);
+      provider.setConfig(makeConfig());
+      const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
+      (vscode.window.showErrorMessage as jest.Mock).mockClear();
+
+      handler({ command: 'runTests' });
+
+      // Let the rejected promise settle through the .catch branch.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(fakeRunChecklist).toHaveBeenCalled();
+      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+        expect.stringMatching(/tests?/i),
+      );
+    } finally {
+      testsMod.runChecklist = original;
+      jest.useFakeTimers();
+    }
+  });
+
+  // ── Bug B: raw child_process error never surfaces verbatim ───────────────
+
+  test('Bug B: runChecklist rejecting with a raw "Command failed:" string is not surfaced verbatim', async () => {
+    jest.useRealTimers();
+    const testsMod = require('../welcome/tests');
+    const original = testsMod.runChecklist;
+    const fakeRunChecklist = jest.fn().mockRejectedValue(
+      new Error('Command failed: bash -c "cmake --build build && ctest"'),
+    );
+    testsMod.runChecklist = fakeRunChecklist;
+    try {
+      const vscode = require('vscode');
+      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+        { uri: { fsPath: '/ws' } },
+      ];
+      provider.resolveWebviewView(view);
+      provider.setConfig(makeConfig());
+      const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
+      (vscode.window.showErrorMessage as jest.Mock).mockClear();
+
+      handler({ command: 'runTests' });
+
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(fakeRunChecklist).toHaveBeenCalled();
+      expect(vscode.window.showErrorMessage).toHaveBeenCalled();
+      const msg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
+      expect(msg).not.toMatch(/Command failed/);
+      expect(msg).not.toMatch(/bash -c/);
+      expect(msg.toLowerCase()).toMatch(/test|environment|dependency|recruiter/);
+    } finally {
+      testsMod.runChecklist = original;
+      jest.useFakeTimers();
+    }
   });
 
   // ── Bug #17: empty-workspace runTests bails with a clear error ────────────

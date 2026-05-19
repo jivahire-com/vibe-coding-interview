@@ -453,5 +453,363 @@ describe('ChatViewProvider streamChat error handling', () => {
     expect(view.webview.html).toMatch(/id="budget-warn"[^>]*display:block/);
     expect(view.webview.html).toMatch(/<vscode-text-area[^>]*disabled/);
   });
+
+  // ── Review-Bug 2: budget-exhausted response is NOT logged to chat-log ──
+
+  test('Review-Bug 2: budget-exhausted stream does NOT append a phantom assistant turn', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      // Server delivers ONE delta chunk, then the budget error before [DONE]
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'half-' } }] }) + '\n');
+      res.write('data: ' + JSON.stringify({ error: { message: 'budget exhausted' } }) + '\n');
+      res.write('data: [DONE]\n');
+      res.end();
+    });
+
+    await setupSend('what is the answer?');
+
+    // Pre-fix, this would log an entry with response_text='half-' and
+    // prompt_text='what is the answer?' — polluting the audit trail.
+    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
+    const entries = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+    expect(entries).toEqual([]);
+
+    // The optimistic user message must also be removed from the in-memory
+    // history so the visible chat matches what was actually exchanged.
+    expect((provider as any).messages).toEqual([]);
+
+    // Provider stays flagged as budget-exhausted across renders.
+    expect((provider as any).budgetExhausted).toBe(true);
+  });
+
+  // ── Review-Bug 12: malformed SSE chunks are logged, not silently dropped ──
+
+  test('Review-Bug 12: malformed SSE chunks emit a warning to the console', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      // First chunk is valid; second is malformed JSON; third is the [DONE] sentinel.
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }) + '\n');
+      res.write('data: {malformed json\n');
+      res.write('data: [DONE]\n');
+      res.end();
+    });
+
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await setupSend('hi');
+      // The malformed chunk produced a console.warn — pre-fix it was swallowed.
+      const malformedWarn = warnSpy.mock.calls.find((c: unknown[]) =>
+        String(c[0]).includes('dropped malformed SSE chunk'),
+      );
+      expect(malformedWarn).toBeDefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // ── Bug A: budget-exhausted SSE stream restores the candidate's prompt ──
+  //
+  // Symmetry with the generic error path: the textarea is cleared on send, so
+  // if the request fails (including budget exhaustion mid-stream) we MUST send
+  // a `restorePrompt` postMessage so the candidate doesn't lose their text.
+
+  test('Bug A: budget-exhausted mid-stream sends restorePrompt with original text', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ error: { message: 'budget exhausted' } }) + '\n');
+      res.write('data: [DONE]\n');
+      res.end();
+    });
+
+    const userText = 'a long carefully crafted prompt the candidate worked hard on';
+    await setupSend(userText);
+
+    expect((provider as any).budgetExhausted).toBe(true);
+
+    const postCalls = (view.webview.postMessage as jest.Mock).mock.calls;
+    const restoreCall = postCalls.find((c: unknown[]) => {
+      const m = c[0] as { command: string; text?: string };
+      return m.command === 'restorePrompt';
+    });
+    expect(restoreCall).toBeDefined();
+    expect(restoreCall![0]).toEqual({ command: 'restorePrompt', text: userText });
+  });
+
+  // ── Bug B: changeModel clears budget-exhausted flag ──────────────────────
+  //
+  // The server enforces the per-model budget; if the candidate switches to a
+  // cheaper model, the textarea must re-enable so they can try the cheaper
+  // model. The next send will re-flag if the new model is also over budget.
+
+  test('Bug B: changeModel resets budgetExhausted and re-enables the input', async () => {
+    let msgHandler: ((m: unknown) => void) | undefined;
+    view.webview.onDidReceiveMessage = jest.fn().mockImplementation((cb: any) => {
+      msgHandler = cb;
+      return { dispose: jest.fn() };
+    });
+    provider.setConfig(makeConfig({
+      llmProxyUrl: baseUrl,
+      availableChatModels: ['openai/gpt-4o-mini', 'openai/gpt-4o'],
+    }));
+    provider.resolveWebviewView(view, {} as any, {} as any);
+
+    (provider as any).budgetExhausted = true;
+    (provider as any).render();
+    // Sanity: rendered HTML reflects the disabled state pre-switch.
+    expect(view.webview.html).toMatch(/id="budget-warn"[^>]*display:block/);
+    expect(view.webview.html).toMatch(/<vscode-text-area[^>]*disabled/);
+
+    msgHandler!({ command: 'changeModel', model: 'openai/gpt-4o' });
+
+    expect((provider as any).budgetExhausted).toBe(false);
+    const html: string = view.webview.html;
+    expect(html).not.toMatch(/id="budget-warn"[^>]*display:block/);
+    expect(html).not.toMatch(/<vscode-text-area[^>]*disabled/);
+    expect(html).not.toMatch(/id="send-btn"[^>]*disabled/);
+  });
+
+  // ── Bug C: HTTP error strings are humanized before reaching the toast ────
+
+  test('Bug C: 402 surfaces plain-English budget message, not raw HTTP', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(402, { 'Content-Type': 'text/html' });
+      res.end('<html>budget exceeded</html>');
+    });
+    await setupSend('hi');
+    const arg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg).not.toMatch(/HTTP 402/);
+    expect(arg).not.toMatch(/<html>/);
+    expect(arg.toLowerCase()).toMatch(/budget/);
+  });
+
+  test('Bug C: 429 surfaces a rate-limit retry message, not raw HTTP', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(429, { 'Content-Type': 'text/plain' });
+      res.end('rate limit slammed');
+    });
+    await setupSend('hi');
+    const arg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg).not.toMatch(/HTTP 429/);
+    expect(arg).not.toMatch(/rate limit slammed/);
+    expect(arg.toLowerCase()).toMatch(/too many requests|retry/);
+  });
+
+  test('Bug C: 500 surfaces a service-unavailable message, not raw HTML body', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(500, { 'Content-Type': 'text/html' });
+      res.end('<html><body>nginx 500</body></html>');
+    });
+    await setupSend('hi');
+    const arg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg).not.toMatch(/HTTP 500/);
+    expect(arg).not.toMatch(/<html>/);
+    expect(arg).not.toMatch(/nginx/);
+    expect(arg.toLowerCase()).toMatch(/temporarily unavailable|retry/);
+  });
+});
+
+// ── Review-Bug 1: Apply button persists in the rendered (non-streaming) HTML ──
+
+describe('ChatViewProvider rendered code-block markup (Review-Bug 1)', () => {
+  let context: ReturnType<typeof makeMockContext>;
+  let provider: ChatViewProvider;
+  let view: ReturnType<typeof makeMockWebviewView>;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-view-render-'));
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: tmpDir } }];
+    context = makeMockContext();
+    provider = new ChatViewProvider(context);
+    view = makeMockWebviewView();
+  });
+
+  afterEach(() => {
+    provider.dispose();
+    jest.clearAllMocks();
+    (vscode.workspace as any).workspaceFolders = undefined;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test('Review-Bug 1: persistent assistant fence renders with Apply + Copy data attributes', () => {
+    provider.resolveWebviewView(view, {} as any, {} as any);
+    provider.setConfig(makeConfig());
+    (provider as any).messages = [
+      { role: 'user', content: 'show me' },
+      {
+        role: 'assistant',
+        content: 'Here is the code:\n```cpp file=src/lru.cpp\nint x = 1;\n```\nDone.',
+        model: 'openai/gpt-4o-mini',
+        promptTokens: 1, completionTokens: 1, latencyMs: 10,
+      },
+    ];
+    (provider as any).render();
+
+    const html: string = view.webview.html;
+    // Pre-fix, the TS-side formatContent emitted bare <pre><code> only.
+    // Post-fix, it must mirror the streaming-side HTML and include the Apply
+    // and Copy data attributes the webview's click delegate listens for.
+    expect(html).toMatch(/data-apply-block-id="blk-rendered-/);
+    expect(html).toMatch(/data-apply-file="src\/lru\.cpp"/);
+    expect(html).toMatch(/data-apply-lang="cpp"/);
+    expect(html).toMatch(/data-apply-encoded="/);
+    expect(html).toMatch(/data-copy-encoded="/);
+    // Apply button label includes the file basename
+    expect(html).toMatch(/Apply to lru\.cpp/);
+  });
+
+  test('Review-Bug 1: fence without file= attribute still renders Apply (with generic label)', () => {
+    provider.resolveWebviewView(view, {} as any, {} as any);
+    provider.setConfig(makeConfig());
+    (provider as any).messages = [
+      { role: 'user', content: 'q' },
+      {
+        role: 'assistant',
+        content: '```python\ndef foo(): pass\n```',
+        model: 'openai/gpt-4o-mini',
+        promptTokens: 1, completionTokens: 1, latencyMs: 10,
+      },
+    ];
+    (provider as any).render();
+    const html: string = view.webview.html;
+    expect(html).toMatch(/data-apply-block-id="blk-rendered-/);
+    expect(html).toMatch(/data-apply-lang="python"/);
+    // No file= → label falls back to "Apply to file…". Button stays clickable;
+    // a QuickPick handles target selection on click.
+    expect(html).toMatch(/Apply to file/);
+    const applyMatch = /<button[^>]*class="code-btn apply-btn"[^>]*>/.exec(html);
+    expect(applyMatch).not.toBeNull();
+    expect(applyMatch![0]).not.toMatch(/\sdisabled\b/);
+  });
+
+  test('Review-Bug 1: code content is HTML-escaped (no XSS through assistant fences)', () => {
+    provider.resolveWebviewView(view, {} as any, {} as any);
+    provider.setConfig(makeConfig());
+    (provider as any).messages = [
+      { role: 'assistant', content: '```html\n<script>alert(1)</script>\n```',
+        model: 'openai/gpt-4o-mini', promptTokens: 1, completionTokens: 1, latencyMs: 1 },
+    ];
+    (provider as any).render();
+    const html: string = view.webview.html;
+    expect(html).not.toMatch(/<script>alert\(1\)<\/script>/);
+    expect(html).toMatch(/&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  });
+
+  test('Apply + Copy buttons swap their label after a click for visible feedback', () => {
+    provider.resolveWebviewView(view, {} as any, {} as any);
+    provider.setConfig(makeConfig());
+    const html: string = view.webview.html;
+    // The webview-side click handlers must call flashButtonLabel so the user
+    // sees "Copied!" / "Opening diff…" instead of an unresponsive button. The
+    // copy/apply paths used to fire postMessage silently — users routinely
+    // reported "the button doesn't work" because the click had no visible
+    // effect even though the round-trip succeeded.
+    expect(html).toContain('flashButtonLabel');
+    expect(html).toContain('Copied!');
+    expect(html).toContain('Opening diff');
+  });
+
+  // ── System prompt enforces file= on every code fence ───────────────────
+  //
+  // The Apply button is gated on `file=path` being present. Without a server-
+  // side prompt instructing the LLM to include it, the AI commonly emits bare
+  // ```cpp` fences which leave Apply disabled. We inject a system prompt at
+  // request time so the AI consistently produces file=-tagged code blocks.
+
+  test('streamChat injects a system prompt instructing the LLM to use file=path', async () => {
+    const testServer = http.createServer();
+    const receivedBodies: any[] = [];
+    testServer.on('request', (req, res) => {
+      let body = '';
+      req.on('data', (d: Buffer) => { body += d.toString(); });
+      req.on('end', () => {
+        receivedBodies.push(JSON.parse(body));
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }) + '\n');
+        res.write('data: [DONE]\n');
+        res.end();
+      });
+    });
+    await new Promise<void>((r) => testServer.listen(0, r));
+    const port = (testServer.address() as { port: number }).port;
+
+    try {
+      let msgHandler: ((m: any) => void) | undefined;
+      const localView = makeMockWebviewView();
+      const localProvider = new ChatViewProvider(makeMockContext());
+      localView.webview.onDidReceiveMessage = jest.fn().mockImplementation((cb: any) => {
+        msgHandler = cb;
+        return { dispose: jest.fn() };
+      });
+      localProvider.setConfig(makeConfig({ llmProxyUrl: `http://127.0.0.1:${port}` }));
+      localProvider.resolveWebviewView(localView, {} as any, {} as any);
+
+      await new Promise<void>((resolve) => {
+        msgHandler!({ command: 'send', text: 'help me' });
+        const poll = setInterval(() => {
+          if ((localProvider as any).isLoading === false) { clearInterval(poll); resolve(); }
+        }, 20);
+      });
+
+      expect(receivedBodies.length).toBe(1);
+      const msgs = receivedBodies[0].messages as Array<{ role: string; content: string }>;
+      // First message is the system prompt.
+      expect(msgs[0].role).toBe('system');
+      // It must instruct the LLM to use the file= syntax.
+      expect(msgs[0].content).toMatch(/file=/);
+      // The "Apply button is disabled without file=" gating MUST be mentioned
+      // so the LLM understands the practical consequence.
+      expect(msgs[0].content.toLowerCase()).toMatch(/apply/);
+    } finally {
+      await new Promise<void>((r) => testServer.close(() => r()));
+    }
+  });
+
+  // ── Review-Bug 6: chat view honours server-supplied pricing ────────────
+
+  test('Review-Bug 6: spent meter uses server-supplied pricing for unknown models', async () => {
+    // Set up a real local SSE server that returns one chunk + usage.
+    const testServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'hi' } }] }) + '\n');
+      res.write('data: ' + JSON.stringify({ usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }) + '\n');
+      res.write('data: [DONE]\n');
+      res.end();
+    });
+    await new Promise<void>((r) => testServer.listen(0, r));
+    const port = (testServer.address() as { port: number }).port;
+    try {
+      let msgHandler: ((m: unknown) => void) | undefined;
+      view.webview.onDidReceiveMessage = jest.fn().mockImplementation((cb: any) => {
+        msgHandler = cb;
+        return { dispose: jest.fn() };
+      });
+      // Use a model name NOT in the bundled DEFAULT_MODEL_PRICING. Server-
+      // supplied pricing must take precedence.
+      provider.setConfig(makeConfig({
+        llmProxyUrl: `http://127.0.0.1:${port}`,
+        chatModel: 'mystery/super-cheap',
+        availableChatModels: ['mystery/super-cheap'],
+        pricingPerMillion: { 'mystery/super-cheap': { input: 0.01, output: 0.02 } },
+      }));
+      provider.resolveWebviewView(view, {} as any, {} as any);
+
+      await new Promise<void>((resolve) => {
+        msgHandler!({ command: 'send', text: 'hi' });
+        const poll = setInterval(() => {
+          if ((provider as any).isLoading === false &&
+              (provider as any).messages.length === 2) {
+            clearInterval(poll);
+            resolve();
+          }
+        }, 20);
+      });
+
+      // 1M prompt tokens × $0.01 + 1M completion tokens × $0.02 = $0.03
+      expect((provider as any).spentUsd).toBeCloseTo(0.03, 4);
+    } finally {
+      await new Promise<void>((r) => testServer.close(() => r()));
+    }
+  });
 });
 

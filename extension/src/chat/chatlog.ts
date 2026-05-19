@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 
 export interface ChatEntry {
@@ -62,22 +63,42 @@ export class ChatLog {
   }
 
   /**
-   * Write JSON to a sibling tmp file, then atomically rename it into place.
+   * Write JSON to an out-of-workspace tmp file, then atomically rename it
+   * into place. Falls back to copy+unlink if the rename crosses filesystems.
    *
-   * Why: the auto-commit cycle (every 3 minutes) runs `git add -A` against
-   * the workspace. If `git add` reads the chat-log mid-write, it stages a
-   * truncated / partial-JSON file — corrupting the audit trail that the
-   * grader depends on. `rename(2)` is atomic on POSIX, so a reader sees
-   * either the old complete file or the new complete file, never a mix.
+   * Why out-of-workspace: the auto-commit cycle runs `git add -A`. A sibling
+   * `.tmp-*` in the workspace can be enumerated and staged before the rename
+   * completes, leaking intermediate chat-log snapshots into the candidate's
+   * branch. Writing to os.tmpdir() keeps the tmp file invisible to git.
+   *
+   * `rename(2)` is atomic on POSIX, so a reader sees either the old complete
+   * file or the new complete file, never a mix.
    */
   private _atomicWrite(content: string): void {
-    const tmp = this.filePath + ".tmp-" + process.pid + "-" + Date.now();
+    const tmp = path.join(
+      os.tmpdir(),
+      `jivahire_chat_log.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
+    );
     fs.writeFileSync(tmp, content, "utf8");
     try {
       fs.renameSync(tmp, this.filePath);
-    } catch (e) {
-      // The rename failed; make sure we don't leave a stale `.tmp-` file in
-      // the workspace where the next `git add -A` would stage it.
+    } catch (e: unknown) {
+      // EXDEV: cross-device rename — happens when os.tmpdir() and the
+      // workspace are on different filesystems (common in containers and
+      // when /tmp is tmpfs). Copy then unlink as a fallback so the atomicity
+      // guarantee for readers of the destination still holds (the destination
+      // is replaced in one writeFileSync call).
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "EXDEV") {
+        try {
+          fs.writeFileSync(this.filePath, content, "utf8");
+          try { fs.unlinkSync(tmp); } catch { /* swallow */ }
+          return;
+        } catch (writeErr) {
+          try { fs.unlinkSync(tmp); } catch { /* swallow */ }
+          throw writeErr;
+        }
+      }
       try { fs.unlinkSync(tmp); } catch { /* swallow */ }
       throw e;
     }

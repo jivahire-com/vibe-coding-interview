@@ -1,0 +1,49 @@
+{
+  "challenge_id": "cpp-wafer-telemetry",
+  "title": "Streaming Metrics Aggregator",
+  "description": "Fix concurrency and numerical-stability bugs in a streaming per-source/per-sensor stats aggregator, wire SPC excursion detection through, implement a wafer-lifecycle finaliser, and design a batched async excursion reporter from scratch.",
+  "language": "cpp",
+  "code_fence": "cpp",
+  "difficulty": "senior",
+  "estimated_minutes": 60,
+  "max_minutes": 90,
+  "submission_files": [
+    "src/chamber_aggregator.h",
+    "src/chamber_aggregator.cpp",
+    "src/excursion_reporter.h",
+    "src/excursion_reporter.cpp"
+  ],
+  "starter_code_note": "The aggregator's storage layout (nested unordered_map keyed by chamber/wafer/sensor) and the complete SpcLimits implementation are provided. Do NOT credit the candidate for those choices. The ExcursionReporter header defines the contract but has no .cpp — Task 5 is a from-scratch design (queue, threading model, backpressure policy, shutdown discipline) and is the primary source of architectural-reasoning credit.",
+  "code_quality_criteria": [
+    "Correctness on public + hidden tests, with planted traps fixed",
+    "Thread safety verified under TSan (no data races on ingest or reporter)",
+    "Numerically stable variance algorithm (Welford or equivalent) for large-mean / small-variance series",
+    "Idiomatic C++17 — RAII, move semantics, pimpl boundary, noexcept where appropriate",
+    "Clarity, naming, and a justified backpressure policy for the reporter"
+  ],
+  "architectural_criteria": [
+    "ExcursionReporter queue design (mutex+condvar vs lock-free vs ring buffer) — Task 5",
+    "Backpressure policy explicit and justified (drop-oldest, drop-newest, block, coalesce) — Task 5",
+    "Threading model and shutdown discipline (drain in destructor, idempotent shutdown) — Task 5",
+    "Pimpl boundary respected (no implementation leakage through the header) — Task 5",
+    "Lock granularity in the aggregator (global vs per-chamber sharded)",
+    "Synchronisation primitive choice (std::mutex vs std::shared_mutex) and read/write balance",
+    "Deadlock avoidance and treatment of late-arriving readings"
+  ],
+  "tasks": [
+    {"id": "thread_safe_ingest",     "points": 25, "test_tag": "[thread]"},
+    {"id": "numerical_stability",    "points": 20, "test_tag": "[stats]"},
+    {"id": "spc_wiring",             "points": 15, "test_tag": "[spc]"},
+    {"id": "wafer_lifecycle",        "points": 15, "test_tag": "[lifecycle]"},
+    {"id": "excursion_reporter",     "points": 25, "test_tag": "[reporter]"}
+  ],
+  "composite_weights": {
+    "test_score":  0.25,
+    "trap_score":  0.15,
+    "code_quality": 0.25,
+    "ai_orchestration": 0.20,
+    "architectural_reasoning": 0.15
+  },
+  "total_points": 100,
+  "expected_tokens": 48000
+}

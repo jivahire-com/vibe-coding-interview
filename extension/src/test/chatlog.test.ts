@@ -176,6 +176,56 @@ describe('ChatLog', () => {
     expect(parsed).toHaveLength(2);
   });
 
+  // ── Review-Bug 5: tmp file lives outside the workspace ──────────────────
+
+  test('Review-Bug 5: workspace contains zero `.tmp` files after appends complete', () => {
+    // The auto-commit cycle's `git add -A` enumerates the workspace dir. If
+    // the tmp file lives there (even briefly between writeFileSync and
+    // renameSync), it can be staged into a commit before the rename
+    // completes. The fix moves the tmp file into os.tmpdir() so it's
+    // invisible to git — verify by checking the workspace directory contents
+    // after multiple appends.
+    const log = new ChatLog(tmpDir);
+    log.append(makeEntry());
+    log.append(makeEntry());
+    log.append(makeEntry());
+
+    const allFiles = fs.readdirSync(tmpDir);
+    expect(allFiles.filter((f) => f.includes('.tmp'))).toEqual([]);
+
+    // The canonical chat-log file is intact with all entries.
+    const finalEntries = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, '.jivahire_chat_log.json'), 'utf8'),
+    );
+    expect(finalEntries).toHaveLength(3);
+  });
+
+  test('Review-Bug 5: workspace stays clean even when chatlog is re-instantiated and appended to repeatedly', () => {
+    // Re-instantiating reads the existing log, then writes a fresh tmp + rename
+    // on each append. Verify the workspace stays clean across many cycles.
+    for (let i = 0; i < 5; i++) {
+      const log = new ChatLog(tmpDir);
+      log.append(makeEntry());
+    }
+    const allFiles = fs.readdirSync(tmpDir);
+    expect(allFiles.filter((f) => f.includes('.tmp'))).toEqual([]);
+    const final = JSON.parse(fs.readFileSync(path.join(tmpDir, '.jivahire_chat_log.json'), 'utf8'));
+    expect(final).toHaveLength(5);
+    // Sequence numbers are contiguous because each new instance resumes from max(seq).
+    expect(final.map((e: { sequence: number }) => e.sequence)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('Review-Bug 5: a peeked-at workspace mid-write never sees a .tmp sibling (smoke test)', () => {
+    // Race-style smoke: append, immediately re-list. Even though writes are
+    // synchronous (writeFileSync + renameSync), the test verifies the steady
+    // state — no tmp leakage — at every observable point.
+    const log = new ChatLog(tmpDir);
+    log.append(makeEntry());
+    expect(fs.readdirSync(tmpDir).filter((f) => f.includes('.tmp'))).toEqual([]);
+    log.append(makeEntry());
+    expect(fs.readdirSync(tmpDir).filter((f) => f.includes('.tmp'))).toEqual([]);
+  });
+
   test('Bug #13: a write/rename failure leaves the previous file content intact (no truncation)', () => {
     // The contract that protects auto-commit from staging a partial file: if
     // the second write (or rename) fails, the original file must still be

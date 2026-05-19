@@ -1,4 +1,4 @@
-import type { SessionConfig } from '../api';
+import { type SessionConfig, DEFAULT_MODEL_PRICING } from '../api';
 import * as vscode from 'vscode';
 
 export function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfig {
@@ -16,6 +16,7 @@ export function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfi
     chatModel: 'openai/gpt-4o-mini',
     availableChatModels: ['openai/gpt-4o-mini', 'openai/gpt-4o'],
     startedAt: Date.now(),
+    pricingPerMillion: { ...DEFAULT_MODEL_PRICING },
     ...overrides,
   };
 }

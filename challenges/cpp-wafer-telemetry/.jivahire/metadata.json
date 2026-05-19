@@ -1,0 +1,12 @@
+{
+  "challenge_id": "cpp-wafer-telemetry",
+  "title": "Streaming Metrics Aggregator",
+  "language": "cpp",
+  "difficulty": "senior",
+  "estimated_minutes": 60,
+  "max_minutes": 90,
+  "tags": ["concurrency", "numerical-stability", "systems", "backpressure"],
+  "public_test_file": "tests/public_tests.cpp",
+  "hidden_test_file": "tests/hidden_tests.cpp",
+  "grader": "cpp"
+}

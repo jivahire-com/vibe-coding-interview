@@ -49,10 +49,17 @@ export async function runSubmit(
   config: SessionConfig,
   deps: SubmitDeps = {}
 ): Promise<void> {
+  const remainingMs = config.startedAt + config.maxMinutes * 60_000 - Date.now();
+  const remainingMin = Math.max(0, Math.round(remainingMs / 60_000));
+  const detail = `${remainingMin} min remaining. Tests: status unknown.`;
+  // Default focus goes to the FIRST item — keep "Submit" away from the front
+  // unless the candidate is clearly out of time (<=5 min left).
+  const submitFirst = remainingMs <= 5 * 60_000;
+  const buttons = submitFirst ? ["Submit", "Cancel"] : ["Cancel", "Submit"];
   const confirm = await vscode.window.showWarningMessage(
     "Submit your final answer? You won't be able to edit after.",
-    { modal: true },
-    "Submit"
+    { modal: true, detail },
+    ...buttons
   );
   if (confirm !== "Submit") return;
 
@@ -79,11 +86,51 @@ export async function runSubmit(
           "Submitted! Grading will appear in the recruiter dashboard shortly."
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Submit failed: ${msg}`);
+        vscode.window.showErrorMessage(_friendlyErrorMessage(err, "submit"));
       }
     }
   );
+}
+
+/**
+ * Translate raw runtime errors into candidate-facing English. Used at the
+ * submit POST site and the test-runner site so candidates never see
+ * `ECONNREFUSED`, `Command failed: …`, or stack-trace fragments.
+ */
+export function _friendlyErrorMessage(
+  err: unknown,
+  context: "submit" | "tests"
+): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lower = raw.toLowerCase();
+  const contextLabel = context === "submit" ? "Submit" : "Tests";
+
+  if (
+    /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ECONNRESET/i.test(raw) ||
+    /timed out/i.test(lower)
+  ) {
+    return "Couldn't reach the JivaHire server — check your network and try again.";
+  }
+
+  const httpMatch = raw.match(/HTTP\s+(\d{3})/i);
+  if (httpMatch) {
+    const status = parseInt(httpMatch[1], 10);
+    if (status === 401 || status === 403) {
+      return "Session expired — re-enter your session key.";
+    }
+    if (status >= 500 && status < 600) {
+      return "Server is temporarily unavailable — wait and retry.";
+    }
+    if (status >= 400 && status < 500) {
+      return `${contextLabel} failed. Contact your recruiter if this persists.`;
+    }
+  }
+
+  if (context === "tests" && /Command failed|spawn|ENOENT/i.test(raw)) {
+    return "Tests didn't run — your environment may be missing a dependency.";
+  }
+
+  return `${contextLabel} failed. Contact your recruiter if this persists.`;
 }
 
 /**
@@ -153,20 +200,52 @@ export async function gitCommitAndPushAsync(
   const authedUrl = buildAuthedRemoteUrl(config.repoUrl, config.githubToken);
   const unauthedUrl = buildUnauthedRemoteUrl(config.repoUrl);
 
+  // Bug fix: if a previous tick committed but failed to push (network blip,
+  // token race), the working tree is clean on the next tick — the old code
+  // returned early and the local commit was never pushed. The grader then
+  // saw a stale remote branch. Detect "local ahead of upstream" and push
+  // even when there are no working-tree changes to commit.
+  let needPushOnly = false;
   if (!allowEmpty) {
     const { stdout } = await run(["status", "--porcelain"]);
-    if (!stdout.trim()) return;
+    if (!stdout.trim()) {
+      const aheadCount = await _countAheadOfUpstreamAsync(run);
+      if (aheadCount > 0) {
+        needPushOnly = true;
+      } else {
+        return;
+      }
+    }
   }
 
   await run(["remote", "set-url", "origin", authedUrl]);
   try {
-    const commitArgs = ["commit", "-m", message];
-    if (allowEmpty) commitArgs.push("--allow-empty");
-    await run(["add", "-A"]);
-    await run(commitArgs);
+    if (!needPushOnly) {
+      const commitArgs = ["commit", "-m", message];
+      if (allowEmpty) commitArgs.push("--allow-empty");
+      await run(["add", "-A"]);
+      await run(commitArgs);
+    }
     await run(["push"]);
   } finally {
     try { await run(["remote", "set-url", "origin", unauthedUrl]); }
     catch { /* swallow */ }
+  }
+}
+
+/**
+ * Returns the number of local commits ahead of the upstream tracking branch.
+ * Returns 0 when there is no upstream configured (the call errors and we
+ * conservatively report 0 — nothing to retry in that case).
+ */
+async function _countAheadOfUpstreamAsync(
+  run: (args: string[]) => Promise<{ stdout: string; stderr: string }>,
+): Promise<number> {
+  try {
+    const { stdout } = await run(["rev-list", "--count", "@{u}..HEAD"]);
+    const n = parseInt(stdout.trim(), 10);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
   }
 }

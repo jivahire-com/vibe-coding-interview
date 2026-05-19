@@ -64,6 +64,26 @@ export const window = {
   showInformationMessage: jest.fn().mockResolvedValue(undefined),
   showWarningMessage: jest.fn().mockResolvedValue(undefined),
   showInputBox: jest.fn().mockResolvedValue(undefined),
+  showQuickPick: jest.fn().mockResolvedValue(undefined),
+
+  /** Test-controlled active editor. */
+  activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
+
+  /**
+   * Tab-group mock with mutable tab list so tests can simulate VS Code's
+   * tab API. Tests push fake diff tabs onto _tabs; the close() implementation
+   * removes them so production code's close-by-URI logic is verifiable.
+   */
+  tabGroups: {
+    _tabs: [] as any[],
+    get all() { return [{ tabs: (window as any).tabGroups._tabs }]; },
+    close: jest.fn().mockImplementation(async (tab: any) => {
+      const arr = (window as any).tabGroups._tabs as any[];
+      const i = arr.indexOf(tab);
+      if (i >= 0) arr.splice(i, 1);
+      return true;
+    }),
+  },
 
   withProgress: jest.fn().mockImplementation(
     (_opts: unknown, task: (p: { report: () => void }) => Promise<void>) =>
@@ -80,6 +100,35 @@ export const window = {
       return { dispose: jest.fn() };
     },
   ),
+
+  /** Stores the last registered callback so tests can fire active-editor events. */
+  _activeEditorCallback: null as ((e: unknown) => void) | null,
+  onDidChangeActiveTextEditor: jest.fn().mockImplementation(
+    (cb: (e: unknown) => void) => {
+      (window as any)._activeEditorCallback = cb;
+      return { dispose: jest.fn() };
+    },
+  ),
+};
+
+// ─── debug ───────────────────────────────────────────────────────────────────
+
+export const debug = {
+  _debugStartCallback: null as ((s: unknown) => void) | null,
+  onDidStartDebugSession: jest.fn().mockImplementation((cb: (s: unknown) => void) => {
+    (debug as any)._debugStartCallback = cb;
+    return { dispose: jest.fn() };
+  }),
+};
+
+// ─── tests ───────────────────────────────────────────────────────────────────
+
+export const tests = {
+  _testRunCallback: null as ((r: unknown) => void) | null,
+  onDidStartTestRun: jest.fn().mockImplementation((cb: (r: unknown) => void) => {
+    (tests as any)._testRunCallback = cb;
+    return { dispose: jest.fn() };
+  }),
 };
 
 // ─── workspace ───────────────────────────────────────────────────────────────
@@ -125,3 +174,11 @@ export const env = {
     writeText: jest.fn().mockResolvedValue(undefined),
   },
 };
+
+/**
+ * Marker class matching vscode.TabInputTextDiff so apply.ts can
+ * `instanceof`-check tabs when looking for the diff to close.
+ */
+export class TabInputTextDiff {
+  constructor(public readonly original: Uri, public readonly modified: Uri) {}
+}

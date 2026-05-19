@@ -53,12 +53,20 @@ def _migrate() -> None:
         ("sessions", "typed_chars", "INTEGER NOT NULL DEFAULT 0"),
         ("sessions", "pasted_chars", "INTEGER NOT NULL DEFAULT 0"),
         ("sessions", "ai_applied_chars", "INTEGER NOT NULL DEFAULT 0"),
+        ("sessions", "meet_link", "TEXT"),
+        ("sessions", "video_platform", "TEXT NOT NULL DEFAULT 'google_meet'"),
+        ("sessions", "scheduled_at", "INTEGER"),
+        ("sessions", "panelist_emails", "TEXT"),
         ("chat_exchanges", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "prompt_text", "TEXT"),
         ("chat_exchanges", "prompt_classification", "TEXT"),
         ("grades", "prompt_quality_score", "INTEGER"),
         ("grades", "token_efficiency_score", "INTEGER"),
+        ("grades", "developer_confidence_score", "INTEGER"),
+        ("grades", "developer_confidence_verdict", "TEXT"),
+        ("grades", "developer_confidence_signals", "TEXT"),
+        ("grades", "developer_confidence_reasoning", "TEXT"),
     ]
     conn = _conn()
     for table, column, col_def in migrations:

@@ -9,7 +9,13 @@
  *  – window focus/unfocus events
  *  – dispose() clears the flush timer
  */
-import { TelemetryTracker, suppressNextApplyEvent } from '../telemetry';
+import {
+  TelemetryTracker,
+  suppressNextApplyEvent,
+  MAX_BUFFERED_EVENTS,
+  TELEMETRY_POST_TIMEOUT_MS,
+} from '../telemetry';
+import * as http from 'http';
 import * as vscode from 'vscode';
 import { makeConfig, makeMockContext } from './helpers';
 
@@ -171,6 +177,61 @@ describe('TelemetryTracker', () => {
     expect(emitSpy).not.toHaveBeenCalledWith('app_focused', expect.anything());
   });
 
+  // ── Developer-signal events ───────────────────────────────────────────────
+
+  const getActiveEditorCb = () => (vscode.window as any)._activeEditorCallback as
+    ((e: any) => void) | null;
+  const getDebugStartCb = () => (vscode.debug as any)._debugStartCallback as
+    ((s: any) => void) | null;
+  const getTestRunCb = () => (vscode.tests as any)._testRunCallback as
+    ((r: any) => void) | null;
+
+  test('emits file_open when active editor changes to a workspace file', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    getActiveEditorCb()?.({
+      document: { uri: { scheme: 'file', fsPath: '/ws/src/main.cpp' } },
+    });
+    expect(emitSpy).toHaveBeenCalledWith('file_open', { file: 'src/main.cpp' });
+  });
+
+  test('file_open is deduped — reopening the same file emits once', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    const cb = getActiveEditorCb()!;
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    const calls = emitSpy.mock.calls.filter((c) => c[0] === 'file_open');
+    expect(calls).toHaveLength(1);
+  });
+
+  test('file_open ignores non-file URIs and files outside workspace', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    const cb = getActiveEditorCb()!;
+    cb({ document: { uri: { scheme: 'git', fsPath: '/ws/a.ts' } } });
+    cb({ document: { uri: { scheme: 'file', fsPath: '/elsewhere/a.ts' } } });
+    expect(emitSpy).not.toHaveBeenCalledWith('file_open', expect.anything());
+  });
+
+  test('emits debug_session when a debug session starts', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    getDebugStartCb()?.({ type: 'node', name: 'Launch test' });
+    expect(emitSpy).toHaveBeenCalledWith('debug_session', { type: 'node', name: 'Launch test' });
+  });
+
+  test('emits test_run when a test run starts', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    getTestRunCb()?.({ name: 'pytest -k foo' });
+    expect(emitSpy).toHaveBeenCalledWith('test_run', { profile: 'pytest -k foo' });
+  });
+
+  test('test_run defaults profile to "default" when name is missing', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    getTestRunCb()?.({});
+    expect(emitSpy).toHaveBeenCalledWith('test_run', { profile: 'default' });
+  });
+
   // ── dispose ───────────────────────────────────────────────────────────────
 
   test('dispose() does not throw', () => {
@@ -217,6 +278,46 @@ describe('TelemetryTracker', () => {
     expect(new Set(ids).size).toBe(2);
   });
 
+  // ── Review-Bug 10: dispose() durably persists the un-posted buffer ────
+
+  test('Review-Bug 10: dispose() writes the in-memory buffer to globalState BEFORE the network flush', () => {
+    // Simulate events that have been buffered but never POSTed yet. dispose()
+    // is synchronous so it cannot await the network flush — the only safe
+    // path is to persist the buffer to globalState first so the next
+    // activate() restores them via the BUFFER_KEY init in the constructor.
+    tracker.emit('e1', { x: 1 });
+    tracker.emit('e2', { x: 2 });
+    const updateSpy = jest.spyOn(context.globalState, 'update');
+    tracker.dispose();
+
+    // The very first update on dispose carries the un-posted buffer
+    const persistCall = updateSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === 'vibe.telemetry.buffer',
+    );
+    expect(persistCall).toBeDefined();
+    const persisted = persistCall![1] as Array<{ event_type: string }>;
+    // Must have BOTH events — the splice-then-fail-to-post race used to lose them.
+    const evNames = persisted.map((e) => e.event_type);
+    expect(evNames).toEqual(expect.arrayContaining(['e1', 'e2']));
+  });
+
+  test('Review-Bug 10: dispose passes a defensive copy (mutating buffer post-dispose does not corrupt persisted state)', () => {
+    // The dispose snapshot must be a copy, not the live `_buffer` reference,
+    // so the subsequent `_flush` splice cannot retroactively empty the value
+    // we already persisted to globalState.
+    tracker.emit('a', {});
+    const updateSpy = jest.spyOn(context.globalState, 'update');
+    tracker.dispose();
+    const persistCall = updateSpy.mock.calls.find((c: unknown[]) => c[0] === 'vibe.telemetry.buffer');
+    expect(persistCall).toBeDefined();
+    const persistedRef = persistCall![1] as Array<{ event_type: string }>;
+    // Verify the persisted value is NOT the same object as the live buffer
+    // (so the later _flush.splice cannot mutate it).
+    const liveBuf = (tracker as unknown as { _buffer: unknown })._buffer;
+    expect(persistedRef).not.toBe(liveBuf);
+    expect(persistedRef.map((e) => e.event_type)).toEqual(['a']);
+  });
+
   test('Bug #12: a second flush kicked off while one is in flight is short-circuited', async () => {
     // Use real timers for this test only — the in-flight guard is tested via
     // microtask interleaving, not fake-timer advancement.
@@ -256,5 +357,166 @@ describe('TelemetryTracker', () => {
     expect(buf.map((e) => e.event_type)).toEqual(['y']);
 
     jest.useFakeTimers();
+  });
+
+  // ── Buffer cap: drop-oldest on persistent failure ─────────────────────────
+
+  test('exports MAX_BUFFERED_EVENTS = 5000', () => {
+    expect(MAX_BUFFERED_EVENTS).toBe(5000);
+  });
+
+  test('failed flush with buffer over the cap drops OLDEST events down to MAX_BUFFERED_EVENTS', async () => {
+    const t = tracker as unknown as {
+      _post: (b: unknown[]) => Promise<void>;
+      _flush: () => Promise<void>;
+      _buffer: Array<{ ts: number; event_type: string; payload: { i: number }; id: string }>;
+    };
+    t._post = jest.fn().mockRejectedValue(new Error('network down'));
+
+    // Seed the buffer directly so we can deterministically force the failure
+    // path into the drop-oldest branch without intermediate threshold flushes.
+    const TOTAL = MAX_BUFFERED_EVENTS + 250;
+    const seeded = [] as Array<{ ts: number; event_type: string; payload: { i: number }; id: string }>;
+    for (let i = 0; i < TOTAL; i++) {
+      seeded.push({ ts: i, event_type: 'overflow', payload: { i }, id: `seed-${i}` });
+    }
+    t._buffer = seeded;
+
+    await t._flush();
+
+    const buf = t._buffer;
+    expect(buf.length).toBe(MAX_BUFFERED_EVENTS);
+    const indices = buf.map((e) => e.payload.i);
+    // Newest event survived; oldest 250 were dropped.
+    expect(Math.max(...indices)).toBe(TOTAL - 1);
+    expect(Math.min(...indices)).toBe(TOTAL - MAX_BUFFERED_EVENTS);
+  });
+
+  test('drop-oldest path logs a console.warn (server-side issue, no user toast)', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const t = tracker as unknown as {
+        _post: (b: unknown[]) => Promise<void>;
+        _flush: () => Promise<void>;
+        _buffer: Array<{ ts: number; event_type: string; payload: Record<string, unknown>; id: string }>;
+      };
+      t._post = jest.fn().mockRejectedValue(new Error('network down'));
+      const seeded = [];
+      for (let i = 0; i < MAX_BUFFERED_EVENTS + 10; i++) {
+        seeded.push({ ts: i, event_type: 'x', payload: { i }, id: `s-${i}` });
+      }
+      t._buffer = seeded;
+      await t._flush();
+      expect(warnSpy).toHaveBeenCalled();
+      // It must NOT have surfaced a user-facing error.
+      expect((vscode.window.showErrorMessage as jest.Mock)).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // ── POST request timeout ──────────────────────────────────────────────────
+
+  test('exports TELEMETRY_POST_TIMEOUT_MS = 15000', () => {
+    expect(TELEMETRY_POST_TIMEOUT_MS).toBe(15_000);
+  });
+
+  test('_post wires req.setTimeout with TELEMETRY_POST_TIMEOUT_MS and rejects + destroys on fire', async () => {
+    // Build a fake req we fully control.
+    const reqHandlers: Record<string, Function> = {};
+    let timeoutMs: number | undefined;
+    let timeoutCb: Function | undefined;
+    const req: any = {
+      on: jest.fn((evt: string, cb: Function): any => {
+        reqHandlers[evt] = cb;
+        return req;
+      }),
+      setTimeout: jest.fn((ms: number, cb: Function): any => {
+        timeoutMs = ms;
+        timeoutCb = cb;
+        return req;
+      }),
+      destroy: jest.fn(),
+      write: jest.fn(),
+      end: jest.fn(),
+    };
+    (http.request as jest.Mock).mockImplementationOnce(() => req as any);
+
+    const t = tracker as unknown as { _post: (b: unknown[]) => Promise<void> };
+    const p = t._post([{ ts: 0, event_type: 'x', payload: {}, id: '1' } as any]);
+
+    expect(req.setTimeout).toHaveBeenCalledTimes(1);
+    expect(timeoutMs).toBe(TELEMETRY_POST_TIMEOUT_MS);
+    expect(typeof timeoutCb).toBe('function');
+
+    // Fire the timeout — the promise must reject and the request destroyed.
+    timeoutCb!();
+
+    await expect(p).rejects.toThrow(/timed out|timeout/i);
+    expect(req.destroy).toHaveBeenCalled();
+  });
+
+  // ── Warning throttle: one-time after 3 consecutive failures ───────────────
+
+  test('after 3 consecutive failed flushes shows a single warning mentioning network + local-save', async () => {
+    const t = tracker as unknown as {
+      _post: (b: unknown[]) => Promise<void>;
+      _flush: () => Promise<void>;
+    };
+    t._post = jest.fn().mockRejectedValue(new Error('network down'));
+
+    for (let i = 0; i < 3; i++) {
+      tracker.emit(`e${i}`, {});
+      await t._flush();
+    }
+
+    const showWarn = vscode.window.showWarningMessage as jest.Mock;
+    expect(showWarn).toHaveBeenCalledTimes(1);
+    const msg = showWarn.mock.calls[0][0] as string;
+    expect(msg).toMatch(/network/i);
+    expect(msg).toMatch(/saved|locally|local/i);
+  });
+
+  test('a 4th consecutive failure does not re-fire the warning', async () => {
+    const t = tracker as unknown as {
+      _post: (b: unknown[]) => Promise<void>;
+      _flush: () => Promise<void>;
+    };
+    t._post = jest.fn().mockRejectedValue(new Error('network down'));
+
+    for (let i = 0; i < 4; i++) {
+      tracker.emit(`e${i}`, {});
+      await t._flush();
+    }
+
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a successful flush re-arms the warning so a later 3-fail run fires again', async () => {
+    const t = tracker as unknown as {
+      _post: (b: unknown[]) => Promise<void>;
+      _flush: () => Promise<void>;
+    };
+    const postMock = jest.fn().mockRejectedValue(new Error('down'));
+    t._post = postMock as any;
+
+    // First 3 failures → warning #1
+    for (let i = 0; i < 3; i++) {
+      tracker.emit(`a${i}`, {});
+      await t._flush();
+    }
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+
+    // One success — resets counter and re-arms.
+    postMock.mockResolvedValueOnce(undefined as any);
+    tracker.emit('good', {});
+    await t._flush();
+
+    // Three more failures → warning #2
+    for (let i = 0; i < 3; i++) {
+      tracker.emit(`b${i}`, {});
+      await t._flush();
+    }
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(2);
   });
 });

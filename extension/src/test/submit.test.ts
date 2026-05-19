@@ -14,14 +14,25 @@ import {
   gitCommitAndPushAsync,
   buildAuthedRemoteUrl,
   buildUnauthedRemoteUrl,
+  runSubmit,
 } from '../submit';
 import { execFileSync, execFile } from 'child_process';
 import { makeConfig } from './helpers';
+import * as vscode from 'vscode';
+import * as api from '../api';
 
 jest.mock('child_process', () => ({
   execFileSync: jest.fn().mockReturnValue(Buffer.from('')),
   execFile: jest.fn(),
 }));
+
+jest.mock('../api', () => {
+  const actual = jest.requireActual('../api');
+  return {
+    ...actual,
+    submitSession: jest.fn().mockResolvedValue(undefined),
+  };
+});
 
 const mockExecFile = execFileSync as jest.Mock;
 const mockExecFileAsync = execFile as unknown as jest.Mock;
@@ -225,6 +236,77 @@ describe('gitCommitAndPushAsync (Bug #6: must not block main thread)', () => {
     await expect(gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', true)).resolves.toBeUndefined();
   });
 
+  // ── Review-Bug 4: retry push when local commits are ahead of upstream ──
+
+  test('Review-Bug 4: clean tree + commits ahead of upstream → push runs anyway, no commit', async () => {
+    const config = makeConfig({
+      repoUrl: 'https://github.com/org/repo',
+      githubToken: 'tok',
+    });
+    let pushCount = 0;
+    let commitCount = 0;
+    mockExecFileAsync.mockImplementation(
+      (_bin: string, args: string[], _opts: unknown, cb: (e: Error | null, r: { stdout: string; stderr: string }) => void) => {
+        if (args[0] === 'status' && args[1] === '--porcelain') {
+          // Working tree is clean — pre-fix code returned here and never pushed.
+          cb(null, { stdout: '', stderr: '' });
+        } else if (args[0] === 'rev-list') {
+          // Two commits ahead of upstream → must push.
+          cb(null, { stdout: '2\n', stderr: '' });
+        } else if (args[0] === 'commit') {
+          commitCount++;
+          cb(null, { stdout: '', stderr: '' });
+        } else if (args[0] === 'push') {
+          pushCount++;
+          cb(null, { stdout: '', stderr: '' });
+        } else {
+          cb(null, { stdout: '', stderr: '' });
+        }
+      },
+    );
+    await gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', false);
+    // The unpushed commits get retried — push runs; commit does NOT (no new
+    // changes to commit).
+    expect(pushCount).toBe(1);
+    expect(commitCount).toBe(0);
+  });
+
+  test('Review-Bug 4: clean tree + nothing ahead of upstream → no push, fast-path return', async () => {
+    const config = makeConfig({
+      repoUrl: 'https://github.com/org/repo',
+      githubToken: 'tok',
+    });
+    let pushCount = 0;
+    mockExecFileAsync.mockImplementation(
+      (_bin: string, args: string[], _opts: unknown, cb: (e: Error | null, r: { stdout: string; stderr: string }) => void) => {
+        if (args[0] === 'status' && args[1] === '--porcelain') cb(null, { stdout: '', stderr: '' });
+        else if (args[0] === 'rev-list') cb(null, { stdout: '0\n', stderr: '' });
+        else if (args[0] === 'push') { pushCount++; cb(null, { stdout: '', stderr: '' }); }
+        else cb(null, { stdout: '', stderr: '' });
+      },
+    );
+    await gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', false);
+    expect(pushCount).toBe(0);
+  });
+
+  test('Review-Bug 4: rev-list failure (no upstream) is treated as 0 ahead, fast-path return', async () => {
+    const config = makeConfig({
+      repoUrl: 'https://github.com/org/repo',
+      githubToken: 'tok',
+    });
+    let pushCount = 0;
+    mockExecFileAsync.mockImplementation(
+      (_bin: string, args: string[], _opts: unknown, cb: (e: Error | null, r: { stdout: string; stderr: string }) => void) => {
+        if (args[0] === 'status' && args[1] === '--porcelain') cb(null, { stdout: '', stderr: '' });
+        else if (args[0] === 'rev-list') cb(new Error('no upstream'), { stdout: '', stderr: '' });
+        else if (args[0] === 'push') { pushCount++; cb(null, { stdout: '', stderr: '' }); }
+        else cb(null, { stdout: '', stderr: '' });
+      },
+    );
+    await gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', false);
+    expect(pushCount).toBe(0);
+  });
+
   test('restores unauthed URL even if push rejects', async () => {
     const config = makeConfig({
       repoUrl: 'https://github.com/org/repo',
@@ -243,5 +325,133 @@ describe('gitCommitAndPushAsync (Bug #6: must not block main thread)', () => {
     expect(setUrlCalls.length).toBeGreaterThanOrEqual(2);
     const lastArg = (setUrlCalls[setUrlCalls.length - 1][1] as string[])[3];
     expect(lastArg).not.toContain('tok');
+  });
+});
+
+// ── Bug A: confirm modal must show time-remaining context and avoid
+//          defaulting focus to "Submit" when the candidate clearly still has
+//          time. ────────────────────────────────────────────────────────────
+
+describe('runSubmit confirm modal (Bug A)', () => {
+  const ws = '/tmp/fake-workspace';
+  const showWarn = vscode.window.showWarningMessage as jest.Mock;
+  const submitSession = api.submitSession as jest.Mock;
+
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExecFile.mockReturnValue(Buffer.from(''));
+    showWarn.mockReset();
+    submitSession.mockReset();
+    submitSession.mockResolvedValue(undefined);
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: ws } },
+    ];
+  });
+
+  function lastWarnCall() {
+    return showWarn.mock.calls[showWarn.mock.calls.length - 1];
+  }
+
+  test('Bug A: 60 min remaining → detail mentions remaining time and Submit is NOT the first/default button', async () => {
+    showWarn.mockResolvedValue(undefined); // user dismisses
+    const config = makeConfig({ startedAt: Date.now() - 30 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    expect(showWarn).toHaveBeenCalled();
+    const [, opts, ...buttons] = lastWarnCall();
+    // Options object must include modal: true and a detail line.
+    expect(opts).toEqual(expect.objectContaining({ modal: true }));
+    expect(typeof opts.detail).toBe('string');
+    expect(opts.detail).toMatch(/60\s*min/i);
+    // Submit must not be the first button when the candidate has > 5 minutes
+    // remaining (showWarningMessage focuses the FIRST item).
+    expect(buttons[0]).not.toBe('Submit');
+    // Cancel is always present.
+    expect(buttons).toContain('Cancel');
+    // Submit is still present as a non-default choice.
+    expect(buttons).toContain('Submit');
+  });
+
+  test('Bug A: 2 min remaining → Submit can be first/default', async () => {
+    showWarn.mockResolvedValue(undefined);
+    const config = makeConfig({ startedAt: Date.now() - 88 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    const [, opts, ...buttons] = lastWarnCall();
+    expect(opts).toEqual(expect.objectContaining({ modal: true }));
+    expect(typeof opts.detail).toBe('string');
+    expect(buttons[0]).toBe('Submit');
+    expect(buttons).toContain('Cancel');
+  });
+
+  test('Bug A: expired session (negative time) → Submit can be first/default', async () => {
+    showWarn.mockResolvedValue(undefined);
+    const config = makeConfig({ startedAt: Date.now() - 120 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    const [, , ...buttons] = lastWarnCall();
+    expect(buttons[0]).toBe('Submit');
+    expect(buttons).toContain('Cancel');
+  });
+
+  test('Bug A: user picks Cancel → submitSession is NOT called', async () => {
+    showWarn.mockResolvedValue('Cancel');
+    const config = makeConfig({ startedAt: Date.now() - 30 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+    expect(submitSession).not.toHaveBeenCalled();
+  });
+});
+
+// ── Bug B: raw error strings (network/HTTP) must be presented as plain
+//          English, never as raw `Error.message` text. ──────────────────────
+
+describe('runSubmit friendly errors (Bug B)', () => {
+  const ws = '/tmp/fake-workspace';
+  const showWarn = vscode.window.showWarningMessage as jest.Mock;
+  const showErr = vscode.window.showErrorMessage as jest.Mock;
+  const submitSession = api.submitSession as jest.Mock;
+
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExecFile.mockReturnValue(Buffer.from(''));
+    showWarn.mockReset();
+    showWarn.mockResolvedValue('Submit'); // user confirms
+    showErr.mockReset();
+    submitSession.mockReset();
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: ws } },
+    ];
+  });
+
+  test('Bug B: ECONNREFUSED is surfaced as plain English, not the raw message', async () => {
+    submitSession.mockRejectedValue(new Error('ECONNREFUSED 192.168.1.1:8080'));
+    const config = makeConfig({ startedAt: Date.now() - 88 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    expect(showErr).toHaveBeenCalled();
+    const msg = (showErr.mock.calls[0][0] as string);
+    expect(msg).not.toMatch(/ECONNREFUSED/);
+    expect(msg).not.toMatch(/192\.168\.1\.1/);
+    expect(msg.toLowerCase()).toMatch(/network|reach|jivahire/);
+  });
+
+  test('Bug B: HTTP 401 → "Session expired" guidance', async () => {
+    submitSession.mockRejectedValue(new Error('HTTP 401: unauthorized'));
+    const config = makeConfig({ startedAt: Date.now() - 88 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    const msg = (showErr.mock.calls[0][0] as string);
+    expect(msg).not.toMatch(/HTTP 401/);
+    expect(msg.toLowerCase()).toMatch(/session expired|re-enter/);
+  });
+
+  test('Bug B: HTTP 500 → "temporarily unavailable" guidance', async () => {
+    submitSession.mockRejectedValue(new Error('HTTP 503: bad gateway'));
+    const config = makeConfig({ startedAt: Date.now() - 88 * 60_000, maxMinutes: 90 });
+    await runSubmit(config);
+
+    const msg = (showErr.mock.calls[0][0] as string);
+    expect(msg).not.toMatch(/HTTP 503/);
+    expect(msg.toLowerCase()).toMatch(/temporar|unavailable|retry|wait/);
   });
 });

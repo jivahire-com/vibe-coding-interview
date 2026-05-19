@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     max_minutes INTEGER NOT NULL DEFAULT 90,
     started_at INTEGER,
     submitted_at INTEGER,
+    meet_link TEXT,
+    video_platform TEXT NOT NULL DEFAULT 'google_meet',
+    scheduled_at INTEGER,
+    panelist_emails TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(session_key);

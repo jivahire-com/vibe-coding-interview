@@ -1,0 +1,32 @@
+{
+  "traps": [
+    {
+      "id": "race_on_ingest",
+      "description": "ChamberAggregator::ingest mutates the nested unordered_map without synchronisation. Undefined behaviour under concurrent calls.",
+      "detection_tag": "[thread]",
+      "points": 20,
+      "severity": 3
+    },
+    {
+      "id": "numerical_instability",
+      "description": "compute_running_stats uses (sum_sq - sum^2/n)/(n-1). Catastrophic cancellation produces NaN or 0 stddev for series like 760 +/- 0.001 Torr.",
+      "detection_tag": "[stats]",
+      "points": 15,
+      "severity": 2
+    },
+    {
+      "id": "late_reading_resurrection",
+      "description": "ingest() does not check whether (chamber, wafer) has been completed; late readings re-create freed wafer state, leaking memory and corrupting downstream records.",
+      "detection_tag": "[lifecycle]",
+      "points": 10,
+      "severity": 2
+    },
+    {
+      "id": "reporter_shutdown_leak",
+      "description": "Candidate-implemented ExcursionReporter must drain pending excursions and join its worker in the destructor. Easy to forget; causes lost events on scope exit.",
+      "detection_tag": "[reporter]",
+      "points": 10,
+      "severity": 2
+    }
+  ]
+}

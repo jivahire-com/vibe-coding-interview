@@ -348,11 +348,11 @@ Respond with JSON only — emit "analysis" BEFORE "score":
 
 def _eval_prompt_quality(client, session_id: str, chat_log: list) -> dict:
     if not chat_log:
-        return {"score": 5, "reasoning": "No prompts to evaluate."}
+        return {"score": 1, "reasoning": "No prompts to evaluate."}
 
     prompts = [e.get("prompt_text", "") for e in chat_log if e.get("prompt_text")]
     if not prompts:
-        return {"score": 5, "reasoning": "No prompt text found in chat log."}
+        return {"score": 1, "reasoning": "No prompt text found in chat log."}
 
     classification_prompt = f"""Classify each candidate prompt as one of: vague, specific, professional.
 
@@ -429,7 +429,7 @@ def _eval_token_efficiency(ctx: dict, session_id: str, rubric: dict,
     actual_tokens = (rows[0]["total"] or 0) if rows else 0
 
     if actual_tokens == 0:
-        return {"score": 5, "reasoning": "No token usage recorded — unable to evaluate token efficiency."}
+        return {"score": 1, "reasoning": "No token usage recorded — unable to evaluate token efficiency."}
 
     try:
         repo_tokens = get_repo_tokens(challenge_root, settings.chat_model)

@@ -1,0 +1,12 @@
+{
+  "challenge_id": "javascript-paginated-user-search",
+  "title": "Paginated User List with Debounced Search",
+  "language": "javascript",
+  "difficulty": "junior",
+  "estimated_minutes": 30,
+  "max_minutes": 60,
+  "tags": ["debounce", "async", "ui-state", "closures"],
+  "public_test_file": "tests/user_search.public.test.js",
+  "hidden_test_file": "tests/user_search.hidden.test.js",
+  "grader": "typescript"
+}

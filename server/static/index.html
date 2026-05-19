@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>JivaHire Dashboard</title>
   <link rel="stylesheet" href="/style.css" />
+  <script>
+    // Apply theme before render to prevent flash. App.toggleTheme() updates it later.
+    (function () {
+      var saved = localStorage.getItem('jh_theme');
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var theme = saved || (prefersDark ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
   <script src="/app.js"></script>
 </head>
@@ -20,6 +29,18 @@
     </div>
 
     <div class="ml-auto flex items-center gap-2" x-show="view !== 'login'">
+      <button class="btn btn-ghost btn-sm theme-toggle" @click="toggleTheme()" :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'">
+        <svg x-show="theme === 'dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg x-show="theme !== 'dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <a class="btn btn-ghost btn-sm" href="/challenges" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        Challenge Repositories
+      </a>
+      <a class="btn btn-ghost btn-sm" href="/author-docs.html" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        Authoring Docs
+      </a>
       <button class="btn btn-primary btn-sm" @click="openInvite()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Send Invite
@@ -183,12 +204,28 @@
               <span x-text="selectedSession.session.challenge_id"></span>
               &nbsp;·&nbsp;
               <span class="badge" :class="`badge-${selectedSession.session.status}`" x-text="selectedSession.session.status"></span>
+              <template x-if="selectedSession.session.meet_link">
+                <a class="btn btn-primary btn-sm" :href="selectedSession.session.meet_link" target="_blank" rel="noopener" style="margin-left:8px">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                  Open video call
+                </a>
+              </template>
             </p>
             <p class="text-sm text-muted" style="margin-top:6px">
               Started: <span x-text="formatDate(selectedSession.session.started_at)"></span>
               &nbsp;·&nbsp;
               Submitted: <span x-text="formatDate(selectedSession.session.submitted_at)"></span>
             </p>
+            <template x-if="selectedSession.session.scheduled_at">
+              <p class="text-sm text-muted" style="margin-top:4px">
+                Scheduled: <strong x-text="formatDate(selectedSession.session.scheduled_at)"></strong>
+              </p>
+            </template>
+            <template x-if="selectedSession.session.panelist_emails">
+              <p class="text-sm text-muted" style="margin-top:4px">
+                Panel: <span x-text="selectedSession.session.panelist_emails"></span>
+              </p>
+            </template>
           </div>
         </div>
 
@@ -249,6 +286,53 @@
             </template>
             <template x-if="!selectedSession.grade">
               <p class="text-muted" style="font-size:13px">Not yet graded.</p>
+            </template>
+          </div>
+
+          <!-- Developer Signal (behavioral — NOT part of the score) -->
+          <div class="card">
+            <h3>Developer Signal</h3>
+            <p class="text-sm text-muted" style="margin:-4px 0 10px">
+              Behavioral signal — does not affect the score.
+            </p>
+            <template x-if="selectedSession.grade && selectedSession.grade.developer_confidence_score !== null && selectedSession.grade.developer_confidence_score !== undefined">
+              <div>
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+                  <div style="font-size:32px;font-weight:600" x-text="`${selectedSession.grade.developer_confidence_score}/100`"></div>
+                  <span class="badge"
+                        :class="devConfidenceBadgeClass(selectedSession.grade.developer_confidence_verdict)"
+                        x-text="selectedSession.grade.developer_confidence_verdict"></span>
+                </div>
+                <p class="text-sm" style="margin:0 0 10px" x-text="selectedSession.grade.developer_confidence_reasoning || ''"></p>
+                <details>
+                  <summary class="text-sm text-muted" style="cursor:pointer">Signal breakdown</summary>
+                  <div class="stat-grid" style="margin-top:8px" x-data="{ sigs: parseDevConfidenceSignals(selectedSession.grade.developer_confidence_signals) }">
+                    <div class="stat-item">
+                      <div class="stat-label">Files explored</div>
+                      <div class="stat-val" x-text="sigs.files_explored ?? '—'"></div>
+                    </div>
+                    <div class="stat-item">
+                      <div class="stat-label">AI output modified</div>
+                      <div class="stat-val" x-text="sigs.ai_output_modified_ratio !== undefined ? `${Math.round(sigs.ai_output_modified_ratio * 100)}%` : '—'"></div>
+                    </div>
+                    <div class="stat-item">
+                      <div class="stat-label">Prompt specificity</div>
+                      <div class="stat-val" x-text="sigs.prompt_specificity !== null && sigs.prompt_specificity !== undefined ? `${Math.round(sigs.prompt_specificity * 100)}%` : '—'"></div>
+                    </div>
+                    <div class="stat-item">
+                      <div class="stat-label">Test runs</div>
+                      <div class="stat-val" x-text="sigs.test_runs ?? '—'"></div>
+                    </div>
+                    <div class="stat-item">
+                      <div class="stat-label">Used debugger</div>
+                      <div class="stat-val" x-text="sigs.used_debugger ? 'yes' : 'no'"></div>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </template>
+            <template x-if="!selectedSession.grade || selectedSession.grade.developer_confidence_score === null || selectedSession.grade.developer_confidence_score === undefined">
+              <p class="text-muted" style="font-size:13px">Not yet computed.</p>
             </template>
           </div>
 
@@ -317,6 +401,28 @@
           </div>
         </div>
 
+        <!-- Candidate Prompts -->
+        <div class="card prompts-card">
+          <h3>Candidate Prompts <span class="count-chip" x-text="promptExchanges(selectedSession).length"></span></h3>
+          <template x-if="promptExchanges(selectedSession).length === 0">
+            <p class="text-muted" style="font-size:13px">No chat prompts recorded.</p>
+          </template>
+          <template x-for="(e, i) in promptExchanges(selectedSession)" :key="i">
+            <div class="prompt-row">
+              <div class="prompt-meta">
+                <span class="prompt-index" x-text="`#${i + 1}`"></span>
+                <span class="text-sm text-muted" x-text="formatDate(e.ts)"></span>
+                <template x-if="e.prompt_classification">
+                  <span class="badge" :class="promptClassBadge(e.prompt_classification)" x-text="e.prompt_classification"></span>
+                </template>
+                <span class="text-sm text-muted ml-auto"
+                      x-text="`${fmtNum((e.prompt_tokens ?? 0) + (e.completion_tokens ?? 0))} tok`"></span>
+              </div>
+              <pre class="prompt-text" x-text="e.prompt_text || '(prompt not recorded)'"></pre>
+            </div>
+          </template>
+        </div>
+
         <!-- Grader Summary -->
         <template x-if="selectedSession.grade?.grader_summary">
           <div class="card summary-card">
@@ -360,24 +466,28 @@
       </div>
 
       <div class="field">
-        <label>Session Key</label>
+        <label>
+          Session Key
+          <span class="info-icon" title="A unique code (e.g. ABC-1234) the candidate enters in the JivaHire VS Code extension to start their interview. Each key is tied to one candidate and one challenge — it cannot be shared or reused. Choose something easy to read over email; this field is required.">i</span>
+        </label>
         <input type="text" class="input" placeholder="e.g. ABC-1234"
                x-model="inviteForm.sessionKey" :disabled="!!inviteResult" />
       </div>
 
       <div class="field">
         <label>Challenge</label>
-        <template x-if="challenges.length > 0">
-          <select class="input" x-model="inviteForm.challengeId" :disabled="!!inviteResult">
-            <template x-for="c in challenges" :key="c">
-              <option :value="c" x-text="c"></option>
-            </template>
-          </select>
-        </template>
-        <template x-if="challenges.length === 0">
-          <input type="text" class="input" placeholder="cpp-lru-cache"
-                 x-model="inviteForm.challengeId" :disabled="!!inviteResult" />
-        </template>
+        <select class="input"
+                x-model="inviteForm.challengeId"
+                @change="inviteForm.challengeId = $event.target.value"
+                :disabled="!!inviteResult || challengeItems.length === 0">
+          <option value="" disabled x-show="challengeItems.length === 0">Loading challenges…</option>
+          <template x-for="c in challengeItems" :key="c.id">
+            <option :value="c.id" x-text="challengeLabel(c)"></option>
+          </template>
+        </select>
+        <p class="input-hint" x-show="inviteForm.challengeId" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+          Selected: <strong x-text="inviteForm.challengeId"></strong>
+        </p>
       </div>
 
       <div class="input-row">
@@ -387,10 +497,49 @@
                  x-model.number="inviteForm.maxMinutes" :disabled="!!inviteResult" />
         </div>
         <div class="field" style="margin-bottom:0">
-          <label>AI Budget (USD)</label>
+          <label>
+            AI Budget (USD)
+            <span class="info-icon" title="The maximum dollar amount the candidate is allowed to spend on AI chat during their interview. JivaHire tracks every AI request and automatically cuts off access once this limit is reached, so the candidate can't rack up surprise costs or misuse the AI for off-task work. Gives them enough headroom to use AI as a real tool without leaving the cost open-ended. Typical range: $1–$5 per interview.">i</span>
+          </label>
           <input type="number" class="input" min="0.50" max="20" step="0.50"
                  x-model.number="inviteForm.budgetUsd" :disabled="!!inviteResult" />
         </div>
+      </div>
+
+      <div class="field">
+        <label>
+          Video Meeting Link (optional)
+          <span class="info-icon" title="Paste a Google Meet, Zoom, or Teams link to make this a panel interview. Create the meeting in your own account so you remain the host — the candidate will join and share their screen while coding. Leave blank for the standard async interview.">i</span>
+        </label>
+        <input type="url" class="input" placeholder="https://meet.google.com/xxx-xxxx-xxx"
+               x-model="inviteForm.meetLink" :disabled="!!inviteResult" />
+        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+          Create the meeting in <strong>your own</strong> Google account so you're the host.
+        </p>
+      </div>
+
+      <div class="field">
+        <label>
+          Scheduled Start (optional)
+          <span class="info-icon" title="When the live video interview should start. We send everyone a calendar invite (.ics) so the time converts to their local timezone automatically. Pick the time in YOUR local timezone — the browser will convert to UTC behind the scenes. Leave blank if you'll coordinate timing out-of-band.">i</span>
+        </label>
+        <input type="datetime-local" class="input"
+               x-model="inviteForm.scheduledLocal" :disabled="!!inviteResult" />
+        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+          Pick the start time in your local timezone. A calendar invite will be attached to every email.
+        </p>
+      </div>
+
+      <div class="field">
+        <label>
+          Panelist Emails (optional)
+          <span class="info-icon" title="Comma-separated email addresses for the other interviewers on the panel. Each gets a separate invite with the meeting link and scheduled time — but NOT the candidate's session key. Requires a video meeting link.">i</span>
+        </label>
+        <textarea class="input" rows="2" placeholder="lead@x.com, hiring-manager@x.com"
+                  x-model="inviteForm.panelistEmails" :disabled="!!inviteResult"></textarea>
+        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+          Comma-separated. Each panelist gets their own email with the meeting link and calendar invite.
+        </p>
       </div>
 
       <div class="drawer-actions">

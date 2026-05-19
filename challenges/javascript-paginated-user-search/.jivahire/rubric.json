@@ -1,0 +1,51 @@
+{
+  "challenge_id": "javascript-paginated-user-search",
+  "title": "Paginated User List with Debounced Search",
+  "description": "Fix a small debounced paginated-user-search controller: the debounced search captures the page at scheduling time (a stale closure), overlapping fetches can resolve out of order and clobber the fresh result, and the totalPages math rounds down so the last partial page is unreachable. Read the failing public tests, fix all three bugs, keep the public API and starter data model intact.",
+  "language": "javascript",
+  "code_fence": "javascript",
+  "difficulty": "junior",
+  "estimated_minutes": 30,
+  "max_minutes": 60,
+
+  "submission_files": ["src/user_search.js"],
+
+  "starter_code_note": "The class shape, the constructor option contract, the `setQuery` / `setPage` / `subscribe` / `getState` / `dispose` public API, the listener Set, the `_emit()` helper, and the `_runFetch` / debounce skeleton are all provided in the starter. Do NOT credit the candidate for the data model, the API surface, the choice of `setTimeout` for debouncing, or the listener pattern. Credit ONLY: (a) reading the latest `this.query` / `this.page` inside the debounced callback instead of from a stale snapshot, (b) introducing a request-generation / cancellation mechanism that drops obsolete responses in `_runFetch`, (c) fixing the `totalPages` formula (Math.ceil with a zero-total guard), and (d) any clean-up or naming improvements they make on top of those fixes.",
+
+  "code_quality_criteria": [
+    "Correctness — debounced fetches use the latest query and page; out-of-order responses do not corrupt state; totalPages is reachable from the UI.",
+    "Idiomatic modern JavaScript — class methods, async/await, no `var`, no leaking globals, sensible error propagation.",
+    "Async hygiene — pending fetches are tracked, no orphaned timers, no swallowed rejections on the stale path.",
+    "Minimal change — fix root causes, do not rewrite the controller end-to-end or change the public API.",
+    "Clarity and naming — the staleness/generation mechanism is named clearly; comments only where the WHY is non-obvious."
+  ],
+
+  "architectural_criteria": [
+    "How freshness is enforced in the debounced callback — read `this.*` lazily vs. re-capture per fire vs. funnel through a single scheduler.",
+    "How obsolete responses are detected — request-generation counter, AbortController, or comparing the resolved (query, page) against the current state at commit time.",
+    "Where the totalPages calculation lives and how it handles `total === 0` — the choice between `0` and `1` for an empty list is a design decision worth defending.",
+    "Whether `setQuery` resets the page to 1 (UX call) — and how that interacts with the stale-closure fix.",
+    "Subscriber emission discipline — emitting on every transition (loading on, fetch commit, fetch error) without redundant duplicate emits."
+  ],
+
+  "tasks": [
+    {"id": "basic",      "points": 20, "test_tag": "basic"},
+    {"id": "stale",      "points": 35, "test_tag": "stale"},
+    {"id": "race",       "points": 30, "test_tag": "race"},
+    {"id": "pagination", "points": 15, "test_tag": "pagination"}
+  ],
+
+  "total_points": 100,
+
+  "expected_tokens": 5500,
+
+  "composite_weights": {
+    "test_score":              0.20,
+    "trap_score":              0.10,
+    "code_quality":            0.20,
+    "prompt_quality":          0.15,
+    "ai_orchestration":        0.15,
+    "architectural_reasoning": 0.10,
+    "token_efficiency":        0.10
+  }
+}

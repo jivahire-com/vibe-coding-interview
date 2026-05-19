@@ -25,7 +25,7 @@ Every challenge targets a single focused problem that an experienced engineer co
 
 ### Supported languages today
 
-The grader runs **Python** (§11.A) and **C++** (§11.B). Hidden tests in any other language will not execute and the challenge will not score. To add a new language end-to-end, complete §11.C *first* — implement and wire the grader runner, then author the challenge.
+The grader runs **Python** (§11.A), **C++** (§11.B), and **TypeScript** (§11.E). Hidden tests in any other language will not execute and the challenge will not score. To add a new language end-to-end, complete §11.C *first* — implement and wire the grader runner, then author the challenge.
 
 ### Drafting in an unsupported language
 
@@ -1055,9 +1055,44 @@ Fix: check network access; or pre-download Catch2 v3.5.2 and set -DFETCHCONTENT_
 
 ---
 
+### §11.E TypeScript
+
+**Directory layout:**
+```
+challenges/<challenge-id>/
+├── .jivahire/
+├── src/
+│   └── <<REPLACE: module_name>>.ts       # submission file
+├── tests/
+│   ├── <<REPLACE: module>>.public.test.ts
+│   └── <<REPLACE: module>>.hidden.test.ts # NOT on candidate branch
+├── package.json
+├── tsconfig.json
+├── vitest.config.ts
+├── README.md
+└── SETUP.md
+```
+
+**Tagging convention:** Vitest filters by test-name substring (`-t "<pattern>"`). Every test name ends with `@<tag>` so the grader can run one tag at a time. Tags must match `rubric.json::tasks[].test_tag` and `traps.json::traps[].detection_tag` exactly (case-sensitive, no whitespace).
+
+**`package.json`:** Pin both `typescript` and `vitest` to exact versions. Scripts must include `"test": "vitest run …"` runnable from the challenge root with no prompts.
+
+**Build and run:**
+```bash
+npm install
+npm test                       # all tests
+npm run test:tag "@basic"      # one tag group (vitest -t substring match)
+```
+
+**Grader status:** The TypeScript grader runs `npm install --no-audit --no-fund --prefer-offline` once in the cloned challenge, then `npx --no-install vitest run -t "@<tag>"` for every tag declared in `rubric.json::tasks[].test_tag` or `traps.json::traps[].detection_tag`. Each tag is scored independently — a non-zero exit code OR a summary line that shows zero passed/failed tests (e.g. all skipped due to a typo'd tag) counts as failure for that tag.
+
+**Reference challenge:** [challenges/typescript-rate-limiter/](challenges/typescript-rate-limiter/).
+
+---
+
 ### §11.D Language-Agnostic Draft Blueprint
 
-Use this appendix when drafting a challenge in any language not covered by §11.A or §11.B (TypeScript, Rust, Go, Kotlin, Swift, Java, C#, Ruby, etc.). Everything here is language-neutral — substitute the conventions of your chosen language.
+Use this appendix when drafting a challenge in any language not covered by §11.A, §11.B, or §11.E (Rust, Go, Kotlin, Swift, Java, C#, Ruby, etc.). Everything here is language-neutral — substitute the conventions of your chosen language.
 
 **This appendix is the grader contract restated in language-neutral terms.** Every requirement below is something the grader will enforce once a runner for your language exists (§11.C). Following §11.D in full produces an artifact that is **grader-compatible by construction**: when the runner is wired, the draft executes correctly with no re-authoring. Skipping any required item produces a non-conformant challenge that will be rejected at promotion, not a "lighter" draft.
 
@@ -1326,3 +1361,4 @@ Complete §11.C, then add a §11.X appendix for the new language following the s
 |---|---|---|
 | 2026-05-14 | Initial version | `GRADING_RUBRICS.md` @ `db5987e` |
 | 2026-05-14 | C++ grader now discovers tags dynamically from `rubric.json`/`traps.json`; Python grader backend implemented; hidden-test path now driven by `metadata.json::hidden_test_file`. Updated §6 C++ note, §11.A grader status, §11.B Critical/Tag-constraint callouts, §11.C onboarding checklist. | grader refactor |
+| 2026-05-14 | TypeScript grader backend added (`server/vibe/grader/typescript_runner.py`); §1 supported-languages list extended; new §11.E TypeScript appendix; §11.D draft list narrowed to languages still without runners. Recruiter `/api/v1/challenges` endpoint now returns rich metadata (title, language, difficulty) and excludes draft challenges; session creation rejects draft assignments. | TypeScript onboarding |

@@ -1,0 +1,22 @@
+{
+  "traps": [
+    {
+      "id": "stale_closure_on_page",
+      "description": "`setQuery` snapshots `this.page` into the debounced callback via a local `capturedPage` const, then reads that snapshot when the timer fires. If `setPage` is invoked inside the debounce window the page change is silently lost — the timer issues a fetch for the page the user has already left. The callback should read `this.page` (and `this.query`) freshly when it fires, not at scheduling time.",
+      "detection_tag": "stale",
+      "severity": 3
+    },
+    {
+      "id": "out_of_order_fetch_results",
+      "description": "`_runFetch` writes `users` and `total` from whichever fetch resolves last, with no notion of which call is current. A slow fetch for an older query (or older page) that resolves after a faster newer fetch will clobber the fresh results. Fix needs a request generation counter, an AbortController, or some other mechanism that drops stale responses on commit.",
+      "detection_tag": "race",
+      "severity": 2
+    },
+    {
+      "id": "total_pages_floor_off_by_one",
+      "description": "`getState().totalPages = Math.floor(total / pageSize)` hides the last partial page — e.g. 11 users at pageSize 5 reports 2 pages instead of 3, so page 3 is unreachable from the UI. Should be `Math.ceil(total / pageSize)` (with a sensible fallback when `total === 0`).",
+      "detection_tag": "pagination",
+      "severity": 1
+    }
+  ]
+}

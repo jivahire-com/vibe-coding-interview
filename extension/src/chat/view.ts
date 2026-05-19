@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as http from "http";
 import * as https from "https";
 import * as crypto from "crypto";
-import { SessionConfig } from "../api";
+import { SessionConfig, DEFAULT_MODEL_PRICING, ModelPricing } from "../api";
 import { ChatLog } from "./chatlog";
 import { applyCodeBlock } from "./apply";
 
@@ -17,6 +17,33 @@ interface Message {
 }
 
 export const STREAM_TIMEOUT_MS = 60_000;
+
+/**
+ * Drilled into every chat request. The Apply button in the chat UI is
+ * disabled for code blocks without `file=path`, so an answer that omits it
+ * is functionally useless to the candidate — they can only copy/paste. This
+ * prompt makes the rule explicit so the LLM consistently emits applyable
+ * suggestions.
+ */
+export const SYSTEM_PROMPT = [
+  "When you provide code, ALWAYS specify the target file in the fence using this exact syntax:",
+  "",
+  "```<language> file=<relative/path/to/file.ext>",
+  "<code>",
+  "```",
+  "",
+  "Rules:",
+  "- The file path is RELATIVE to the workspace root (e.g. `file=src/lru.cpp`, not `file=/abs/path`).",
+  "- Use the same file= attribute on every code block, including small snippets.",
+  "- If the candidate's question references a specific file, use that file. Otherwise pick the most likely target based on the conversation.",
+  "- The Apply button in the candidate's UI is DISABLED for code blocks without file=, so a fence without it cannot be applied.",
+  "",
+  "The Apply button splices your code block into the target file:",
+  "- Provide ONLY the function(s) / method(s) / class(es) you are actually changing — the extension finds each one in the file by its signature line and replaces just that region. Surrounding code (other methods, imports, the rest of the file) is preserved automatically.",
+  "- NEVER use placeholders like `// ... rest of file unchanged ...`, `# ... existing code ...`, or `/* etc. */` — they would be applied verbatim and would corrupt the file.",
+  "- If you need to rewrite the whole file (e.g. major restructure or the file is empty), emit the complete file content with all imports, classes, and functions intact.",
+  "- Keep the signature line of each method/function IDENTICAL to the one already in the file (same name, same parameters) so it anchors correctly.",
+].join("\n");
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view: vscode.WebviewView | undefined;
@@ -63,12 +90,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.render();
   }
 
-  private handleMessage(msg: { command: string; text?: string; filePath?: string; codeText?: string; blockId?: string; model?: string }): void {
+  private async handleMessage(msg: { command: string; text?: string; filePath?: string; codeText?: string; blockId?: string; model?: string; lang?: string }): Promise<void> {
     if (msg.command === "send" && msg.text && !this.isLoading && this.config) {
       this.send(msg.text, this.config);
     }
-    if (msg.command === "applyBlock" && msg.filePath && msg.codeText && msg.blockId) {
-      applyCodeBlock(msg.filePath, msg.codeText, msg.blockId).catch((err: unknown) => {
+    if (msg.command === "applyBlock" && msg.codeText && msg.blockId) {
+      // The LLM is system-prompted to always include `file=path`. If it
+      // didn't, open a QuickPick so the candidate can pick the target —
+      // never silently route to the active editor (snippet for file A could
+      // land in file B). Picker cancelled → quietly abort.
+      let filePath = msg.filePath;
+      if (!filePath) {
+        filePath = await resolveTargetFile(msg.lang);
+        if (!filePath) return;
+      }
+      applyCodeBlock(filePath, msg.codeText, msg.blockId).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`Apply failed: ${message}`);
       });
@@ -78,6 +114,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.command === "changeModel" && msg.model) {
       this.selectedModel = msg.model;
+      // Server enforces per-model budget — let the candidate try the new model.
+      if (this.budgetExhausted) {
+        this.budgetExhausted = false;
+        this.render();
+      }
     }
   }
 
@@ -136,6 +177,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // Bug fix: budget exhaustion is treated as a terminal error for THIS
+    // request. The proxy emitted an `error` chunk before any content arrived
+    // (or partway through), so we must NOT pollute the audit trail with a
+    // phantom assistant turn that contains an empty / truncated response. The
+    // grader parses .jivahire_chat_log.json and would otherwise see an
+    // attempted prompt against the candidate with `response_tokens: 0`.
+    if (budgetExhausted) {
+      this.budgetExhausted = true;
+      // Drop the optimistic user message so the visible history matches what
+      // was actually exchanged (no response = no logged turn).
+      if (this.messages.length > 0 && this.messages[this.messages.length - 1].role === "user") {
+        this.messages.pop();
+      }
+      vscode.window.showWarningMessage(
+        "AI budget exhausted — finish the challenge on your own.",
+      );
+      this._view?.webview.postMessage({ command: "restorePrompt", text: userText });
+      this.render();
+      return;
+    }
+
     this.messages.push({
       role: "assistant",
       content: assistantText,
@@ -146,12 +208,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       latencyMs,
     });
 
-    const _pricing: Record<string, { input: number; output: number }> = {
-      'openai/gpt-4o':             { input: 2.50,  output: 10.00 },
-      'openai/gpt-4o-mini':        { input: 0.15,  output: 0.60  },
-      'openai/gpt-4o-2024-11-20':  { input: 2.50,  output: 10.00 },
-    };
-    const _p = _pricing[requestModel] ?? { input: 2.50, output: 10.00 };
+    // Bug fix: the pricing table used to be hard-coded here, so any model the
+    // server added (Anthropic, Gemini, …) silently fell through to GPT-4o
+    // rates. Prefer server-supplied pricing (config.pricingPerMillion);
+    // fall back to the bundled defaults; only then to the GPT-4o estimate.
+    const _p = _resolvePricing(requestModel, config.pricingPerMillion);
     const billablePromptTokens = Math.max(0, promptTokens - cachedTokens);
     const inputCost  = (billablePromptTokens / 1_000_000) * _p.input;
     const outputCost = (completionTokens     / 1_000_000) * _p.output;
@@ -169,9 +230,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       correction_loop: false,
     });
 
-    if (budgetExhausted) {
-      this.budgetExhausted = true;
-    }
     this.render();
   }
 
@@ -182,7 +240,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     onChunk: (chunk: any) => void
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const apiMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+      const apiMessages: Array<{ role: string; content: string }> = [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ];
       const activeFileBlock = buildActiveFileBlock();
       if (activeFileBlock) {
         for (let i = apiMessages.length - 1; i >= 0; i--) {
@@ -221,8 +282,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             let errBody = "";
             res.on("data", (d: Buffer) => { errBody += d.toString(); });
             res.on("end", () => {
-              const trimmed = errBody.trim().slice(0, 300);
-              done(new Error(`HTTP ${status}${trimmed ? `: ${trimmed}` : ""}`));
+              done(new Error(_chatErrorMessage(status, errBody)));
             });
             res.on("error", (e) => done(e));
             return;
@@ -236,7 +296,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               if (!line.startsWith("data: ")) continue;
               const payload = line.slice(6).trim();
               if (payload === "[DONE]") { done(); return; }
-              try { onChunk(JSON.parse(payload)); } catch {}
+              try {
+                onChunk(JSON.parse(payload));
+              } catch (parseErr) {
+                // Bug fix: malformed SSE chunks used to be swallowed silently,
+                // which made it impossible to tell why a usage chunk was
+                // missing or why streaming stalled. Log to the extension host
+                // console so devs see it without hitting the candidate UI.
+                console.warn("[ChatView] dropped malformed SSE chunk:", payload, parseErr);
+              }
             }
           });
           res.on("end", () => done());
@@ -245,7 +313,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
       req.on("error", (e) => done(e));
       req.setTimeout(STREAM_TIMEOUT_MS, () => {
-        done(new Error(`Request timed out after ${STREAM_TIMEOUT_MS}ms`));
+        done(new Error(_chatErrorMessage(408, "")));
       });
       req.write(body);
       req.end();
@@ -554,15 +622,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let el = ev.target;
     while (el && el !== document.body) {
       if (el.dataset && el.dataset.chip) { useChip(el.dataset.chip); return; }
-      if (el.dataset && el.dataset.copyMsg !== undefined) { copyMsg(parseInt(el.dataset.copyMsg, 10)); return; }
+      if (el.dataset && el.dataset.copyMsg !== undefined) { copyMsg(parseInt(el.dataset.copyMsg, 10), el); return; }
       if (el.dataset && el.dataset.applyBlockId) {
-        applyBlock(el.dataset.applyBlockId, el.dataset.applyFile, el.dataset.applyEncoded);
+        applyBlock(el.dataset.applyBlockId, el.dataset.applyFile, el.dataset.applyEncoded, el.dataset.applyLang, el);
         return;
       }
-      if (el.dataset && el.dataset.copyEncoded) { copyBlock(el.dataset.copyEncoded); return; }
+      if (el.dataset && el.dataset.copyEncoded) { copyBlock(el.dataset.copyEncoded, el); return; }
       el = el.parentNode;
     }
   });
+
+  // Briefly swap a button's label so the user sees their click registered.
+  // Without this feedback, both Copy and Apply look like dead buttons even
+  // though the postMessage round-trip succeeded.
+  function flashButtonLabel(btn, tempHtml, durationMs) {
+    if (!btn || btn.dataset.flashing === '1') return;
+    btn.dataset.flashing = '1';
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = tempHtml;
+    setTimeout(function() {
+      btn.innerHTML = originalHtml;
+      delete btn.dataset.flashing;
+    }, durationMs);
+  }
 
   function send() {
     const inp = getInp();
@@ -573,17 +655,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ command: 'send', text });
   }
 
-  function copyMsg(idx) {
+  function copyMsg(idx, btn) {
     vscode.postMessage({ command: 'copyText', text: msgContents[idx] || '' });
+    flashButtonLabel(btn, '&#10003;', 1500);
   }
 
-  function applyBlock(blockId, filePath, encoded) {
+  function applyBlock(blockId, filePath, encoded, lang, btn) {
     const codeText = decodeURIComponent(encoded);
-    vscode.postMessage({ command: 'applyBlock', blockId, filePath, codeText });
+    vscode.postMessage({ command: 'applyBlock', blockId, filePath, codeText, lang });
+    flashButtonLabel(btn, '&#8987; Opening diff…', 2000);
   }
 
-  function copyBlock(encoded) {
+  function copyBlock(encoded, btn) {
     vscode.postMessage({ command: 'copyText', text: decodeURIComponent(encoded) });
+    flashButtonLabel(btn, '&#10003; Copied!', 1500);
   }
 
   function useChip(text) {
@@ -641,18 +726,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     while ((m = fenceRe.exec(text)) !== null) {
       const pre = text.slice(lastIdx, m.index);
       if (pre) parts.push(renderProse(pre));
+      const lang = m[1] || '';
       const filePath = m[2] || '';
       const code = m[4];
       const blockId = 'blk-' + (++blockCounter) + '-' + Date.now();
       const encoded = encodeURIComponent(code);
-      const canApply = filePath.length > 0;
+      const applyLabel = filePath
+        ? '&#11015; Apply to ' + escHtml(filePath.split('/').pop() || filePath)
+        : '&#11015; Apply to file…';
       parts.push(
         '<div class="code-block">' +
         '<pre><code>' + escHtml(code) + '</code></pre>' +
         '<div class="code-actions">' +
-        (canApply
-          ? '<button class="code-btn apply-btn" data-apply-block-id="' + escHtml(blockId) + '" data-apply-file="' + escHtml(filePath) + '" data-apply-encoded="' + escHtml(encoded) + '">&#11015; Apply to ' + escHtml(filePath.split('/').pop() || filePath) + '</button>'
-          : '<button class="code-btn apply-btn" disabled title="No file path in fence">&#11015; Apply (no file path)</button>') +
+        '<button class="code-btn apply-btn" data-apply-block-id="' + escHtml(blockId) + '" data-apply-file="' + escHtml(filePath) + '" data-apply-lang="' + escHtml(lang) + '" data-apply-encoded="' + escHtml(encoded) + '">' + applyLabel + '</button>' +
         '<button class="code-btn" data-copy-encoded="' + escHtml(encoded) + '">&#8998; Copy</button>' +
         '</div></div>'
       );
@@ -708,14 +794,165 @@ function buildActiveFileBlock(): string {
   return buildFileFence(relPath, lang, text);
 }
 
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const LANG_EXT: Record<string, string[]> = {
+  python: [".py"], py: [".py"],
+  typescript: [".ts", ".tsx"], ts: [".ts", ".tsx"], tsx: [".tsx"],
+  javascript: [".js", ".jsx"], js: [".js", ".jsx"], jsx: [".jsx"],
+  go: [".go"], rust: [".rs"], rs: [".rs"],
+  java: [".java"], kotlin: [".kt"], kt: [".kt"],
+  c: [".c", ".h"], cpp: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h"],
+  csharp: [".cs"], cs: [".cs"], ruby: [".rb"], rb: [".rb"],
+  php: [".php"], swift: [".swift"], scala: [".scala"],
+};
+
+async function resolveTargetFile(lang?: string): Promise<string | undefined> {
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!ws) {
+    vscode.window.showErrorMessage("No workspace folder open.");
+    return;
+  }
+
+  const exts = lang ? LANG_EXT[lang.toLowerCase()] : undefined;
+  const seen = new Set<string>();
+  const items: vscode.QuickPickItem[] = [];
+
+  const addRel = (rel: string, description?: string): void => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    items.push({ label: rel, description });
+  };
+
+  const active = vscode.window.activeTextEditor;
+  if (active && active.document.uri.scheme === "file") {
+    addRel(vscode.workspace.asRelativePath(active.document.uri, false), "active editor");
+  }
+
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const input = tab.input as { uri?: vscode.Uri } | undefined;
+      if (input?.uri && input.uri.scheme === "file") {
+        addRel(vscode.workspace.asRelativePath(input.uri, false), "open tab");
+      }
+    }
+  }
+
+  if (exts && exts.length > 0) {
+    const pattern = exts.length === 1 ? `**/*${exts[0]}` : `**/*{${exts.join(",")}}`;
+    const found = await vscode.workspace.findFiles(pattern, "**/{node_modules,.git,dist,build}/**", 50);
+    for (const uri of found) {
+      addRel(vscode.workspace.asRelativePath(uri, false));
+    }
+  }
+
+  items.push({ label: "$(file-directory) Browse…", description: "pick another file" });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: "Apply AI suggestion to which file?",
+    matchOnDescription: true,
+  });
+  if (!picked) return;
+
+  if (picked.label.startsWith("$(file-directory)")) {
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: false,
+      defaultUri: vscode.Uri.file(ws),
+    });
+    if (!uris || uris.length === 0) return;
+    return vscode.workspace.asRelativePath(uris[0], false);
+  }
+
+  return picked.label;
 }
 
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Escape a string for safe inclusion in an HTML attribute value, including
+ * single-quote contexts.
+ */
+function escAttr(s: string): string {
+  return escHtml(s).replace(/'/g, "&#39;");
+}
+
+/**
+ * Resolve per-million-token pricing for a model, preferring the server-supplied
+ * table over bundled defaults. Bug fix: the previous hard-coded table only
+ * knew about three OpenAI models; any other model silently fell through to
+ * GPT-4o pricing and the candidate's spend meter diverged from the proxy's
+ * server-side enforcement.
+ */
+export function _chatErrorMessage(status: number, _body: string): string {
+  if (status === 402) return "AI budget reached — switch models or finish on your own";
+  if (status === 408 || status === 504) return "AI service is slow right now — wait a few seconds and retry";
+  if (status === 429) return "Too many requests — wait 10s and retry";
+  if (status >= 500 && status <= 599) return "AI service is temporarily unavailable — wait and retry";
+  return `AI request failed (HTTP ${status}). Contact your recruiter if this persists.`;
+}
+
+export function _resolvePricing(
+  model: string,
+  serverTable: Record<string, ModelPricing> | undefined,
+): ModelPricing {
+  if (serverTable && serverTable[model]) return serverTable[model];
+  if (DEFAULT_MODEL_PRICING[model]) return DEFAULT_MODEL_PRICING[model];
+  console.warn(`[ChatView] unknown model "${model}" — falling back to GPT-4o pricing`);
+  return { input: 2.5, output: 10.0 };
+}
+
+/**
+ * Render assistant content to HTML for the persistent message panel. Bug fix:
+ * the old impl emitted bare `<pre><code>` which dropped the Apply / Copy
+ * buttons that the streaming-side JS formatter produces. Once streaming
+ * completed and render() ran, the candidate lost the ability to apply the
+ * snippet — they had to copy/paste manually. The buttons here use the same
+ * `data-apply-block-id` / `data-copy-encoded` data-attributes that the
+ * webview's `document.body` click delegate already listens for.
+ */
 function formatContent(s: string): string {
-  let result = escHtml(s);
-  result = result.replace(/```[\w]*(?: file=[^\s`]+)?\n([\s\S]*?)```/g, "<pre><code>$1</code></pre>");
-  result = result.replace(/\n<pre>/g, "<pre>").replace(/<\/pre>\n/g, "</pre>");
+  const parts: string[] = [];
+  // Match fenced code blocks, optionally with a language and a `file=` hint.
+  // Use a unique fence-handler so we can preserve language and file context.
+  const fenceRe = /```(\w*)(?: file=([^\s`]+))?\n([\s\S]*?)```/g;
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  let blockCounter = 0;
+  const renderTs = Date.now();
+  while ((m = fenceRe.exec(s)) !== null) {
+    const pre = s.slice(lastIdx, m.index);
+    if (pre) parts.push(_renderProse(pre));
+    const lang = m[1] || "";
+    const filePath = m[2] || "";
+    const code = m[3];
+    const blockId = `blk-rendered-${++blockCounter}-${renderTs}`;
+    const encoded = encodeURIComponent(code);
+    const applyLabel = filePath
+      ? `&#11015; Apply to ${escHtml(filePath.split("/").pop() || filePath)}`
+      : "&#11015; Apply to file…";
+    parts.push(
+      `<div class="code-block">` +
+        `<pre><code>${escHtml(code)}</code></pre>` +
+        `<div class="code-actions">` +
+          `<button class="code-btn apply-btn" ` +
+            `data-apply-block-id="${escAttr(blockId)}" ` +
+            `data-apply-file="${escAttr(filePath)}" ` +
+            `data-apply-lang="${escAttr(lang)}" ` +
+            `data-apply-encoded="${escAttr(encoded)}">${applyLabel}</button>` +
+          `<button class="code-btn" data-copy-encoded="${escAttr(encoded)}">&#8998; Copy</button>` +
+        `</div>` +
+      `</div>`,
+    );
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < s.length) parts.push(_renderProse(s.slice(lastIdx)));
+  return parts.join("");
+}
+
+function _renderProse(text: string): string {
+  let result = escHtml(text);
   result = result.replace(/`([^`\n]+)`/g, "<code>$1</code>");
   result = result.replace(/\n/g, "<br>");
   return result;

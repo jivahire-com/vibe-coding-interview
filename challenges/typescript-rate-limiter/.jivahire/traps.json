@@ -1,0 +1,22 @@
+{
+  "traps": [
+    {
+      "id": "no_cap_on_refill",
+      "description": "refill() updates bucket.tokens with `tokens + added` but never caps at `capacity`. After a long idle period the bucket can hold far more than `capacity` tokens, letting a single caller burst past the intended rate limit.",
+      "detection_tag": "refill",
+      "severity": 2
+    },
+    {
+      "id": "missing_validation",
+      "description": "Constructor does not validate `opts.capacity > 0`, `opts.refillPerSec >= 0`, or that either value is finite. Zero/negative/NaN capacity silently produces a limiter whose math is nonsense (always denies or yields NaN), instead of throwing a clear error at construction time.",
+      "detection_tag": "edge",
+      "severity": 3
+    },
+    {
+      "id": "acquire_zero_refill_hangs",
+      "description": "The async slow path of acquire() polls `msUntilTokens` and sleeps. When `refillPerSec === 0` the bucket can never refill, but msUntilTokens returns a constant 1000 ms, so the loop sleeps forever instead of rejecting. A caller awaiting acquire() in this state hangs indefinitely.",
+      "detection_tag": "concurrent",
+      "severity": 2
+    }
+  ]
+}

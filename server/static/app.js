@@ -5,9 +5,13 @@ document.addEventListener('alpine:init', () => {
     adminToken: localStorage.getItem('jh_token') || '',
     authError: '',
 
+    // ── theme
+    theme: document.documentElement.getAttribute('data-theme') || 'light',
+
     // ── sessions list
     sessions: [],
-    challenges: [],
+    challenges: [],         // flat id list, kept for back-compat
+    challengeItems: [],     // [{id, title, language, difficulty, max_minutes, tags[]}]
     search: '',
     statusFilter: '',
     loading: false,
@@ -19,7 +23,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── invite drawer
     showInvitePanel: false,
-    inviteForm: { email: '', challengeId: '', maxMinutes: 90, budgetUsd: 2.00, sessionKey: '' },
+    inviteForm: { email: '', challengeId: '', maxMinutes: 60, budgetUsd: 2.00, sessionKey: '', meetLink: '', scheduledLocal: '', panelistEmails: '' },
     inviteLoading: false,
     inviteError: '',
     inviteResult: null,  // { sessionKey }
@@ -34,6 +38,12 @@ document.addEventListener('alpine:init', () => {
         await Promise.all([this.loadSessions(), this.loadChallenges()]);
         await this._restoreFromHash();
       }
+    },
+
+    toggleTheme() {
+      this.theme = this.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', this.theme);
+      localStorage.setItem('jh_theme', this.theme);
     },
 
     async _restoreFromHash() {
@@ -104,10 +114,22 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._get('/api/v1/challenges');
         this.challenges = r.challenges ?? [];
+        // Newer payload includes per-challenge metadata; fall back to deriving
+        // it from the flat id list when the server is on the older shape.
+        this.challengeItems = (r.items && r.items.length)
+          ? r.items
+          : this.challenges.map((id) => ({ id, title: id, language: 'unknown', difficulty: 'unknown', tags: [] }));
         if (this.challenges.length > 0 && !this.inviteForm.challengeId) {
           this.inviteForm.challengeId = this.challenges[0];
         }
       } catch { /* non-fatal */ }
+    },
+
+    challengeLabel(c) {
+      const lang = c.language && c.language !== 'unknown' ? c.language : null;
+      const diff = c.difficulty && c.difficulty !== 'unknown' ? c.difficulty : null;
+      const meta = [lang, diff].filter(Boolean).join(' · ');
+      return meta ? `${c.title} — ${meta}` : c.title;
     },
 
     get filteredSessions() {
@@ -152,8 +174,11 @@ document.addEventListener('alpine:init', () => {
       this.inviteError = '';
       this.inviteForm.email = '';
       this.inviteForm.sessionKey = '';
-      this.inviteForm.maxMinutes = 90;
+      this.inviteForm.maxMinutes = 60;
       this.inviteForm.budgetUsd = 2.00;
+      this.inviteForm.meetLink = '';
+      this.inviteForm.scheduledLocal = '';
+      this.inviteForm.panelistEmails = '';
       if (this.challenges.length) this.inviteForm.challengeId = this.challenges[0];
       this.showInvitePanel = true;
     },
@@ -169,6 +194,56 @@ document.addEventListener('alpine:init', () => {
       if (!this.inviteForm.challengeId) { this.inviteError = 'Select a challenge.'; return; }
       if (!this.inviteForm.sessionKey.trim()) { this.inviteError = 'Session key is required.'; return; }
 
+      // Guard against the historical Alpine binding bug where the select displayed
+      // one option but the model was stale. Confirm the admin's selection matches
+      // the actual <select> value before sending the invite.
+      const selectEl = document.querySelector('select[x-model="inviteForm.challengeId"]');
+      const domValue = selectEl ? selectEl.value : this.inviteForm.challengeId;
+      if (domValue !== this.inviteForm.challengeId) {
+        // DOM is the source of truth — what the admin actually sees.
+        this.inviteForm.challengeId = domValue;
+      }
+      if (this.challenges.length && !this.challenges.includes(this.inviteForm.challengeId)) {
+        this.inviteError = `Unknown challenge "${this.inviteForm.challengeId}". Pick one from the list.`;
+        return;
+      }
+      if (!confirm(`Send invite for challenge "${this.inviteForm.challengeId}" to ${this.inviteForm.email.trim()}?`)) {
+        return;
+      }
+
+      const meetLink = (this.inviteForm.meetLink || '').trim();
+      if (meetLink && !meetLink.startsWith('https://')) {
+        this.inviteError = 'Video meeting link must start with https://';
+        return;
+      }
+
+      // datetime-local gives "YYYY-MM-DDTHH:mm" in the browser's local TZ. new
+      // Date() parses that as local time; .getTime() returns ms since epoch
+      // in UTC. Divide by 1000 to get the epoch seconds the API expects.
+      let scheduledAt = null;
+      if (this.inviteForm.scheduledLocal) {
+        const parsed = new Date(this.inviteForm.scheduledLocal);
+        if (Number.isNaN(parsed.getTime())) {
+          this.inviteError = 'Could not read the scheduled start time.';
+          return;
+        }
+        scheduledAt = Math.floor(parsed.getTime() / 1000);
+      }
+
+      const panelistEmails = (this.inviteForm.panelistEmails || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const badPanelist = panelistEmails.find((e) => !e.includes('@'));
+      if (badPanelist) {
+        this.inviteError = `Invalid panelist email: ${badPanelist}`;
+        return;
+      }
+      if (panelistEmails.length > 0 && !meetLink) {
+        this.inviteError = 'Add a video meeting link before adding panelists.';
+        return;
+      }
+
       this.inviteLoading = true;
       try {
         const body = {
@@ -178,6 +253,9 @@ document.addEventListener('alpine:init', () => {
           max_minutes: Number(this.inviteForm.maxMinutes),
           llm_budget_usd: Number(this.inviteForm.budgetUsd),
         };
+        if (meetLink) body.meet_link = meetLink;
+        if (scheduledAt !== null) body.scheduled_at = scheduledAt;
+        if (panelistEmails.length > 0) body.panelist_emails = panelistEmails;
         const r = await this._post('/api/v1/sessions', body);
         this.inviteResult = { sessionKey: this.inviteForm.sessionKey.trim(), sessionId: r.session_id };
         await this.loadSessions();
@@ -219,6 +297,19 @@ document.addEventListener('alpine:init', () => {
       return `${Math.round((n / max) * 100)}%`;
     },
 
+    devConfidenceBadgeClass(verdict) {
+      if (verdict === 'developer') return 'badge-graded';
+      if (verdict === 'uncertain') return 'badge-submitted';
+      if (verdict === 'non_developer') return 'badge-poor';
+      return 'badge-pending';
+    },
+
+    parseDevConfidenceSignals(raw) {
+      if (!raw) return {};
+      if (typeof raw === 'object') return raw;
+      try { return JSON.parse(raw); } catch { return {}; }
+    },
+
     formatDate(ts) {
       if (!ts) return '—';
       return new Date(ts * 1000).toLocaleString(undefined, {
@@ -246,6 +337,17 @@ document.addEventListener('alpine:init', () => {
         acc.cached += e.cached_input_tokens ?? 0;
         return acc;
       }, { input: 0, output: 0, cached: 0 });
+    },
+
+    promptExchanges(detail) {
+      return detail?.chat_exchanges ?? [];
+    },
+
+    promptClassBadge(cls) {
+      if (cls === 'professional') return 'badge-graded';
+      if (cls === 'specific') return 'badge-submitted';
+      if (cls === 'vague') return 'badge-poor';
+      return 'badge-pending';
     },
 
     async _get(url) {

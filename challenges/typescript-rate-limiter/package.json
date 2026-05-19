@@ -1,0 +1,19 @@
+{
+  "name": "rate-limiter-challenge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Per-key token-bucket rate limiter coding challenge",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --reporter=verbose",
+    "test:tag": "vitest run --reporter=verbose -t"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "1.6.0",
+    "typescript": "5.4.5",
+    "vitest": "1.6.0"
+  }
+}

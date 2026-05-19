@@ -2,7 +2,7 @@
   "name": "jivahire-vibe-coding-interview",
   "displayName": "JivaHire Vibe Coding Interview",
   "description": "AI-aware coding interview platform by JivaHire",
-  "version": "0.1.4",
+  "version": "0.1.19",
   "publisher": "jivahire",
   "engines": {
     "vscode": "^1.85.0"
@@ -42,6 +42,10 @@
       {
         "command": "vibe.openChat",
         "title": "JivaHire: Open AI Chat"
+      },
+      {
+        "command": "vibe.joinMeet",
+        "title": "JivaHire: Join Video Call"
       }
     ],
     "viewsContainers": {
@@ -49,14 +53,14 @@
         {
           "id": "vibe-sidebar",
           "title": "JivaHire AI",
-          "icon": "$(comment-discussion)"
+          "icon": "media/jivahire-icon.svg"
         }
       ],
       "secondarySidebar": [
         {
           "id": "vibe-chat-panel",
           "title": "JivaHire Chat",
-          "icon": "$(comment-discussion)"
+          "icon": "media/jivahire-icon.svg"
         }
       ]
     },

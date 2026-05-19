@@ -138,7 +138,12 @@ describe('validateSession', () => {
 
   // ── Bug #9: SSRF / proxy host validation ─────────────────────────────────
 
-  test('Bug #9: rejects llm_proxy_url on a different host than the auth server', async () => {
+  test('Bug #9: llm_proxy_url on a different host is ignored, auth server URL is used', async () => {
+    // SSRF defence: if the server returns a proxy host that doesn't match the
+    // host the candidate authenticated to, we silently fall back to the auth
+    // server URL so the bearer token never travels to an unverified endpoint.
+    // (Previously this threw, but that blocked legitimate deployments where
+    //  the server's advertised proxy URL was misconfigured.)
     const payload = {
       session_id: 'x', repo_url: 'u', branch: 'b', github_clone_token: 't',
       llm_proxy_url: 'http://attacker.example.com', max_minutes: 60, llm_budget_usd: 2,
@@ -146,7 +151,8 @@ describe('validateSession', () => {
     };
     mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
     const { validateSession: validate } = await import('../api');
-    await expect(validate('http://server:8080', 'KEY')).rejects.toThrow(/different host/);
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.llmProxyUrl).toBe('http://server:8080');
   });
 
   test('Bug #9: accepts llm_proxy_url on the same host but different port', async () => {
@@ -172,6 +178,138 @@ describe('validateSession', () => {
     const { validateSession: validate } = await import('../api');
     const config = await validate('http://server:8080', 'KEY');
     expect(config.llmProxyUrl).toBe('http://server:8080');
+  });
+});
+
+// ── Review-Bug 6: server-supplied per-model pricing ────────────────────────
+
+describe('validateSession pricing (Review-Bug 6)', () => {
+  beforeEach(() => jest.resetModules());
+
+  test('Review-Bug 6: includes server-supplied pricing_per_million in the config', async () => {
+    const payload = {
+      session_id: 'x', repo_url: 'u', branch: 'b', github_clone_token: 't',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'anthropic/claude-3-opus',
+      pricing_per_million: {
+        'anthropic/claude-3-opus': { input: 15.0, output: 75.0 },
+        'openai/gpt-4o-mini': { input: 0.15, output: 0.6 },
+      },
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { validateSession: validate } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.pricingPerMillion['anthropic/claude-3-opus']).toEqual({ input: 15.0, output: 75.0 });
+    expect(config.pricingPerMillion['openai/gpt-4o-mini']).toEqual({ input: 0.15, output: 0.6 });
+  });
+
+  test('Review-Bug 6: missing pricing_per_million falls back to bundled defaults', async () => {
+    const payload = {
+      session_id: 'x', repo_url: 'u', branch: 'b', github_clone_token: 't',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { validateSession: validate, DEFAULT_MODEL_PRICING } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.pricingPerMillion['openai/gpt-4o-mini'])
+      .toEqual(DEFAULT_MODEL_PRICING['openai/gpt-4o-mini']);
+  });
+
+  test('Review-Bug 6: malformed pricing entries are skipped, not crashed on', async () => {
+    const payload = {
+      session_id: 'x', repo_url: 'u', branch: 'b', github_clone_token: 't',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+      pricing_per_million: {
+        'broken/model': 'not an object',
+        'partial/model': { input: 1.0 }, // missing output
+        'good/model': { input: 1.0, output: 2.0 },
+      },
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { validateSession: validate } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.pricingPerMillion['good/model']).toEqual({ input: 1.0, output: 2.0 });
+    expect(config.pricingPerMillion['broken/model']).toBeUndefined();
+    expect(config.pricingPerMillion['partial/model']).toBeUndefined();
+  });
+});
+
+// ── Review-Bug 9: POST timeout ─────────────────────────────────────────────
+
+describe('post() timeout (Review-Bug 9)', () => {
+  beforeEach(() => jest.resetModules());
+
+  test('Review-Bug 9: a server that never responds rejects with a timeout error', async () => {
+    // Stub http.request so the response callback NEVER fires AND the timeout
+    // path runs synchronously (via the exposed `_armTimeout` test seam).
+    let timeoutHandler: (() => void) | undefined;
+    const reqHandle = {
+      on: jest.fn().mockReturnThis(),
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+      setTimeout: jest.fn().mockImplementation((_ms: number, cb: () => void) => {
+        timeoutHandler = cb;
+      }),
+    };
+    const stub = {
+      request: jest.fn().mockImplementation((_opts: unknown, _cb: (r: unknown) => void) => {
+        // Never call _cb — the response never arrives
+        return reqHandle;
+      }),
+    };
+    jest.doMock('http', () => stub);
+    jest.doMock('https', () => stub);
+
+    const { validateSession: validate } = await import('../api');
+    const promise = validate('http://server:8080', 'KEY');
+    // Fire the timeout
+    expect(timeoutHandler).toBeDefined();
+    timeoutHandler!();
+    await expect(promise).rejects.toThrow(/timed out/);
+    expect(reqHandle.destroy).toHaveBeenCalled();
+  });
+
+  test('Review-Bug 9: setTimeout is configured on every outgoing request', async () => {
+    const setTimeoutSpy = jest.fn();
+    const reqHandle = {
+      on: jest.fn().mockReturnThis(),
+      write: jest.fn(),
+      end: jest.fn(),
+      destroy: jest.fn(),
+      setTimeout: setTimeoutSpy,
+    };
+    const responsePayload = {
+      session_id: 'x', repo_url: 'u', branch: 'b', github_clone_token: 't',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+    };
+    const stub = {
+      request: jest.fn().mockImplementation((_opts: unknown, cb: (res: unknown) => void) => {
+        // Respond synchronously with a successful payload so the test
+        // exercises the success path AND the setTimeout still got called.
+        process.nextTick(() => {
+          const res = {
+            statusCode: 200,
+            on: jest.fn().mockImplementation((event: string, handler: (d?: unknown) => void) => {
+              if (event === 'data') handler(JSON.stringify(responsePayload));
+              if (event === 'end') handler();
+              return res;
+            }),
+          };
+          cb(res);
+        });
+        return reqHandle;
+      }),
+    };
+    jest.doMock('http', () => stub);
+    jest.doMock('https', () => stub);
+
+    const { validateSession: validate, POST_TIMEOUT_MS } = await import('../api');
+    await validate('http://server:8080', 'KEY');
+    expect(setTimeoutSpy).toHaveBeenCalledWith(POST_TIMEOUT_MS, expect.any(Function));
   });
 });
 

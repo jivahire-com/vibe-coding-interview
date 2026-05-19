@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Challenge Authoring - JivaHire</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script>
+    (function () {
+      var saved = localStorage.getItem('jh_theme');
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
+    })();
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    /* Guide-specific layout */
+    .doc-wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .tab {
+      background: transparent;
+      border: none;
+      padding: 10px 18px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .doc-content {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px 40px;
+      box-shadow: var(--shadow-sm);
+      line-height: 1.6;
+    }
+    .doc-content h2 {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-content h2:first-child { margin-top: 0; }
+    .doc-content h3 {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 22px 0 8px;
+    }
+    .doc-content h4 {
+      font-size: 14px;
+      font-weight: 600;
+      margin: 18px 0 6px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .doc-content p { margin: 8px 0; font-size: 14px; }
+    .doc-content ul, .doc-content ol {
+      margin: 8px 0 12px 22px;
+      font-size: 14px;
+    }
+    .doc-content li { margin: 4px 0; }
+    .doc-content code {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: "SF Mono", "Fira Code", ui-monospace, Menlo, monospace;
+      font-size: 12.5px;
+    }
+    .doc-content pre.code-block {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 10px 0 16px;
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    .doc-content pre.code-block code {
+      background: transparent;
+      border: none;
+      padding: 0;
+      color: inherit;
+      font-size: inherit;
+    }
+    .doc-content table.schema-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 16px;
+      font-size: 13px;
+    }
+    .doc-content table.schema-table th,
+    .doc-content table.schema-table td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .doc-content table.schema-table th {
+      background: var(--surface-alt);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-muted);
+    }
+
+    .token-prompt {
+      max-width: 460px;
+      margin: 60px auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+    }
+    .token-prompt h2 { margin: 0 0 6px; font-size: 20px; }
+    .token-prompt p { color: var(--text-muted); font-size: 13px; margin: 0 0 18px; }
+
+    .doc-loading {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    [data-theme="dark"] .doc-content pre.code-block {
+      background: #020617;
+      color: #cbd5e1;
+    }
+
+    .doc-intro {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 10px;
+      padding: 18px 22px;
+      margin-bottom: 20px;
+      box-shadow: var(--shadow-sm);
+    }
+    .doc-intro h1 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0 0 6px;
+    }
+    .doc-intro p {
+      margin: 6px 0 0;
+      font-size: 13.5px;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+  </style>
+</head>
+<body x-data="AuthorDocs()" x-init="init()">
+
+  <!-- ═══════════════════════ NAV ═══════════════════════ -->
+  <nav class="nav">
+    <div class="nav-logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+      </svg>
+      JivaHire <span>Challenge Authoring</span>
+    </div>
+
+    <div class="ml-auto flex items-center gap-2">
+      <button class="btn btn-ghost btn-sm theme-toggle" @click="toggleTheme()" :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'">
+        <svg x-show="theme === 'dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        <svg x-show="theme !== 'dark'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <a class="btn btn-ghost btn-sm" href="/">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to Dashboard
+      </a>
+      <button x-show="hasToken" class="btn btn-ghost btn-sm" @click="signOut()">Sign out</button>
+    </div>
+  </nav>
+
+  <!-- ═══════════════════════ TOKEN PROMPT ═══════════════════════ -->
+  <div x-show="!hasToken" x-transition class="token-prompt">
+    <h2>Admin token required</h2>
+    <p>Enter your admin token to load the authoring guide. This is the same token used for the dashboard.</p>
+
+    <div x-show="error" class="error-banner" x-text="error"></div>
+
+    <div class="field">
+      <label for="token">Admin Token</label>
+      <input id="token" type="password" class="input" placeholder="••••••••••••"
+             x-model="tokenInput" @keydown.enter="loadGuide()" autocomplete="current-password" />
+    </div>
+    <button class="btn btn-primary w-full" @click="loadGuide()">Load Guide →</button>
+  </div>
+
+  <!-- ═══════════════════════ DOC PAGE ═══════════════════════ -->
+  <div x-show="hasToken" x-transition class="doc-wrap">
+
+    <div class="doc-intro">
+      <h1>Challenge Authoring Reference</h1>
+      <p>
+        This page is for recruiters and engineers who build new coding interview challenges for JivaHire Vibe. Use the
+        <strong>Challenge Authoring Guide</strong> tab to learn how to structure a challenge repository — the required
+        files (metadata, rubric, hidden tests, traps), naming conventions, and how candidate-safe content is separated
+        from grader-only content. The <strong>Grading Overview</strong> tab explains how a candidate's submission is
+        scored: automated test runs, trap detection, and the multi-stage LLM evaluation that produces the final score
+        you see on the dashboard.
+      </p>
+    </div>
+
+    <div x-show="error" class="error-banner" x-text="error" style="margin-bottom:16px"></div>
+
+    <div class="tabs">
+      <button class="tab" :class="tab === 'guide' ? 'active' : ''" @click="switchTab('guide')">
+        Challenge Authoring Guide
+      </button>
+      <button class="tab" :class="tab === 'grading' ? 'active' : ''" @click="switchTab('grading')">
+        Grading Overview
+      </button>
+    </div>
+
+    <template x-if="loading">
+      <div class="doc-loading">
+        <div class="spinner"></div>
+        <p style="margin-top:12px">Loading…</p>
+      </div>
+    </template>
+
+    <template x-if="!loading">
+      <div class="doc-content" x-html="content[tab] || ''"></div>
+    </template>
+  </div>
+
+  <script>
+    function AuthorDocs() {
+      return {
+        hasToken: false,
+        tokenInput: '',
+        tab: 'guide',
+        content: { guide: '', grading: '' },
+        loading: false,
+        error: '',
+        theme: document.documentElement.getAttribute('data-theme') || 'light',
+
+        init() {
+          const stored = localStorage.getItem('jh_token');
+          if (stored) {
+            this.tokenInput = stored;
+            this.hasToken = true;
+            this.fetchTab(this.tab);
+          }
+        },
+
+        toggleTheme() {
+          this.theme = this.theme === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', this.theme);
+          localStorage.setItem('jh_theme', this.theme);
+        },
+
+        async loadGuide() {
+          const t = (this.tokenInput || '').trim();
+          if (!t) { this.error = 'Token is required.'; return; }
+          localStorage.setItem('jh_token', t);
+          this.hasToken = true;
+          this.error = '';
+          await this.fetchTab(this.tab);
+        },
+
+        async switchTab(name) {
+          this.tab = name;
+          this.error = '';
+          if (!this.content[name]) {
+            await this.fetchTab(name);
+          }
+        },
+
+        async fetchTab(name) {
+          const token = localStorage.getItem('jh_token') || '';
+          this.loading = true;
+          this.error = '';
+          try {
+            const r = await fetch(`/api/v1/admin/author-docs/${name}`, {
+              headers: { 'x-admin-token': token },
+            });
+            if (r.status === 401) {
+              localStorage.removeItem('jh_token');
+              this.hasToken = false;
+              this.error = 'Invalid or missing admin token.';
+              this.content = { guide: '', grading: '' };
+              return;
+            }
+            if (!r.ok) {
+              this.error = `Failed to load (${r.status}).`;
+              return;
+            }
+            const html = await r.text();
+            this.content[name] = html;
+          } catch (e) {
+            this.error = `Network error: ${e.message}`;
+          } finally {
+            this.loading = false;
+          }
+        },
+
+        signOut() {
+          localStorage.removeItem('jh_token');
+          this.hasToken = false;
+          this.tokenInput = '';
+          this.content = { guide: '', grading: '' };
+          this.error = '';
+        },
+      };
+    }
+  </script>
+</body>
+</html>

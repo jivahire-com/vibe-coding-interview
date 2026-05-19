@@ -3,9 +3,13 @@ import shutil
 import time
 import traceback as tb_module
 from pathlib import Path
+
+from openai import OpenAI
+
 from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
-from vibe.grader import cpp_runner, python_runner, llm_eval, traps as traps_module
+from vibe.grader import cpp_runner, python_runner, typescript_runner, llm_eval, traps as traps_module
+from vibe.grader import developer_signals
 from vibe.grader.git_ops import clone_branch
 
 _STAGE_MESSAGES = {
@@ -14,9 +18,14 @@ _STAGE_MESSAGES = {
     "traps": "An error occurred during trap evaluation. Please contact support.",
     "llm_eval": "AI grading is temporarily unavailable. Please contact support.",
     "repo_tokens": "Token counting failed during grading. Please contact support.",
+    "developer_confidence": "Developer-signal computation failed; grade is unaffected.",
 }
 
-_GRADER_BACKENDS = {"cpp": cpp_runner, "python": python_runner}
+_GRADER_BACKENDS = {
+    "cpp": cpp_runner,
+    "python": python_runner,
+    "typescript": typescript_runner,
+}
 
 
 def _load_challenge_config(challenge_dir: Path) -> tuple[dict, dict, list[str]]:
@@ -93,13 +102,24 @@ def run(session_id: str) -> None:
             tags_passed, tests_total, traps_detected_w, traps_total_w, llm_scores, weights
         )
 
+        # Developer-confidence signal — independent of grading. A failure here
+        # must never affect the composite or block the row insert.
+        try:
+            dev_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.llm_base_url)
+            dev_conf = developer_signals.compute_developer_confidence(session_id, dev_client)
+        except Exception:
+            _record_error(session_id, "developer_confidence")
+            dev_conf = {"score": None, "verdict": None, "signals": None, "reasoning": None}
+
         execute(
             "INSERT OR REPLACE INTO grades "
             "(session_id, tests_passed, tests_total, traps_detected, traps_total, "
             "code_quality_score, ai_orchestration_score, architectural_reasoning_score, "
             "prompt_quality_score, token_efficiency_score, "
-            "total_score, grader_summary, raw_output) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "total_score, grader_summary, raw_output, "
+            "developer_confidence_score, developer_confidence_verdict, "
+            "developer_confidence_signals, developer_confidence_reasoning) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, tags_passed, tests_total,
                 traps_detected, traps_total,
@@ -111,6 +131,10 @@ def run(session_id: str) -> None:
                 round(total_score, 2),
                 llm_scores["summary"],
                 raw_output[:50_000],
+                dev_conf["score"],
+                dev_conf["verdict"],
+                json.dumps(dev_conf["signals"]) if dev_conf["signals"] is not None else None,
+                dev_conf["reasoning"],
             ),
         )
         execute("UPDATE sessions SET status='graded' WHERE id=?", (session_id,))
@@ -157,6 +181,9 @@ def _composite_score(
     weights: dict,
 ) -> float:
     w = {**_DEFAULT_WEIGHTS, **weights}
+    total_w = sum(w.values())
+    if total_w > 0 and abs(total_w - 1.0) > 1e-9:
+        w = {k: v / total_w for k, v in w.items()}
     test_score = (tests_passed / tests_total * 10) if tests_total else 0
     trap_score = (traps_detected_w / traps_total_w * 10) if traps_total_w else 0
     automated = test_score * w["test_score"] + trap_score * w["trap_score"]

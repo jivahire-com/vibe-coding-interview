@@ -1,0 +1,51 @@
+{
+  "challenge_id": "typescript-rate-limiter",
+  "title": "Per-Key Token-Bucket Rate Limiter",
+  "description": "Make a per-key token-bucket rate limiter correct under refill, validate constructor inputs, cap tokens at capacity after long idle, and ensure acquire() never hangs forever when the bucket cannot refill. The starter compiles and passes simple happy-path cases but contains planted bugs in refill math, input validation, and the async slow path.",
+  "language": "typescript",
+  "code_fence": "typescript",
+  "difficulty": "mid",
+  "estimated_minutes": 60,
+  "max_minutes": 90,
+
+  "submission_files": ["src/rate_limiter.ts"],
+
+  "starter_code_note": "The data model (Map<string, Bucket> with tokens / lastRefill / lastTouched fields), the public API surface (tryAcquire / acquire / available / reset / clear / size), the injectable ClockFn for deterministic tests, the idle eviction sweep, and the msUntilTokens helper are all provided. Do NOT credit the candidate for the data-structure choice or the public API design — only for: (a) adding constructor input validation, (b) capping refill at capacity, (c) making acquire() fail fast or otherwise stop hanging when refillPerSec is 0 and the request cannot be satisfied, and (d) any concurrency/fairness improvements over the polling loop.",
+
+  "code_quality_criteria": [
+    "Correctness — refill caps at capacity, inputs are validated, acquire() resolves or rejects deterministically.",
+    "Idiomatic TypeScript — strict typing, no implicit any, RangeError / TypeError used appropriately for invalid input.",
+    "Async hygiene — no busy loops, no setInterval leaks, sleep is awaited correctly; clean handling of the refillPerSec=0 case.",
+    "Clarity and naming — small helpers, clear separation between math and policy.",
+    "Defensive numeric handling — NaN/Infinity in opts must not silently propagate into bucket.tokens."
+  ],
+
+  "architectural_criteria": [
+    "Where input validation lives — constructor vs. each method, and the error types chosen.",
+    "Cap-on-refill placement — Math.min in refill() vs. a clamp on every read; trade-off between correctness and overhead.",
+    "Handling refillPerSec=0 in acquire() — fast reject, or a queue with explicit timeout, or an opt-in 'never block' mode.",
+    "Behaviour of cost > capacity — synchronous throw vs. async reject; consistency between tryAcquire and acquire.",
+    "Idle bucket eviction — eviction policy correctness vs. interference with in-flight waiters."
+  ],
+
+  "tasks": [
+    {"id": "basic",      "points": 20, "test_tag": "basic"},
+    {"id": "refill",     "points": 25, "test_tag": "refill"},
+    {"id": "concurrent", "points": 25, "test_tag": "concurrent"},
+    {"id": "edge",       "points": 30, "test_tag": "edge"}
+  ],
+
+  "total_points": 100,
+
+  "expected_tokens": 7000,
+
+  "composite_weights": {
+    "test_score":              0.20,
+    "trap_score":              0.10,
+    "code_quality":            0.20,
+    "prompt_quality":          0.15,
+    "ai_orchestration":        0.15,
+    "architectural_reasoning": 0.10,
+    "token_efficiency":        0.10
+  }
+}
