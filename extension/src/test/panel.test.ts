@@ -136,17 +136,13 @@ describe('DashboardViewProvider', () => {
     });
   });
 
-  test('brief contains timer and budget info', () => {
+  test('brief contains the timer label', () => {
+    // Budget no longer renders in the dashboard — the chat panel's budget
+    // meter is the single source of truth so candidates don't see two
+    // numbers that can drift apart. Only the countdown stays on the brief.
     provider.resolveWebviewView(view);
     provider.setConfig(makeConfig({ llmBudgetUsd: 5.0 }));
-    expect(view.webview.html).toContain('5.00');
     expect(view.webview.html).toContain('Time left');
-  });
-
-  test('brief renders model label from chatModel', () => {
-    provider.resolveWebviewView(view);
-    provider.setConfig(makeConfig({ chatModel: 'openai/gpt-4o' }));
-    expect(view.webview.html).toContain('Gpt 4o'); // after label transform
   });
 
   // ── Bug #1: render not gated by workspaceFolders presence ─────────────────

@@ -1,6 +1,6 @@
 # Paginated User List with Debounced Search (JavaScript)
 
-You have **~30 minutes** (60-minute hard cap) to deliver a correct, tightly
+You have **~60 minutes** to deliver a correct, tightly
 scoped controller for a paginated user list with debounced search. The public
 API lives in [src/user_search.js](src/user_search.js).
 

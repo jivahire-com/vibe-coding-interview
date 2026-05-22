@@ -72,7 +72,7 @@ def test_prompt_quality_score_is_deterministic():
         {"prompt_text": "the get() method returns -1 for keys that should be in cache"},
         {"prompt_text": "fix this please"},
     ]
-    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log)
+    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log, signals={})
 
     assert result["score"] == expected_score
     assert mock_client.chat.completions.create.call_count == 2  # classify + commentary, not a third scoring call
@@ -93,7 +93,7 @@ def test_all_professional_scores_ten():
     mock_client.chat.completions.create.side_effect = [classify_resp, commentary_resp]
 
     chat_log = [{"prompt_text": "precise error description"}, {"prompt_text": "another precise prompt"}]
-    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log)
+    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log, signals={})
 
     assert result["score"] == 10
 
@@ -113,6 +113,6 @@ def test_all_vague_scores_three():
     mock_client.chat.completions.create.side_effect = [classify_resp, commentary_resp]
 
     chat_log = [{"prompt_text": "fix it"}, {"prompt_text": "make it work"}]
-    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log)
+    result = llm_eval._eval_prompt_quality(mock_client, sid, chat_log, signals={})
 
     assert result["score"] == 3

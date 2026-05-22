@@ -3,7 +3,7 @@
  *
  * Covers:
  *  – emit() buffers events
- *  – doc change → paste classification (≥30 chars, rangeLength = 0)
+ *  – doc change → paste classification (size, multi-line, or command-hook signal)
  *  – doc change → typed classification (small edits, aggregated)
  *  – _suppressNextApply flag → edit_ai_applied event
  *  – window focus/unfocus events
@@ -91,17 +91,36 @@ describe('TelemetryTracker', () => {
     });
   }
 
-  test('large insertion (≥30 chars, rangeLength=0) classified as edit_pasted', () => {
+  test('large insertion (≥10 chars, rangeLength=0) classified as edit_pasted', () => {
     const emitSpy = jest.spyOn(tracker, 'emit');
     fireDocChange([{ text: 'a'.repeat(30), rangeLength: 0 }]);
     expect(emitSpy).toHaveBeenCalledWith('edit_pasted', expect.objectContaining({ chars: 30 }));
   });
 
-  test('insertion < 30 chars classified as edit_typed (after aggregation timer)', () => {
+  test('small single-line insertion classified as edit_typed (after aggregation timer)', () => {
     const emitSpy = jest.spyOn(tracker, 'emit');
     fireDocChange([{ text: 'abc', rangeLength: 0 }]);
     jest.advanceTimersByTime(1001);
     expect(emitSpy).toHaveBeenCalledWith('edit_typed', expect.objectContaining({ chars: 3 }));
+  });
+
+  test('paste-over-selection (rangeLength>0, large insert) classified as edit_pasted', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    fireDocChange([{ text: 'x'.repeat(40), rangeLength: 12 }]);
+    expect(emitSpy).toHaveBeenCalledWith('edit_pasted', expect.objectContaining({ chars: 40 }));
+  });
+
+  test('multi-line insert under size threshold still classified as edit_pasted', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    fireDocChange([{ text: 'a\nb', rangeLength: 0 }]);
+    expect(emitSpy).toHaveBeenCalledWith('edit_pasted', expect.objectContaining({ chars: 3 }));
+  });
+
+  test('paste-command hook flags the next change as edit_pasted regardless of size', async () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    await vscode.commands.executeCommand('vibe.interceptPaste');
+    fireDocChange([{ text: 'hi', rangeLength: 0 }]);
+    expect(emitSpy).toHaveBeenCalledWith('edit_pasted', expect.objectContaining({ chars: 2 }));
   });
 
   test('deletion (text="" rangeLength>0) does NOT emit edit_typed', () => {

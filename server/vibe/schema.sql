@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS grades (
     ai_orchestration_score INTEGER,
     architectural_reasoning_score INTEGER,
     prompt_quality_score INTEGER,
-    token_efficiency_score INTEGER,
     total_score REAL,
     grader_summary TEXT,
     raw_output TEXT,

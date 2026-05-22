@@ -23,7 +23,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── invite drawer
     showInvitePanel: false,
-    inviteForm: { email: '', challengeId: '', maxMinutes: 60, budgetUsd: 2.00, sessionKey: '', meetLink: '', scheduledLocal: '', panelistEmails: '' },
+    inviteForm: { email: '', challengeId: '', maxMinutes: 60, budgetUsd: 2.00, sessionKey: '', meetLink: '', scheduledLocal: '', panelistEmails: '', panelExpanded: false },
     inviteLoading: false,
     inviteError: '',
     inviteResult: null,  // { sessionKey }
@@ -154,7 +154,16 @@ document.addEventListener('alpine:init', () => {
       if (pushHash) this._setHash('session/' + id);
       try {
         const r = await this._get(`/api/v1/sessions/${id}`);
+        r.videoUrl = null;
         this.selectedSession = r;
+        if (r.session && r.session.video_s3_key) {
+          try {
+            const v = await this._get(`/api/v1/sessions/${id}/video-url`);
+            this.selectedSession.videoUrl = v.video_url;
+          } catch (_) {
+            // 404/503/etc. — leave videoUrl null; UI shows fallback text.
+          }
+        }
       } catch (e) {
         this.detailError = e.message;
       }
@@ -179,6 +188,7 @@ document.addEventListener('alpine:init', () => {
       this.inviteForm.meetLink = '';
       this.inviteForm.scheduledLocal = '';
       this.inviteForm.panelistEmails = '';
+      this.inviteForm.panelExpanded = false;
       if (this.challenges.length) this.inviteForm.challengeId = this.challenges[0];
       this.showInvitePanel = true;
     },
@@ -211,17 +221,28 @@ document.addEventListener('alpine:init', () => {
         return;
       }
 
-      const meetLink = (this.inviteForm.meetLink || '').trim();
-      if (meetLink && !meetLink.startsWith('https://')) {
-        this.inviteError = 'Video meeting link must start with https://';
-        return;
+      const panelOn = !!this.inviteForm.panelExpanded;
+      const meetLink = panelOn ? (this.inviteForm.meetLink || '').trim() : '';
+      if (panelOn) {
+        if (!meetLink) {
+          this.inviteError = 'Video meeting link is required for a panel interview.';
+          return;
+        }
+        if (!meetLink.startsWith('https://')) {
+          this.inviteError = 'Video meeting link must start with https://';
+          return;
+        }
       }
 
       // datetime-local gives "YYYY-MM-DDTHH:mm" in the browser's local TZ. new
       // Date() parses that as local time; .getTime() returns ms since epoch
       // in UTC. Divide by 1000 to get the epoch seconds the API expects.
       let scheduledAt = null;
-      if (this.inviteForm.scheduledLocal) {
+      if (panelOn) {
+        if (!this.inviteForm.scheduledLocal) {
+          this.inviteError = 'Scheduled start is required for a panel interview.';
+          return;
+        }
         const parsed = new Date(this.inviteForm.scheduledLocal);
         if (Number.isNaN(parsed.getTime())) {
           this.inviteError = 'Could not read the scheduled start time.';
@@ -230,17 +251,15 @@ document.addEventListener('alpine:init', () => {
         scheduledAt = Math.floor(parsed.getTime() / 1000);
       }
 
-      const panelistEmails = (this.inviteForm.panelistEmails || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0);
+      const panelistEmails = panelOn
+        ? (this.inviteForm.panelistEmails || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+        : [];
       const badPanelist = panelistEmails.find((e) => !e.includes('@'));
       if (badPanelist) {
         this.inviteError = `Invalid panelist email: ${badPanelist}`;
-        return;
-      }
-      if (panelistEmails.length > 0 && !meetLink) {
-        this.inviteError = 'Add a video meeting link before adding panelists.';
         return;
       }
 
@@ -310,6 +329,12 @@ document.addEventListener('alpine:init', () => {
       try { return JSON.parse(raw); } catch { return {}; }
     },
 
+    parseSummaryLine(line) {
+      const m = (line || '').match(/^(.+?)\s*\((\d+\/10)\)\s*:\s*(.*)$/s);
+      if (!m) return { label: '', score: '', body: line || '', matched: false };
+      return { label: m[1], score: m[2], body: m[3], matched: true };
+    },
+
     formatDate(ts) {
       if (!ts) return '—';
       return new Date(ts * 1000).toLocaleString(undefined, {
@@ -332,7 +357,10 @@ document.addEventListener('alpine:init', () => {
     totalTokens(detail) {
       if (!detail?.chat_exchanges?.length) return { input: 0, output: 0, cached: 0 };
       return detail.chat_exchanges.reduce((acc, e) => {
-        acc.input += e.prompt_tokens ?? 0;
+        // Candidate-only input: their prompt + attachments, with the repo dump
+        // and system instructions excluded. Null means the row predates the
+        // column (backfilled at server startup); treat as 0 until filled.
+        acc.input += e.candidate_prompt_tokens ?? 0;
         acc.output += e.completion_tokens ?? 0;
         acc.cached += e.cached_input_tokens ?? 0;
         return acc;
@@ -348,6 +376,13 @@ document.addEventListener('alpine:init', () => {
       if (cls === 'specific') return 'badge-submitted';
       if (cls === 'vague') return 'badge-poor';
       return 'badge-pending';
+    },
+
+    promptScoreClass(score) {
+      if (typeof score !== 'number') return 'prompt-score-mid';
+      if (score >= 8) return 'prompt-score-high';
+      if (score >= 4) return 'prompt-score-mid';
+      return 'prompt-score-low';
     },
 
     async _get(url) {

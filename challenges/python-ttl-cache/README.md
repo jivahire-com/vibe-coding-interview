@@ -1,6 +1,6 @@
 # Thread-Safe TTL Cache (Python 3.11+)
 
-You have **~45 minutes** (90-minute hard cap) to deliver a correct, thread-safe,
+You have **~60 minutes** to deliver a correct, thread-safe,
 size-bounded TTL cache. The public API lives in `src/ttl_cache.py`.
 
 ---

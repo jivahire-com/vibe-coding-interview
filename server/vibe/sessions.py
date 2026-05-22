@@ -6,6 +6,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from vibe.auth import check_rate_limit, get_session
+from vibe.budget import pricing_for
 from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
 from vibe.email import send_invite, send_panelist_invite
@@ -187,6 +188,7 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
 
     repo_url = f"https://github.com/{repo}"
     allowed_models = [m.strip() for m in settings.candidate_chat_models.split(",")]
+    pricing = {m: pricing_for(m) for m in allowed_models}
     return ValidateSessionResponse(
         session_id=session["id"],
         repo_url=repo_url,
@@ -198,6 +200,7 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
         challenge_id=session["challenge_id"],
         chat_model=settings.chat_model,
         available_chat_models=allowed_models,
+        pricing_per_million=pricing,
         meet_link=session["meet_link"],
         video_platform=session["video_platform"],
         scheduled_at=session["scheduled_at"],
@@ -213,9 +216,10 @@ def get_session_detail(session_id: str, x_admin_token: str = Header(None)):
         raise HTTPException(404, "Not found")
     grades = query("SELECT * FROM grades WHERE session_id = ?", (session_id,))
     exchanges = query(
-        "SELECT ts, prompt_tokens, completion_tokens, cached_input_tokens, reasoning_tokens, "
-        "cost_usd, prompt_classification, prompt_text FROM chat_exchanges "
-        "WHERE session_id = ? ORDER BY ts",
+        "SELECT ts, prompt_tokens, completion_tokens, candidate_prompt_tokens, "
+        "cached_input_tokens, reasoning_tokens, "
+        "cost_usd, prompt_classification, prompt_score, prompt_reasoning, prompt_text "
+        "FROM chat_exchanges WHERE session_id = ? ORDER BY ts",
         (session_id,),
     )
     focus_rows = query(

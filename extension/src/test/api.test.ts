@@ -234,6 +234,29 @@ describe('validateSession pricing (Review-Bug 6)', () => {
     expect(config.pricingPerMillion['broken/model']).toBeUndefined();
     expect(config.pricingPerMillion['partial/model']).toBeUndefined();
   });
+
+  // ── Multi-model picker: bundled defaults cover every advertised model ───
+  //
+  // The chat picker advertises four models. If the server omits
+  // `pricing_per_million`, the bundled DEFAULT_MODEL_PRICING is the only
+  // way the extension's spend meter stays accurate — every advertised model
+  // MUST have a fallback entry.
+  test('DEFAULT_MODEL_PRICING covers every advertised picker model', async () => {
+    const { DEFAULT_MODEL_PRICING } = await import('../api');
+    for (const m of [
+      'openai/gpt-4o-mini',
+      'google/gemini-2.5-flash-lite',
+      'anthropic/claude-opus-4.6',
+      'anthropic/claude-sonnet-4.6',
+    ]) {
+      expect(DEFAULT_MODEL_PRICING[m]).toBeDefined();
+      expect(typeof DEFAULT_MODEL_PRICING[m].input).toBe('number');
+      expect(typeof DEFAULT_MODEL_PRICING[m].output).toBe('number');
+      // Output is always >= input for these providers.
+      expect(DEFAULT_MODEL_PRICING[m].output)
+        .toBeGreaterThanOrEqual(DEFAULT_MODEL_PRICING[m].input);
+    }
+  });
 });
 
 // ── Review-Bug 9: POST timeout ─────────────────────────────────────────────

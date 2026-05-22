@@ -87,6 +87,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ command: "sessionError", message });
   }
 
+  isVisible(): boolean {
+    return this.view?.visible ?? false;
+  }
+
   /**
    * Mark the session as submitted. Stops the refresh interval and re-renders
    * the brief in a read-only state. Without this, the dashboard buttons stay
@@ -593,7 +597,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <div class="step-num">3</div>
         <div>
           <div class="step-title">Use the AI chat</div>
-          <div class="step-desc">Click <strong>Open AI Chat</strong> in the session panel. You have a fixed dollar budget — use it wisely. <strong>Your prompts are evaluated as part of grading.</strong></div>
+          <div class="step-desc">Click <strong>Open AI Chat</strong> in the session panel. <strong>Your prompts are evaluated as part of grading.</strong></div>
         </div>
       </div>
       <div class="step">
@@ -713,15 +717,10 @@ Click Apply ──▶ Diff editor opens
       </div>`;
     };
 
-    const modelLabel = config.chatModel
-      ? config.chatModel.replace(/^openai\//, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
-      : "GPT-4o-mini";
-
     // All values below are interpolated into HTML — every server-supplied
     // string must be HTML-escaped to prevent XSS via challenge metadata.
     const safeChallengeId = escapeHtml(config.challengeId ?? "");
     const safeChallengeDesc = escapeHtml(config.challengeDescription || config.challengeId || "");
-    const safeModelLabel = escapeHtml(modelLabel);
     const submittedBanner = this.submitted
       ? `<div class="card" style="border-color:#4caf50;"><div class="card-header" style="color:#4caf50;">&#10003; Submitted</div><p class="desc">Session submitted. Grading is in progress — further edits are locked.</p></div>`
       : "";
@@ -803,20 +802,6 @@ Click Apply ──▶ Diff editor opens
   .challenge-name {
     font-size: 14px; font-weight: 700;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    margin-bottom: 4px;
-  }
-  .meta { display: flex; flex-wrap: wrap; gap: 4px; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-size: 10.5px; color: var(--vscode-descriptionForeground);
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: 12px; padding: 2px 8px;
-  }
-  .badge-accent {
-    color: var(--vscode-button-foreground);
-    background: var(--vscode-button-background);
-    border-color: transparent;
   }
   .timer-box {
     flex-shrink: 0; text-align: center;
@@ -908,10 +893,6 @@ Click Apply ──▶ Diff editor opens
   <div class="topbar">
     <div class="challenge-info">
       <div class="challenge-name">${safeChallengeId}</div>
-      <div class="meta">
-        <span class="badge badge-accent">&#128176; $${config.llmBudgetUsd.toFixed(2)} budget</span>
-        <span class="badge">&#129302; ${safeModelLabel}</span>
-      </div>
     </div>
     <div class="timer-box">
       <div class="timer-label">Time left</div>
@@ -943,12 +924,7 @@ Click Apply ──▶ Diff editor opens
       <span class="btn-label">Run Tests</span>
       <span class="btn-hint">execute compiled test suite</span>
     </button>
-    <button class="action-btn secondary" data-action="openChat" ${actionDisabled}>
-      <span>&#128172;</span>
-      <span class="btn-label">Open AI Chat</span>
-      <span class="btn-hint">opens in right sidebar →</span>
-    </button>
-    <button class="action-btn danger" data-action="submit" ${actionDisabled}>
+<button class="action-btn danger" data-action="submit" ${actionDisabled}>
       <span>&#10003;</span>
       <span class="btn-label">Submit Solution</span>
       <span class="btn-hint">finalises &amp; locks your branch</span>

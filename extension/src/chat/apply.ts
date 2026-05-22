@@ -7,15 +7,7 @@ export const AI_PROPOSED_SCHEME = "vibe-ai-proposed";
 
 /**
  * Confirm `resolved` lies under `ws` after symlinks are followed. The naive
- * `resolved.startsWith(ws + sep)` check is symlink-blind: if any directory in
- * the workspace is a symlink (e.g. `node_modules/.bin`), an AI suggestion
- * referencing a path through it can land outside the workspace while still
- * passing the string-prefix check.
- *
- * We can't realpath `resolved` itself because the file may not exist yet, so
- * we walk up to the nearest existing ancestor and realpath that. The
- * destination is safe iff its existing ancestor canonicalises to a path under
- * the workspace root's canonical form.
+ * `resolved.startsWith(ws + sep)` check is symlink-blind.
  */
 export function _isInsideWorkspace(ws: string, resolved: string): boolean {
   let wsReal: string;
@@ -23,109 +15,332 @@ export function _isInsideWorkspace(ws: string, resolved: string): boolean {
   const wsRealNorm = wsReal.replace(/[\\/]+$/, "");
 
   let probe = resolved;
-  // Walk up to the nearest existing ancestor — we may be creating a new file.
   while (!fs.existsSync(probe)) {
     const parent = path.dirname(probe);
-    if (parent === probe) {
-      // Reached filesystem root with nothing existing — cannot be inside ws.
-      return false;
-    }
+    if (parent === probe) return false;
     probe = parent;
   }
   let probeReal: string;
   try { probeReal = fs.realpathSync(probe); } catch { probeReal = probe; }
 
-  // Compute the suffix of `resolved` that lies BELOW `probe` (the part we
-  // didn't realpath). Re-attach it to the realpathed prefix and check that
-  // the whole thing sits under the realpath of the workspace.
   const suffix = path.relative(probe, resolved);
   const finalPath = suffix ? path.join(probeReal, suffix) : probeReal;
 
   return finalPath === wsRealNorm || finalPath.startsWith(wsRealNorm + path.sep);
 }
 
-const _proposedContent = new Map<string, string>();
+// ─── Hunk + session types ──────────────────────────────────────────────────
 
-// Pending apply operations keyed by blockId
-interface PendingApply {
-  resolve: (accepted: boolean) => void;
-  originalUri: vscode.Uri;
-  newText: string;
-  isFullFile: boolean;
+interface Hunk {
+  index: number;
+  originalLines: string[];   // red — lines present in original but removed in proposed
+  newLines: string[];        // green — lines added in proposed
+  // Line index in the ORIGINAL text where this hunk's removed lines begin.
+  // Stable across status changes — used to recompose the document text.
+  originalStart: number;
+  // Current line positions in the document. Red comes first, green right after.
+  // Recomputed by _composeDocText whenever statuses change.
+  redStart: number;
+  redEnd: number;            // exclusive
+  greenStart: number;
+  greenEnd: number;          // exclusive
+  status: 'pending' | 'accepted' | 'rejected';
+}
+
+interface InlineSession {
+  id: string;
+  fileUri: vscode.Uri;
+  fileKey: string;           // case-normalised fsPath for cross-platform map lookups
+  originalFullText: string;
+  originalLines: string[];   // line-split (no trailing EOL) — source of truth for compose
+  eol: string;               // '\n' or '\r\n' — preserved on writeback
+  proposedFullText: string;
   workspace: string;
   relativePath: string;
-}
-const _pending = new Map<string, PendingApply>();
-
-// One-time subscription that watches for the diff document being closed
-// without the user clicking Accept/Reject — see Bug #10 fix below.
-let _closeWatcherRegistered = false;
-let _closeWatcherDisposable: vscode.Disposable | undefined;
-
-function _ensureCloseWatcher(): void {
-  if (_closeWatcherRegistered) return;
-  _closeWatcherRegistered = true;
-  _closeWatcherDisposable = vscode.workspace.onDidCloseTextDocument((doc) => {
-    if (doc.uri.scheme !== AI_PROPOSED_SCHEME) return;
-    const blockId = doc.uri.path.replace(/^\//, "");
-    const pending = _pending.get(blockId);
-    if (pending) {
-      // Bug #10: closing the diff tab without using the CodeLens used to
-      // leave the promise pending forever. We now treat it as an implicit
-      // Reject so the apply flow tears down: pending entry removed, proposed
-      // content evicted from the in-memory cache, button re-enabled.
-      pending.resolve(false);
-    }
-  });
+  hunks: Hunk[];
+  _resolve: () => void;
 }
 
-/** Test hook: tears down the close watcher so test isolation is preserved. */
-export function _disposeApplyForTests(): void {
-  _closeWatcherDisposable?.dispose();
-  _closeWatcherDisposable = undefined;
-  _closeWatcherRegistered = false;
-  _pending.clear();
-  _proposedContent.clear();
-}
+const _inlineSessions = new Map<string, InlineSession>();
 
-export class AiProposedContentProvider implements vscode.TextDocumentContentProvider {
-  provideTextDocumentContent(uri: vscode.Uri): string {
-    return _proposedContent.get(uri.path) ?? "";
+/**
+ * Mirror the size of `_inlineSessions` into a context key so the editor
+ * title-bar menu can show file-level Accept/Reject only when a diff is
+ * actually in progress. Called from every mutation point on the map.
+ */
+function _updateDiffActiveContext(): void {
+  try {
+    void vscode.commands.executeCommand(
+      'setContext',
+      'vibe.diff.active',
+      _inlineSessions.size > 0,
+    );
+  } catch {
+    // No command host in tests — fine.
   }
 }
 
-export class AiApplyCodeLensProvider implements vscode.CodeLensProvider {
+/**
+ * Look up the active inline-diff session for whichever file the user is
+ * currently focused on. Used when a title-bar command fires without a
+ * blockId argument (title-bar menu items don't pass arguments).
+ */
+export function _getSessionForActiveEditor(): InlineSession | undefined {
+  const ed = vscode.window.activeTextEditor;
+  if (!ed) return undefined;
+  const key = _pathKey(ed.document.uri.fsPath);
+  return [..._inlineSessions.values()].find((s) => s.fileKey === key);
+}
+
+/**
+ * Cross-platform path key. Windows file systems are case-insensitive, so a
+ * URI captured at apply time may not byte-equal the document URI VS Code
+ * hands to the CodeLens provider. Normalise on lower-case for that platform.
+ */
+function _pathKey(p: string): string {
+  return process.platform === 'win32' ? p.toLowerCase() : p;
+}
+
+// ─── Status bar items (file-level Accept / Reject) ──────────────────────────
+//
+// CodeLens text can't be styled — colour and size are theme-fixed. Editor
+// title-bar buttons only render as small monochrome icons, which the
+// candidate couldn't see. The status bar is the only standard VS Code
+// surface that supports BOTH text labels AND a background colour (limited
+// to `prominentBackground` / `warningBackground` / `errorBackground`), so
+// we render the file-level controls there. They appear at the bottom of
+// the window with bright backgrounds whenever a diff session is active.
+
+let _acceptStatusBarItem: vscode.StatusBarItem | undefined;
+let _rejectStatusBarItem: vscode.StatusBarItem | undefined;
+
+function _ensureStatusBarItems(): void {
+  if (typeof vscode.window.createStatusBarItem !== 'function') return;
+  // Priorities just below the JivaHire dashboard-toggle button (which sits at
+  // 100), so Accept(99) and Reject(98) appear immediately to its right on the
+  // left-aligned status bar. Adjacent integers guarantee they stay together —
+  // no built-in or third-party item is going to register at exactly 98.5.
+  if (!_acceptStatusBarItem) {
+    _acceptStatusBarItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      99,
+    );
+    _acceptStatusBarItem.command = 'vibe.acceptAllHunks';
+    // VS Code's StatusBarItem.backgroundColor only honours
+    // `statusBarItem.warningBackground` (yellow) and `.errorBackground` (red);
+    // every other ThemeColor is silently dropped to the default (dark) status
+    // bar background. There is no built-in blue background. So we colour the
+    // FOREGROUND text blue via the `charts.blue` ThemeColor — readable against
+    // the default status bar background in both light and dark themes.
+    _acceptStatusBarItem.color = new vscode.ThemeColor('charts.blue');
+    _acceptStatusBarItem.tooltip = 'Accept every AI-proposed change in this file';
+  }
+  if (!_rejectStatusBarItem) {
+    _rejectStatusBarItem = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left,
+      98,
+    );
+    _rejectStatusBarItem.command = 'vibe.rejectAllHunks';
+    _rejectStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+    _rejectStatusBarItem.tooltip = 'Reject every AI-proposed change in this file';
+  }
+}
+
+/**
+ * Show / hide the file-level Accept and Reject status bar items based on
+ * whether there's an active inline-diff session. The labels include the
+ * pending-hunk count so the candidate can see how many changes remain.
+ */
+function _refreshStatusBarItems(): void {
+  _ensureStatusBarItems();
+  if (!_acceptStatusBarItem || !_rejectStatusBarItem) return;
+
+  if (_inlineSessions.size === 0) {
+    _acceptStatusBarItem.hide();
+    _rejectStatusBarItem.hide();
+    return;
+  }
+  let pendingTotal = 0;
+  for (const s of _inlineSessions.values()) {
+    pendingTotal += s.hunks.filter((h) => h.status === 'pending').length;
+  }
+  if (pendingTotal === 0) {
+    _acceptStatusBarItem.hide();
+    _rejectStatusBarItem.hide();
+    return;
+  }
+  _acceptStatusBarItem.text = `$(check-all)  ACCEPT FILE  (${pendingTotal})`;
+  _rejectStatusBarItem.text = `$(close-all)  REJECT FILE`;
+  _acceptStatusBarItem.show();
+  _rejectStatusBarItem.show();
+}
+
+/**
+ * Detect the predominant line ending in a text blob. Used so we write back
+ * the same EOL the candidate's file already has — Windows files commonly use
+ * CRLF, and mixing in pure-LF lines would visibly garble the diff.
+ */
+function _detectEol(text: string): string {
+  // Count CRLF occurrences; if any are present and they're the majority of
+  // line breaks, treat the file as CRLF.
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(?<!\r)\n/g) ?? []).length;
+  if (crlf > 0 && crlf >= lf) return '\r\n';
+  return '\n';
+}
+
+/**
+ * Split text into lines, tolerating both `\n` and `\r\n`. Trailing CR is
+ * stripped from every line. A trailing newline produces a trailing empty
+ * line — preserved so we can faithfully reconstruct the original on accept.
+ */
+function _splitLines(text: string): string[] {
+  if (text === '') return [];
+  return text.split(/\r?\n/);
+}
+
+// ─── Decorations (lazy-created so test-mock env stays lightweight) ──────────
+
+let _redDecoration: vscode.TextEditorDecorationType | undefined;
+let _greenDecoration: vscode.TextEditorDecorationType | undefined;
+
+function _decorations(): { red: vscode.TextEditorDecorationType; green: vscode.TextEditorDecorationType } | undefined {
+  if (typeof vscode.window.createTextEditorDecorationType !== 'function') return undefined;
+  if (!_redDecoration) {
+    _redDecoration = vscode.window.createTextEditorDecorationType({
+      // Red tint only — no strike-through. The line-wide highlight is enough
+      // to mark removed lines, and the strike made the text harder to read
+      // for candidates who want to copy from it.
+      backgroundColor: 'rgba(220, 60, 60, 0.32)',
+      isWholeLine: true,
+      overviewRulerColor: 'rgba(220, 60, 60, 0.9)',
+      overviewRulerLane: vscode.OverviewRulerLane.Full,
+      before: {
+        contentText: '− ',
+        color: 'rgba(220, 60, 60, 0.95)',
+        margin: '0 6px 0 0',
+        fontWeight: 'bold',
+      },
+    });
+  }
+  if (!_greenDecoration) {
+    _greenDecoration = vscode.window.createTextEditorDecorationType({
+      backgroundColor: 'rgba(60, 200, 100, 0.28)',
+      isWholeLine: true,
+      overviewRulerColor: 'rgba(60, 200, 100, 0.9)',
+      overviewRulerLane: vscode.OverviewRulerLane.Full,
+      before: {
+        contentText: '+ ',
+        color: 'rgba(60, 200, 100, 1.0)',
+        margin: '0 6px 0 0',
+        fontWeight: 'bold',
+      },
+    });
+  }
+  return { red: _redDecoration, green: _greenDecoration };
+}
+
+// ─── Content provider stub kept for backward compatibility ─────────────────
+
+export class AiProposedContentProvider implements vscode.TextDocumentContentProvider {
+  provideTextDocumentContent(_uri: vscode.Uri): string { return ""; }
+}
+
+// ─── CodeLens: per-hunk + file-level Accept/Reject ─────────────────────────
+
+export class AiInlineHunkCodeLensProvider implements vscode.CodeLensProvider {
   private _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChangeCodeLenses = this._onDidChange.event;
 
-  refresh(): void {
-    this._onDidChange.fire();
-  }
+  refresh(): void { this._onDidChange.fire(); }
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    if (document.uri.scheme !== AI_PROPOSED_SCHEME) return [];
-    const blockId = document.uri.path.replace(/^\//, "");
-    if (!_pending.has(blockId)) return [];
-    const range = new vscode.Range(0, 0, 0, 0);
-    return [
-      new vscode.CodeLens(range, {
-        title: "$(check) Accept AI changes",
-        command: "vibe.acceptAiChanges",
-        arguments: [blockId],
+    if (document.uri.scheme !== "file") return [];
+    const docKey = _pathKey(document.uri.fsPath);
+    const session = [..._inlineSessions.values()].find((s) => s.fileKey === docKey);
+    if (!session) return [];
+    const pending = session.hunks.filter((h) => h.status === 'pending');
+    if (pending.length === 0) return [];
+
+    const lenses: vscode.CodeLens[] = [];
+
+    // File-level Accept All / Reject All at line 0. The same commands are
+    // also bound in the editor title bar (see package.json), giving two
+    // entry points — but the line-0 lens is where the user expects to see
+    // the "whole-file" decision, and coloured emoji are the only way to
+    // inject colour into a CodeLens (text colour is theme-fixed).
+    const topRange = new vscode.Range(0, 0, 0, 0);
+    lenses.push(
+      new vscode.CodeLens(topRange, {
+        title: `✅ Accept all (${pending.length})`,
+        command: "vibe.acceptAllHunks",
+        arguments: [session.id],
       }),
-      new vscode.CodeLens(range, {
-        title: "$(close) Reject",
-        command: "vibe.rejectAiChanges",
-        arguments: [blockId],
+      new vscode.CodeLens(topRange, {
+        title: `❌ Reject all`,
+        command: "vibe.rejectAllHunks",
+        arguments: [session.id],
       }),
-    ];
+    );
+
+    for (const h of pending) {
+      const anchorLine = h.redEnd > h.redStart ? h.redStart : h.greenStart;
+      const safeLine = Math.max(0, Math.min(anchorLine, _docLineCount(document) - 1));
+      const range = new vscode.Range(safeLine, 0, safeLine, 0);
+      const greenCount = h.greenEnd - h.greenStart;
+      const redCount = h.redEnd - h.redStart;
+      const tag = `−${redCount} +${greenCount}`;
+      // Coloured emoji draw the eye; CodeLens text colour and size are
+      // fixed by VS Code and can't be styled directly.
+      lenses.push(
+        new vscode.CodeLens(range, {
+          title: `✅ Accept  ${tag}`,
+          command: "vibe.acceptHunk",
+          arguments: [session.id, h.index],
+        }),
+        new vscode.CodeLens(range, {
+          title: `❌ Reject`,
+          command: "vibe.rejectHunk",
+          arguments: [session.id, h.index],
+        }),
+      );
+    }
+    return lenses;
   }
 }
 
-let _codeLensProvider: AiApplyCodeLensProvider | undefined;
+function _docLineCount(doc: vscode.TextDocument): number {
+  // Tests use a stripped-down TextDocument shape. Fall back when lineCount missing.
+  return (doc as { lineCount?: number }).lineCount ?? 1;
+}
 
-export function registerCodeLensProvider(p: AiApplyCodeLensProvider): void {
+// Alias for backward compatibility with extension.ts imports.
+export const AiApplyCodeLensProvider = AiInlineHunkCodeLensProvider;
+
+let _codeLensProvider: AiInlineHunkCodeLensProvider | undefined;
+let _activeEditorListenerInstalled = false;
+
+export function registerCodeLensProvider(p: AiInlineHunkCodeLensProvider): void {
   _codeLensProvider = p;
+  // Reapply decorations whenever the candidate flips back to a file we have
+  // an active diff session on — VS Code drops per-editor decorations when an
+  // editor is closed and reopened, so we need to rehydrate them on focus.
+  if (!_activeEditorListenerInstalled && typeof vscode.window.onDidChangeActiveTextEditor === 'function') {
+    _activeEditorListenerInstalled = true;
+    try {
+      vscode.window.onDidChangeActiveTextEditor((ed) => {
+        if (!ed) return;
+        const key = _pathKey(ed.document.uri.fsPath);
+        const session = [..._inlineSessions.values()].find((s) => s.fileKey === key);
+        if (session) {
+          _refreshDecorations(session);
+          _codeLensProvider?.refresh();
+        }
+      });
+    } catch {
+      // No window subscription in tests — fine.
+    }
+  }
 }
 
 let _telemetryCallback: ((event: string, payload: object) => void) | undefined;
@@ -134,75 +349,208 @@ export function setTelemetryCallback(cb: (event: string, payload: object) => voi
   _telemetryCallback = cb;
 }
 
+// ─── Accept / Reject — file-level (accept-all / reject-all) ────────────────
+
 export function acceptAiChanges(blockId: string): void {
-  const pending = _pending.get(blockId);
-  if (pending) pending.resolve(true);
+  // File-level accept: drop all red lines for pending hunks.
+  void _resolveAllPending(blockId, 'accepted');
 }
 
 export function rejectAiChanges(blockId: string): void {
-  const pending = _pending.get(blockId);
-  if (pending) pending.resolve(false);
+  // File-level reject: drop all green lines for pending hunks.
+  void _resolveAllPending(blockId, 'rejected');
 }
 
-/**
- * @internal — exposed for tests so they can inspect whether an apply call
- * left a pending entry behind. Production code must never call this.
- */
-export function _pendingSizeForTests(): number {
-  return _pending.size;
-}
-
-/**
- * Close the diff tab keyed by `proposedUri`. We can't rely on
- * `workbench.action.closeActiveEditor` because the diff editor may not be
- * the active editor at resolve time (CodeLens clicks can shift focus, the
- * destructive-confirm modal steals focus). Leaving the diff tab open is what
- * candidates were reporting as "after Accept the file still looks all green
- * and red."
- *
- * Strategy:
- *  1. Find every diff tab whose `modified` URI uses our AI-proposed scheme —
- *     URI-path equality alone proved unreliable in production (some VS Code
- *     versions normalise the path or wrap the Uri), so we anchor on the scheme
- *     and close every match. Only one AI diff is ever open at a time, so the
- *     broader sweep is safe.
- *  2. After the tabGroups close, if the active editor is STILL a diff using
- *     our scheme (race observed when modal focus-stealing leaves the close
- *     promise pending), force-close via the workbench command as a fallback.
- */
-async function _closeDiffTab(proposedUri: vscode.Uri): Promise<void> {
-  const targetPath = proposedUri.path;
-  const toClose: vscode.Tab[] = [];
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      const input = tab.input as { modified?: vscode.Uri } | undefined;
-      const mod = input?.modified;
-      if (!mod) continue;
-      if (mod.scheme === AI_PROPOSED_SCHEME || mod.path === targetPath) {
-        toClose.push(tab);
-      }
+async function _resolveAllPending(blockId: string, status: 'accepted' | 'rejected'): Promise<void> {
+  const session = _inlineSessions.get(blockId);
+  if (!session) return;
+  let mutated = false;
+  for (const h of session.hunks) {
+    if (h.status === 'pending') {
+      h.status = status;
+      mutated = true;
     }
   }
-  for (const tab of toClose) {
-    try { await vscode.window.tabGroups.close(tab); }
-    catch { /* tab already gone — fine */ }
+  if (mutated) {
+    await _writeSessionState(session);
   }
+  // Always refresh + resolve if everything is done — even if nothing changed,
+  // the session may have been left dangling.
+  _refreshDecorations(session);
+  _codeLensProvider?.refresh();
+  _refreshStatusBarItems();
+  if (session.hunks.every((h) => h.status !== 'pending')) {
+    session._resolve();
+  }
+}
 
-  // Belt-and-braces: if any AI-proposed tab survived (some VS Code builds
-  // ignore tabGroups.close on tabs whose document was disposed mid-flight),
-  // poke the workbench command. Cheap, idempotent, and matches the worst-case
-  // visual symptom the candidate reported in the screenshot.
-  const stillOpen = vscode.window.tabGroups.all.some((g) =>
-    g.tabs.some((t) => {
-      const m = (t.input as { modified?: vscode.Uri } | undefined)?.modified;
-      return m?.scheme === AI_PROPOSED_SCHEME;
-    }),
-  );
-  if (stillOpen) {
-    try {
-      await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
-    } catch { /* command not available in this host — ignore */ }
+// ─── Per-hunk accept / reject ──────────────────────────────────────────────
+
+export function acceptHunk(blockId: string, hunkIndex: number): void {
+  void _resolveHunk(blockId, hunkIndex, 'accepted');
+}
+
+export function rejectHunk(blockId: string, hunkIndex: number): void {
+  void _resolveHunk(blockId, hunkIndex, 'rejected');
+}
+
+async function _resolveHunk(blockId: string, hunkIndex: number, status: 'accepted' | 'rejected'): Promise<void> {
+  const session = _inlineSessions.get(blockId);
+  if (!session) return;
+  const hunk = session.hunks.find((h) => h.index === hunkIndex);
+  if (!hunk || hunk.status !== 'pending') return;
+  hunk.status = status;
+  await _writeSessionState(session);
+  _refreshDecorations(session);
+  _codeLensProvider?.refresh();
+  _refreshStatusBarItems();
+  if (session.hunks.every((h) => h.status !== 'pending')) {
+    session._resolve();
   }
+}
+
+/** @internal */
+export function _pendingSizeForTests(): number {
+  return _inlineSessions.size;
+}
+
+/** @internal */
+export function _disposeApplyForTests(): void {
+  for (const session of _inlineSessions.values()) {
+    session._resolve();
+  }
+  _inlineSessions.clear();
+  _updateDiffActiveContext();
+  _refreshStatusBarItems();
+}
+
+// ─── Document text rebuilding ──────────────────────────────────────────────
+
+/**
+ * Compose the document text from the session's hunks at their current status.
+ * Walks the original text and applies each hunk: pending shows red+green,
+ * accepted shows green only, rejected shows red (original) only.
+ * Also updates the in-memory line positions on each hunk to match the result.
+ */
+function _composeDocText(session: InlineSession): string {
+  // Reconstruct ops by walking the proposed sequence using hunk metadata.
+  // Each hunk knows what was removed and what was added. Equal regions
+  // between hunks we can recover from the original text.
+  const lines: string[] = [];
+  const originalLines = session.originalLines;
+
+  // Sort hunks by their original-text start. We need to know where each hunk
+  // sat in the ORIGINAL text. Track that as we go through hunks in document
+  // order: the first hunk's originalLines occupy original positions [origCursor,
+  // origCursor + originalLines.length). Equal text between hunks sits in the
+  // gap.
+  // Hunks were created in document order during _buildPreview, so they already
+  // correspond to the original-text order too.
+  let origCursor = 0;
+  for (const h of session.hunks) {
+    // Determine how many equal lines came before this hunk:
+    //   - When the hunk was built, its redStart in preview-text equaled
+    //     the number of equal-or-already-consumed lines emitted so far.
+    //     But since per-hunk positions shift after operations, we cannot
+    //     rely on h.redStart here. Instead we track origCursor by counting
+    //     originalLines from previous hunks.
+    // We need to know how many equal lines from the original come between
+    // origCursor and the start of this hunk's removed lines. We store that
+    // implicitly: it's the "originalStart" relative to origCursor.
+    // To recover it without storing extra data: walk the originalLines until
+    // we find a slice that matches h.originalLines. But that's fuzzy. So:
+    // we instead persisted the start in the session via the `originalStart`
+    // property — see _buildPreview.
+    const start = h.originalStart;
+    // Emit equal lines from origCursor to start
+    for (let i = origCursor; i < start; i++) lines.push(originalLines[i] ?? '');
+
+    // Update hunk's red position to where it will land in the composed text
+    h.redStart = lines.length;
+    if (h.status === 'rejected') {
+      // Show original lines only (red zone occupies their position).
+      for (const ol of h.originalLines) lines.push(ol);
+      h.redEnd = lines.length;
+      h.greenStart = lines.length;
+      h.greenEnd = lines.length;
+    } else if (h.status === 'accepted') {
+      // Show new lines only (no red zone).
+      h.redEnd = lines.length;
+      h.greenStart = lines.length;
+      for (const nl of h.newLines) lines.push(nl);
+      h.greenEnd = lines.length;
+    } else {
+      // Pending: show original, then new.
+      for (const ol of h.originalLines) lines.push(ol);
+      h.redEnd = lines.length;
+      h.greenStart = lines.length;
+      for (const nl of h.newLines) lines.push(nl);
+      h.greenEnd = lines.length;
+    }
+
+    origCursor = start + h.originalLines.length;
+  }
+  // Trailing equal lines.
+  for (let i = origCursor; i < originalLines.length; i++) lines.push(originalLines[i] ?? '');
+
+  return lines.join(session.eol);
+}
+
+async function _writeSessionState(session: InlineSession): Promise<void> {
+  const desired = _composeDocText(session);
+  const wsEdit = new vscode.WorkspaceEdit();
+  const fullRange = new vscode.Range(
+    new vscode.Position(0, 0),
+    new vscode.Position(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+  );
+  wsEdit.replace(session.fileUri, fullRange, desired);
+  suppressNextApplyEvent();
+  await vscode.workspace.applyEdit(wsEdit);
+}
+
+// ─── Decoration refresh ────────────────────────────────────────────────────
+
+function _refreshDecorations(session: InlineSession): void {
+  const decos = _decorations();
+  if (!decos) return;
+  const editors = vscode.window.visibleTextEditors ?? [];
+  for (const ed of editors) {
+    const docPath = ed.document?.uri?.fsPath;
+    if (!docPath || _pathKey(docPath) !== session.fileKey) continue;
+    const redRanges: vscode.Range[] = [];
+    const greenRanges: vscode.Range[] = [];
+    for (const h of session.hunks) {
+      if (h.status !== 'pending') continue;
+      if (h.redEnd > h.redStart) {
+        redRanges.push(new vscode.Range(h.redStart, 0, h.redEnd - 1, Number.MAX_SAFE_INTEGER));
+      }
+      if (h.greenEnd > h.greenStart) {
+        greenRanges.push(new vscode.Range(h.greenStart, 0, h.greenEnd - 1, Number.MAX_SAFE_INTEGER));
+      }
+    }
+    try {
+      ed.setDecorations?.(decos.red, redRanges);
+      ed.setDecorations?.(decos.green, greenRanges);
+    } catch {
+      // Decoration API not available (tests).
+    }
+  }
+}
+
+// ─── applyCodeBlock — main entry point ─────────────────────────────────────
+
+async function _ensureFileOpen(session: InlineSession): Promise<void> {
+  try {
+    const doc = await vscode.workspace.openTextDocument(session.fileUri);
+    await vscode.window.showTextDocument(doc, { preview: false });
+  } catch {
+    // Non-fatal — tests run without a real editor host.
+  }
+}
+
+function _refreshUi(session: InlineSession): void {
+  _refreshDecorations(session);
+  _codeLensProvider?.refresh();
 }
 
 export async function applyCodeBlock(
@@ -210,7 +558,6 @@ export async function applyCodeBlock(
   newText: string,
   blockId: string
 ): Promise<void> {
-  _ensureCloseWatcher();
   const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!ws) {
     vscode.window.showErrorMessage("No workspace folder open.");
@@ -223,105 +570,104 @@ export async function applyCodeBlock(
     return;
   }
 
-  const originalText = fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : "";
+  const fileKey = _pathKey(resolved);
 
-  const ext = path.extname(resolved).toLowerCase();
-  const isFullFile = looksLikeFullFile(newText, originalText, ext);
-
-  // Plan the edits upfront. When the snippet is a partial set of top-level
-  // blocks (e.g. two methods), anchor each block to its region in the
-  // original — this lets us preview the *merged* file in the diff and apply
-  // surgical replacements on Accept. The previous code passed `newText` raw
-  // to the diff editor, which painted the entire original as deleted and the
-  // snippet as a wholesale overwrite — candidates reported clicking Apply
-  // and watching their file get wiped to a few lines.
-  const matches: RegionMatch[] | null =
-    isFullFile ? null : _findAllRegions(originalText, newText, ext);
-  const proposedFileContent =
-    matches && !isFullFile ? _applyRegionsToText(originalText, matches) : newText;
-  const isSurgical = !isFullFile && matches !== null && matches.length > 0;
-
-  const proposedKey = `/${blockId}`;
-  _proposedContent.set(proposedKey, proposedFileContent);
-
-  const originalUri = vscode.Uri.file(resolved);
-  const proposedUri = vscode.Uri.from({
-    scheme: AI_PROPOSED_SCHEME,
-    path: proposedKey,
-  });
-
-  // Register pending BEFORE opening the diff so the CodeLens provider's first
-  // query (triggered when the diff document opens) sees the entry and renders
-  // the Accept/Reject buttons.
-  const accepted = await new Promise<boolean>((resolve) => {
-    _pending.set(blockId, { resolve, originalUri, newText, isFullFile, workspace: ws, relativePath: path.relative(ws, resolved) });
-    const title = `AI suggestion: ${path.basename(resolved)}`;
-    vscode.commands.executeCommand("vscode.diff", originalUri, proposedUri, title).then(() => {
-      _codeLensProvider?.refresh();
-    });
-  });
-
-  _pending.delete(blockId);
-  // Close the tab BEFORE evicting the proposed content. If we delete first,
-  // any pending paint of the diff editor (e.g. while VS Code processes the
-  // close request) re-queries the content provider, gets back "" because the
-  // entry is gone, and the candidate sees a momentary all-green / all-red
-  // flash before the tab actually disappears.
-  await _closeDiffTab(proposedUri);
-  _proposedContent.delete(proposedKey);
-
-  if (accepted) {
-    const wouldFullReplace = !isSurgical;
-
-    // Bug #11 + apply-button bug: any wholesale overwrite on a non-empty file
-    // still requires an explicit confirm modal. Surgical multi-region apply
-    // skips the modal — the diff already showed the merged result, so what
-    // the candidate visually approved is exactly what gets written.
-    if (wouldFullReplace && originalText.trim().length > 0) {
-      const choice = await vscode.window.showWarningMessage(
-        `This will REPLACE the entire contents of ${path.basename(resolved)} (${originalText.length} chars). Continue?`,
-        { modal: true },
-        "Replace entire file",
-      );
-      if (choice !== "Replace entire file") {
-        _telemetryCallback?.("ai_apply_full_file_declined", {
-          file: path.relative(ws, resolved),
-          block_id: blockId,
-        });
-        return;
-      }
+  // Auto-reject any prior active session on the same file so two diffs don't
+  // collide. If the user starts a new apply, they're done with the old one.
+  for (const [oldId, s] of [..._inlineSessions]) {
+    if (oldId !== blockId && s.fileKey === fileKey) {
+      await _resolveAllPending(oldId, 'rejected');
     }
-
-    const wsEdit = new vscode.WorkspaceEdit();
-    if (isSurgical && matches) {
-      // Apply from last to first so earlier ranges stay valid as the document
-      // shifts. VS Code's WorkspaceEdit handles non-overlapping edits in one
-      // pass, but we sort defensively to keep behavior identical to a manual
-      // splice.
-      const ordered = [...matches].sort(
-        (a, b) => b.range.start.line - a.range.start.line,
-      );
-      for (const m of ordered) {
-        wsEdit.replace(originalUri, m.range, m.replacement);
-      }
-    } else {
-      const fullRange = new vscode.Range(
-        new vscode.Position(0, 0),
-        new vscode.Position(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
-      );
-      wsEdit.replace(originalUri, fullRange, newText);
-    }
-    suppressNextApplyEvent();
-    await vscode.workspace.applyEdit(wsEdit);
   }
 
-  _telemetryCallback?.(accepted ? "edit_ai_applied" : "ai_apply_rejected", {
-    file: path.relative(ws, resolved),
-    chars_added: accepted ? newText.length : 0,
-    chars_removed: accepted ? originalText.length : 0,
+  const originalText = fs.existsSync(resolved) ? fs.readFileSync(resolved, "utf8") : "";
+  const originalUri = vscode.Uri.file(resolved);
+  const eol = _detectEol(originalText) || _detectEol(newText) || '\n';
+  const originalLines = _splitLines(originalText);
+
+  // Compute the proposed final text using surgical regions when possible.
+  const ext = path.extname(resolved).toLowerCase();
+  const isFullFile = looksLikeFullFile(newText, originalText, ext);
+  const matches: RegionMatch[] | null =
+    isFullFile ? null : _findAllRegions(originalText, newText, ext);
+  const isSurgical = !isFullFile && matches !== null && matches.length > 0;
+
+  let proposedText: string;
+  if (isSurgical && matches) {
+    proposedText = _applyRegionsToText(originalText, matches);
+  } else {
+    proposedText = newText;
+  }
+
+  // Build line-level hunks between original and proposed — using
+  // EOL-normalised line splits so a CRLF-ended file diffs cleanly against a
+  // LF-ended LLM snippet. Without this every line on Windows would carry a
+  // stray `\r` and LCS would treat the entire file as one giant replace.
+  const hunks = _buildHunks(originalText, proposedText);
+
+  // Register session synchronously so callers (and tests) can find it
+  // immediately after the function returns.
+  const session: InlineSession = {
+    id: blockId,
+    fileUri: originalUri,
+    fileKey,
+    originalFullText: originalText,
+    originalLines,
+    eol,
+    proposedFullText: proposedText,
+    workspace: ws,
+    relativePath: path.relative(ws, resolved),
+    hunks,
+    _resolve: () => {},
+  };
+  const lifecyclePromise = new Promise<void>((resolve) => {
+    session._resolve = resolve;
+  });
+  _inlineSessions.set(blockId, session);
+  _updateDiffActiveContext();
+  _refreshStatusBarItems();
+
+  if (hunks.length === 0) {
+    // Nothing to change — resolve immediately.
+    _inlineSessions.delete(blockId);
+    _updateDiffActiveContext();
+  _refreshStatusBarItems();
+    _telemetryCallback?.("edit_ai_applied", {
+      file: session.relativePath,
+      chars_added: 0,
+      chars_removed: 0,
+      block_id: blockId,
+    });
+    return;
+  }
+
+  // Kick off the initial preview write SYNCHRONOUSLY so the applyEdit call
+  // lands in any mock/observer before we yield. The promise is awaited below
+  // alongside the editor-open promise.
+  const initialApply = _writeSessionState(session);
+  // Open the file in parallel so the user sees the diff in the visible editor.
+  const editorOpened = _ensureFileOpen(session);
+  await Promise.all([initialApply, editorOpened]);
+
+  // Refresh decorations + CodeLenses AFTER both the edit has applied and the
+  // file is in front of the user. Without this, freshly-opened editors miss
+  // the very first decoration/lens paint.
+  _refreshUi(session);
+
+  await lifecyclePromise;
+  _inlineSessions.delete(blockId);
+  _updateDiffActiveContext();
+  _refreshStatusBarItems();
+
+  _telemetryCallback?.("edit_ai_applied", {
+    file: session.relativePath,
+    chars_added: newText.length,
+    chars_removed: originalText.length,
     block_id: blockId,
   });
 }
+
+// ─── looksLikeFullFile, region matching (preserved from prior impl) ────────
 
 const BRACE_EXTS = new Set([
   ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
@@ -334,8 +680,6 @@ export function looksLikeFullFile(newText: string, originalText: string, ext: st
   if (originalText.trim().length === 0) return true;
   if (newText.includes("#pragma once") || /^\s*#ifndef\s/m.test(newText)) return true;
   if (ext === ".py" || ext === ".pyi") {
-    // Heuristic: starts with a module-level construct AND defines >=2 top-level
-    // names (imports / classes / functions) — looks like a whole module.
     const lines = newText.split("\n");
     const topLevel = lines.filter((l) => /^(import |from |class |def |async def )/.test(l));
     if (topLevel.length >= 2) return true;
@@ -348,37 +692,11 @@ export function looksLikeFullFile(newText: string, originalText: string, ext: st
   return false;
 }
 
-function _findRegion(originalText: string, newText: string, ext: string): vscode.Range | null {
-  const sigLine = newText.split("\n").find((l) => l.trim().length > 0)?.trim();
-  if (!sigLine || sigLine.length < 8) return null;
-
-  const lines = originalText.split("\n");
-  const needle = sigLine.slice(0, 40);
-  const startIdx = lines.findIndex((l) => l.includes(needle));
-  if (startIdx < 0) return null;
-
-  if (INDENT_EXTS.has(ext)) {
-    return _findRegionIndent(lines, startIdx);
-  }
-  if (BRACE_EXTS.has(ext) || ext === "") {
-    return _findRegionBraces(lines, startIdx);
-  }
-  return null;
-}
-
 export interface RegionMatch {
   range: vscode.Range;
   replacement: string;
 }
 
-/**
- * Split a snippet into top-level blocks. An "updated version of file X" reply
- * from the LLM often contains two or three methods stitched together with no
- * surrounding class declaration; the apply path used to treat the whole
- * concatenation as one anchor, which collapsed every change but the first
- * into wholesale-file overwrites. Splitting first lets each block anchor on
- * its own signature line.
- */
 export function _splitSnippet(newText: string, ext: string): string[] {
   if (INDENT_EXTS.has(ext)) return _splitSnippetIndent(newText);
   if (BRACE_EXTS.has(ext) || ext === "") return _splitSnippetBraces(newText);
@@ -409,8 +727,6 @@ function _splitSnippetBraces(text: string): string[] {
     }
     if (sawOpen && depth === 0) flush();
   }
-  // Discard a trailing block whose braces never balanced — applying half an
-  // unclosed function would corrupt the file.
   if (sawOpen && depth !== 0) return [text];
   if (current.length > 0) {
     while (current.length > 0 && current[current.length - 1].trim().length === 0) current.pop();
@@ -450,17 +766,6 @@ function _splitSnippetIndent(text: string): string[] {
   return blocks.length > 0 ? blocks : [text];
 }
 
-/**
- * Anchor every top-level block in `newText` to its region in `originalText`.
- * Returns null when any block can't be anchored (we then fall back to
- * full-file replacement with an explicit confirm modal). Overlapping
- * anchors also bail out — if two snippet blocks both want the same region
- * we cannot apply them in parallel.
- *
- * Each anchored block is reindented to match the original line's leading
- * whitespace so a method emitted at column 0 by the LLM still lands inside
- * the class body it belongs to.
- */
 export function _findAllRegions(
   originalText: string,
   newText: string,
@@ -486,20 +791,12 @@ export function _findAllRegions(
   return matches;
 }
 
-/**
- * Reindent a snippet so its first non-blank line has the same leading
- * whitespace as the file region it's replacing. LLMs commonly emit
- * class methods at column 0 even when the target class body is indented;
- * without this, the spliced method lands one level too shallow and breaks
- * the surrounding scope.
- */
 export function _normalizeIndent(replacement: string, anchorIndent: string): string {
   const lines = replacement.split("\n");
   const firstNonBlank = lines.find((l) => l.trim().length > 0);
   if (!firstNonBlank) return replacement;
   const snippetIndent = firstNonBlank.match(/^[ \t]*/)?.[0] ?? "";
   if (anchorIndent === snippetIndent) return replacement;
-  // Mixed tabs/spaces — leave the snippet alone rather than risk corruption.
   if (anchorIndent && snippetIndent && anchorIndent[0] !== snippetIndent[0]) return replacement;
 
   if (anchorIndent.length > snippetIndent.length) {
@@ -508,15 +805,12 @@ export function _normalizeIndent(replacement: string, anchorIndent: string): str
       .map((l) => (l.trim().length === 0 ? l : prefix + l))
       .join("\n");
   }
-  // Snippet over-indented relative to target — strip the excess prefix from
-  // any line that has it, leave the rest alone.
   const excess = snippetIndent.slice(anchorIndent.length);
   return lines
     .map((l) => (l.startsWith(excess) ? l.slice(excess.length) : l))
     .join("\n");
 }
 
-/** Like _findRegion but skips anchors already claimed by an earlier block. */
 function _findRegionAvoiding(
   originalText: string,
   newText: string,
@@ -538,16 +832,9 @@ function _findRegionAvoiding(
   return null;
 }
 
-/**
- * Splice every matched region's replacement into the original text, producing
- * the file content that would result from applying all edits. Used to render
- * an accurate preview in the diff editor so the user sees the merged outcome
- * (a few changed methods) rather than a misleading full-file overwrite view.
- */
 export function _applyRegionsToText(originalText: string, matches: RegionMatch[]): string {
   if (matches.length === 0) return originalText;
   const lines = originalText.split("\n");
-  // Apply from last to first so earlier line indices stay valid.
   const ordered = [...matches].sort(
     (a, b) => b.range.start.line - a.range.start.line,
   );
@@ -604,11 +891,119 @@ function _findRegionIndent(lines: string[], startIdx: number): vscode.Range | nu
     endIdx = i;
   }
   if (endIdx <= startIdx) return null;
-  // Trim trailing blank lines so we don't accidentally swallow whitespace
-  // between top-level constructs.
   while (endIdx > startIdx && lines[endIdx].trim().length === 0) endIdx--;
   return new vscode.Range(
     new vscode.Position(startIdx, 0),
     new vscode.Position(endIdx, lines[endIdx].length)
   );
+}
+
+// ─── Line-level diff (LCS) + hunk construction ─────────────────────────────
+
+interface DiffOp { op: 'equal' | 'delete' | 'insert'; line: string }
+
+/**
+ * LCS-based line diff. O(m*n) — good for typical code-block sizes (< 2000 lines).
+ * For pathological inputs we'd want Myers, but a $2 budget caps the candidate's
+ * snippet size well below that.
+ */
+export function _lineDiff(a: string[], b: string[]): DiffOp[] {
+  const m = a.length;
+  const n = b.length;
+  // dp[i][j] = LCS length of a[0..i-1] and b[0..j-1]. Use Uint32 for memory.
+  const dp: number[][] = [];
+  for (let i = 0; i <= m; i++) dp.push(new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+      else dp[i][j] = dp[i - 1][j] >= dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1];
+    }
+  }
+  const ops: DiffOp[] = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+      ops.push({ op: 'equal', line: a[i - 1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.push({ op: 'insert', line: b[j - 1] });
+      j--;
+    } else {
+      ops.push({ op: 'delete', line: a[i - 1] });
+      i--;
+    }
+  }
+  ops.reverse();
+  return ops;
+}
+
+/**
+ * Build hunks from a line-level diff. Each hunk groups contiguous
+ * delete+insert ops. `originalStart` records the line index in the ORIGINAL
+ * text where the hunk's removed lines begin — needed so we can recompose the
+ * document text from the original + per-hunk status.
+ */
+export function _buildHunks(original: string, proposed: string): Hunk[] {
+  if (original === proposed) return [];
+  // EOL-normalise both sides. Without this a CRLF original would carry a
+  // trailing `\r` on every line and never match the LF-only proposed text,
+  // and the diff would degrade into one giant "delete-all + insert-all" hunk.
+  const a = _splitLines(original);
+  const b = _splitLines(proposed);
+  if (a.length === 0 && b.length === 0) return [];
+  if (a.join('\n') === b.join('\n')) return [];
+  const ops = _lineDiff(a, b);
+
+  const hunks: Hunk[] = [];
+  let current: Hunk | null = null;
+  let hunkCounter = 0;
+  let origCursor = 0;
+  let previewLineCursor = 0;
+
+  const finalize = (): void => {
+    if (!current) return;
+    if (current.originalLines.length === 0 && current.newLines.length === 0) {
+      current = null;
+      return;
+    }
+    hunks.push(current);
+    current = null;
+  };
+
+  for (const op of ops) {
+    if (op.op === 'equal') {
+      finalize();
+      origCursor++;
+      previewLineCursor++;
+      continue;
+    }
+    if (!current) {
+      current = {
+        index: hunkCounter++,
+        originalLines: [],
+        newLines: [],
+        redStart: previewLineCursor,
+        redEnd: previewLineCursor,
+        greenStart: previewLineCursor,
+        greenEnd: previewLineCursor,
+        status: 'pending',
+        originalStart: origCursor,
+      };
+    }
+    if (op.op === 'delete') {
+      current.originalLines.push(op.line);
+      origCursor++;
+      previewLineCursor++;
+      current.redEnd = previewLineCursor;
+      current.greenStart = previewLineCursor;
+      current.greenEnd = previewLineCursor;
+    } else {
+      // insert
+      current.newLines.push(op.line);
+      previewLineCursor++;
+      current.greenEnd = previewLineCursor;
+    }
+  }
+  finalize();
+  return hunks;
 }

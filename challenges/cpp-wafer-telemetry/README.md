@@ -1,6 +1,6 @@
 # Streaming Metrics Aggregator (C++17)
 
-You have **~60 minutes** (90-minute hard cap) to fix concurrency and numerical
+You have **~60 minutes** to fix concurrency and numerical
 bugs in a streaming stats aggregator, wire SPC excursion detection through, and
 design a batched async reporter from scratch.
 

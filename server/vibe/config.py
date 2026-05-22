@@ -22,11 +22,25 @@ class Settings(BaseSettings):
     challenges_dir: str = "challenges"
     chat_model: str = "openai/gpt-4o-mini"
     grader_model: str = "openai/gpt-4o-mini"
-    candidate_chat_models: str = "openai/gpt-4o-mini"
+    candidate_chat_models: str = (
+        "openai/gpt-4o-mini,"
+        "google/gemini-2.5-flash-lite,"
+        "anthropic/claude-opus-4.6,"
+        "anthropic/claude-sonnet-4.6"
+    )
     grader_self_consistency_n: int = 1
     sendgrid_api_key: str = ""
     from_email: str = "noreply@jivahire.com"
     app_public_url: str = "http://localhost:8080"
+
+    # Post-submit video explainer storage. Empty bucket/domain disables the
+    # feature (init endpoint returns 503). boto3 picks up AWS credentials
+    # from the standard chain: IAM role on ECS/EC2, else AWS_ACCESS_KEY_ID
+    # env vars. Playback URLs are public CloudFront URLs — anyone with the
+    # link can view; treat that as a known tradeoff.
+    aws_region: str = "us-east-1"
+    s3_video_bucket: str = ""
+    cloudfront_domain: str = ""
 
 
 settings = Settings()

@@ -38,11 +38,19 @@ export interface SessionConfig {
   scheduledAt?: number;
 }
 
-/** Default pricing fallback when the server omits the pricing table. */
+/** Default pricing fallback when the server omits the pricing table.
+ *
+ * Keep in sync with server/vibe/budget.py:MODEL_PRICING — the server's table
+ * is authoritative, but if the extension is run against an older server that
+ * doesn't yet ship `pricing_per_million`, these defaults keep the spend
+ * meter sane for every model the picker offers. */
 export const DEFAULT_MODEL_PRICING: Record<string, ModelPricing> = {
   "openai/gpt-4o": { input: 2.5, output: 10.0 },
   "openai/gpt-4o-mini": { input: 0.15, output: 0.6 },
   "openai/gpt-4o-2024-11-20": { input: 2.5, output: 10.0 },
+  "google/gemini-2.5-flash-lite": { input: 0.10, output: 0.40 },
+  "anthropic/claude-opus-4.6": { input: 15.0, output: 75.0 },
+  "anthropic/claude-sonnet-4.6": { input: 3.0, output: 15.0 },
 };
 
 /** Default per-request HTTP timeout (ms). validate-session creates a GitHub
@@ -144,10 +152,51 @@ function _normalisePricing(raw: unknown): Record<string, ModelPricing> {
   return { ...DEFAULT_MODEL_PRICING, ...out };
 }
 
-export async function submitSession(config: SessionConfig): Promise<void> {
-  await post(
+export interface VideoUploadInfo {
+  deadline_unix: number;
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+}
+
+export interface SubmitResponse {
+  status?: string;
+  message?: string;
+  video_upload?: VideoUploadInfo;
+}
+
+export async function submitSession(config: SessionConfig): Promise<SubmitResponse> {
+  return (await post(
     `${config.llmProxyUrl}/api/v1/submit`,
     "{}",
+    config.sessionKey
+  )) as SubmitResponse;
+}
+
+export interface VideoInitResponse {
+  upload_url: string;
+  s3_key: string;
+  deadline_unix: number;
+  min_duration_seconds: number;
+  max_duration_seconds: number;
+  prompts: string[];
+}
+
+export async function videoInit(config: SessionConfig): Promise<VideoInitResponse> {
+  return (await post(
+    `${config.llmProxyUrl}/api/v1/video/init`,
+    "{}",
+    config.sessionKey
+  )) as VideoInitResponse;
+}
+
+export async function videoComplete(
+  config: SessionConfig,
+  s3Key: string,
+  durationSeconds: number
+): Promise<void> {
+  await post(
+    `${config.llmProxyUrl}/api/v1/video/complete`,
+    JSON.stringify({ s3_key: s3Key, duration_seconds: durationSeconds }),
     config.sessionKey
   );
 }

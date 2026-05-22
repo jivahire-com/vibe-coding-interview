@@ -33,6 +33,16 @@ export function suppressNextApplyEvent(): void {
   _suppressNextApply = true;
 }
 
+// Set when the user invokes the paste command, consumed by the next doc change.
+// The flag has a short freshness window so a stale paste signal (e.g. a paste
+// into a non-editor input) can't get attributed to an unrelated later edit.
+let _pasteImminentUntil = 0;
+const PASTE_IMMINENT_WINDOW_MS = 500;
+// Minimum insert size, after dropping the rangeLength===0 requirement, that we
+// still treat as a paste based purely on size (covers pastes that bypass the
+// command hook — e.g. middle-click paste on Linux).
+const PASTE_SIZE_THRESHOLD = 10;
+
 export class TelemetryTracker implements vscode.Disposable {
   private _buffer: TelemetryEvent[] = [];
   private _flushTimer: ReturnType<typeof setInterval> | undefined;
@@ -83,6 +93,21 @@ export class TelemetryTracker implements vscode.Disposable {
       );
     }
 
+    // Intercept the paste command so we get a deterministic paste signal —
+    // VS Code's onDidChangeTextDocument otherwise can't distinguish paste from
+    // type. We re-dispatch the original command immediately so paste still
+    // happens; the flag is consumed by the next _onDocChange.
+    if (vscode.commands?.registerCommand) {
+      try {
+        this._disposables.push(
+          vscode.commands.registerCommand("vibe.interceptPaste", async () => {
+            _pasteImminentUntil = Date.now() + PASTE_IMMINENT_WINDOW_MS;
+            await vscode.commands.executeCommand("default:paste");
+          })
+        );
+      } catch { /* command may already be registered in test harness */ }
+    }
+
     this._flushTimer = setInterval(() => { void this._flush(); }, FLUSH_INTERVAL_MS);
   }
 
@@ -131,29 +156,35 @@ export class TelemetryTracker implements vscode.Disposable {
     if (rel.startsWith("..")) return; // outside workspace
 
     for (const change of e.contentChanges) {
-      // Ignore undo/redo (no reliable way in VS Code API without tracking history)
-      // Classify: large insertions with no selection = paste
-      if (
-        change.text.length >= 30 &&
-        change.rangeLength === 0
-      ) {
-        if (_suppressNextApply) {
-          _suppressNextApply = false;
-          this.emit("edit_ai_applied", { file: rel, chars: change.text.length });
-          continue;
-        }
+      // AI applies are flagged by apply.ts and take priority over paste/type.
+      if (_suppressNextApply) {
+        _suppressNextApply = false;
+        this.emit("edit_ai_applied", { file: rel, chars: change.text.length });
+        continue;
+      }
+
+      if (change.text.length === 0 && change.rangeLength === 0) continue;
+
+      // Paste classification, in order of confidence:
+      //  (a) the paste-command interceptor just fired — deterministic signal.
+      //  (b) the insert spans multiple lines — typing produces one change per
+      //      character, so multi-line inserts in a single change are virtually
+      //      always paste, snippet expansion, or autocomplete.
+      //  (c) the insert is at/above the size threshold — covers pastes that
+      //      bypass the command hook (middle-click paste, drag-drop, etc.)
+      //      AND pastes that replaced a selection (rangeLength > 0).
+      const pasteImminent = Date.now() < _pasteImminentUntil;
+      if (pasteImminent) _pasteImminentUntil = 0;
+      const multiLineInsert = change.text.length > 0 && /\r?\n/.test(change.text);
+      const isPaste =
+        change.text.length > 0 &&
+        (pasteImminent || multiLineInsert || change.text.length >= PASTE_SIZE_THRESHOLD);
+
+      if (isPaste) {
         const suspicious_paste = Date.now() < this._justRefocusedUntil;
         this.emit("edit_pasted", { file: rel, chars: change.text.length, suspicious_paste });
-      } else if (change.text.length > 0 || change.rangeLength > 0) {
-        if (_suppressNextApply) {
-          _suppressNextApply = false;
-          this.emit("edit_ai_applied", { file: rel, chars: change.text.length });
-          continue;
-        }
-        // Aggregate per-file to avoid one event per keystroke
-        if (change.text.length > 0) {
-          this._aggregateTyped(rel, change.text.length);
-        }
+      } else if (change.text.length > 0) {
+        this._aggregateTyped(rel, change.text.length);
       }
     }
   }

@@ -42,10 +42,9 @@
   "composite_weights": {
     "test_score":              0.20,
     "trap_score":              0.10,
-    "code_quality":            0.20,
-    "prompt_quality":          0.15,
-    "ai_orchestration":        0.15,
-    "architectural_reasoning": 0.10,
-    "token_efficiency":        0.10
+    "code_quality":            0.24,
+    "prompt_quality":          0.18,
+    "ai_orchestration":        0.18,
+    "architectural_reasoning": 0.10
   }
 }

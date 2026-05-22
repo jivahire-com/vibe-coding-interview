@@ -17,7 +17,6 @@ _STAGE_MESSAGES = {
     "build": "We could not build your submission. Please contact support.",
     "traps": "An error occurred during trap evaluation. Please contact support.",
     "llm_eval": "AI grading is temporarily unavailable. Please contact support.",
-    "repo_tokens": "Token counting failed during grading. Please contact support.",
     "developer_confidence": "Developer-signal computation failed; grade is unaffected.",
 }
 
@@ -91,7 +90,6 @@ def run(session_id: str) -> None:
                 "ai_orchestration_score": _FALLBACK,
                 "architectural_reasoning_score": _FALLBACK,
                 "prompt_quality_score": _FALLBACK,
-                "token_efficiency_score": _FALLBACK,
                 "summary": "AI grading failed — partial results only.",
             }
 
@@ -115,11 +113,11 @@ def run(session_id: str) -> None:
             "INSERT OR REPLACE INTO grades "
             "(session_id, tests_passed, tests_total, traps_detected, traps_total, "
             "code_quality_score, ai_orchestration_score, architectural_reasoning_score, "
-            "prompt_quality_score, token_efficiency_score, "
+            "prompt_quality_score, "
             "total_score, grader_summary, raw_output, "
             "developer_confidence_score, developer_confidence_verdict, "
             "developer_confidence_signals, developer_confidence_reasoning) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, tags_passed, tests_total,
                 traps_detected, traps_total,
@@ -127,7 +125,6 @@ def run(session_id: str) -> None:
                 llm_scores["ai_orchestration_score"],
                 llm_scores["architectural_reasoning_score"],
                 llm_scores["prompt_quality_score"],
-                llm_scores["token_efficiency_score"],
                 round(total_score, 2),
                 llm_scores["summary"],
                 raw_output[:50_000],
@@ -164,11 +161,10 @@ def _record_error(session_id: str, stage: str) -> None:
 _DEFAULT_WEIGHTS = {
     "test_score": 0.20,
     "trap_score": 0.10,
-    "code_quality": 0.20,
-    "ai_orchestration": 0.15,
+    "code_quality": 0.24,
+    "ai_orchestration": 0.18,
     "architectural_reasoning": 0.10,
-    "prompt_quality": 0.15,
-    "token_efficiency": 0.10,
+    "prompt_quality": 0.18,
 }
 
 
@@ -181,6 +177,7 @@ def _composite_score(
     weights: dict,
 ) -> float:
     w = {**_DEFAULT_WEIGHTS, **weights}
+    w.pop("token_efficiency", None)
     total_w = sum(w.values())
     if total_w > 0 and abs(total_w - 1.0) > 1e-9:
         w = {k: v / total_w for k, v in w.items()}
@@ -192,6 +189,5 @@ def _composite_score(
         + llm_scores["ai_orchestration_score"] * w["ai_orchestration"]
         + llm_scores["architectural_reasoning_score"] * w["architectural_reasoning"]
         + llm_scores["prompt_quality_score"] * w["prompt_quality"]
-        + llm_scores["token_efficiency_score"] * w["token_efficiency"]
     )
     return automated + llm

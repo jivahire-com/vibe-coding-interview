@@ -2,7 +2,7 @@
   "name": "jivahire-vibe-coding-interview",
   "displayName": "JivaHire Vibe Coding Interview",
   "description": "AI-aware coding interview platform by JivaHire",
-  "version": "0.1.19",
+  "version": "0.1.41",
   "publisher": "jivahire",
   "engines": {
     "vscode": "^1.85.0"
@@ -21,15 +21,18 @@
       },
       {
         "command": "vibe.showBrief",
-        "title": "JivaHire: Show Challenge Brief"
+        "title": "JivaHire: Show Challenge Brief",
+        "icon": "$(clock)"
       },
       {
         "command": "vibe.runTests",
-        "title": "JivaHire: Run Tests"
+        "title": "JivaHire: Run Tests",
+        "icon": "$(beaker)"
       },
       {
         "command": "vibe.submit",
-        "title": "JivaHire: Submit"
+        "title": "JivaHire: Submit",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "vibe.acceptAiChanges",
@@ -40,45 +43,113 @@
         "title": "Reject"
       },
       {
+        "command": "vibe.acceptAllHunks",
+        "title": "JivaHire: Accept all AI hunks",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "vibe.rejectAllHunks",
+        "title": "JivaHire: Reject all AI hunks",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "vibe.acceptHunk",
+        "title": "Accept this AI hunk"
+      },
+      {
+        "command": "vibe.rejectHunk",
+        "title": "Reject this AI hunk"
+      },
+      {
         "command": "vibe.openChat",
-        "title": "JivaHire: Open AI Chat"
+        "title": "JivaHire: Open AI Chat",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "vibe.joinMeet",
-        "title": "JivaHire: Join Video Call"
+        "title": "JivaHire: Join Video Call",
+        "icon": "$(device-camera-video)"
+      },
+      {
+        "command": "vibe.interceptPaste",
+        "title": "JivaHire: Paste (telemetry)"
+      },
+      {
+        "command": "vibe.attachFileToChat",
+        "title": "Add to JivaHire chat",
+        "category": "JivaHire"
+      },
+      {
+        "command": "vibe.toggleDashboard",
+        "title": "JivaHire: Toggle Dashboard",
+        "icon": "$(jersey)"
       }
     ],
-    "viewsContainers": {
-      "activitybar": [
+    "menus": {
+      "explorer/context": [
         {
-          "id": "vibe-sidebar",
-          "title": "JivaHire AI",
-          "icon": "media/jivahire-icon.svg"
+          "command": "vibe.attachFileToChat",
+          "when": "!explorerResourceIsFolder",
+          "group": "1_jivahire@1"
         }
       ],
+      "editor/title/context": [
+        {
+          "command": "vibe.attachFileToChat",
+          "group": "1_jivahire@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vibe.attachFileToChat",
+          "group": "1_jivahire@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "vibe.showBrief",
+          "when": "vibe.session.active",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vibe.joinMeet",
+          "when": "vibe.session.active && vibe.session.hasMeet",
+          "group": "navigation@4"
+        }
+      ]
+    },
+    "keybindings": [],
+    "viewsContainers": {
       "secondarySidebar": [
         {
-          "id": "vibe-chat-panel",
-          "title": "JivaHire Chat",
+          "id": "vibe-interview-panel",
+          "title": "JivaHire Interview",
           "icon": "media/jivahire-icon.svg"
         }
       ]
     },
     "views": {
-      "vibe-sidebar": [
+      "vibe-interview-panel": [
         {
           "id": "vibe.dashboard",
-          "name": "JivaHire",
-          "type": "webview"
-        }
-      ],
-      "vibe-chat-panel": [
+          "name": "JivaHire Dashboard",
+          "type": "webview",
+          "visibility": "visible"
+        },
         {
           "id": "vibe.chat",
           "name": "JivaHire Chat",
-          "type": "webview"
+          "type": "webview",
+          "visibility": "visible",
+          "when": "vibe.session.active"
         }
       ]
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "JivaHire only reads the workspace files the candidate is asked to edit and runs commands the candidate explicitly triggers from the dashboard or status bar."
     }
   },
   "scripts": {

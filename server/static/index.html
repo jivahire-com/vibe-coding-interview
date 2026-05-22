@@ -229,6 +229,32 @@
           </div>
         </div>
 
+        <!-- Solution explainer video (post-submit identity verification) -->
+        <template x-if="selectedSession.session.video_s3_key">
+          <div class="card" style="margin-bottom:16px">
+            <h3>Solution Explainer Video</h3>
+            <template x-if="selectedSession.videoUrl">
+              <div>
+                <video controls preload="metadata" style="width:100%;max-width:640px;border-radius:6px"
+                       :src="selectedSession.videoUrl"></video>
+                <p class="text-sm text-muted" style="margin-top:8px">
+                  Duration: <span x-text="selectedSession.session.video_duration_seconds"></span>s ·
+                  Uploaded: <span x-text="formatDate(selectedSession.session.video_uploaded_at)"></span>
+                </p>
+              </div>
+            </template>
+            <template x-if="!selectedSession.videoUrl">
+              <p class="text-muted" style="font-size:13px">Video metadata stored, but playback URL is unavailable (CloudFront not configured).</p>
+            </template>
+          </div>
+        </template>
+        <template x-if="!selectedSession.session.video_s3_key && selectedSession.session.status !== 'active' && selectedSession.session.status !== 'pending'">
+          <div class="card" style="margin-bottom:16px">
+            <h3>Solution Explainer Video</h3>
+            <p class="text-muted" style="font-size:13px">Candidate did not upload a video.</p>
+          </div>
+        </template>
+
         <!-- Score grids -->
         <div class="detail-grid">
 
@@ -244,6 +270,7 @@
                          :style="`width:${Math.round(selectedSession.grade.tests_passed / (selectedSession.grade.tests_total || 1) * 100)}%`"></div>
                   </div>
                   <span class="score-val text-muted" x-text="`${selectedSession.grade.tests_passed}/${selectedSession.grade.tests_total}`"></span>
+                  <span class="info-icon" title="How many of the hidden quality checks the candidate's code passed.">i</span>
                 </div>
                 <div class="score-row">
                   <span class="score-label">Traps detected</span>
@@ -252,6 +279,7 @@
                          :style="`width:${Math.round(selectedSession.grade.traps_detected / (selectedSession.grade.traps_total || 1) * 100)}%`"></div>
                   </div>
                   <span class="score-val text-muted" x-text="`${selectedSession.grade.traps_detected}/${selectedSession.grade.traps_total}`"></span>
+                  <span class="info-icon" title="Intentional bugs hidden in the starter code. This shows how many the candidate caught and fixed.">i</span>
                 </div>
               </div>
             </template>
@@ -270,7 +298,6 @@
                   ['AI Orchestration', 'ai_orchestration_score'],
                   ['Architectural', 'architectural_reasoning_score'],
                   ['Prompt Quality', 'prompt_quality_score'],
-                  ['Token Efficiency', 'token_efficiency_score'],
                 ]" :key="key">
                   <div class="score-row">
                     <span class="score-label" x-text="label"></span>
@@ -402,8 +429,29 @@
         </div>
 
         <!-- Candidate Prompts -->
-        <div class="card prompts-card">
-          <h3>Candidate Prompts <span class="count-chip" x-text="promptExchanges(selectedSession).length"></span></h3>
+        <div class="card prompts-card" x-data="{ expanded: {} }">
+          <div class="prompts-header">
+            <h3>Candidate Prompts <span class="count-chip" x-text="promptExchanges(selectedSession).length"></span></h3>
+            <template x-if="promptExchanges(selectedSession).some(e => e.prompt_reasoning)">
+              <button type="button" class="prompts-expand-all"
+                      @click="
+                        const rows = promptExchanges(selectedSession);
+                        const reasoned = rows.map((e, i) => [e, i]).filter(([e]) => e.prompt_reasoning);
+                        const allOpen = reasoned.length > 0 && reasoned.every(([, i]) => expanded[i]);
+                        if (allOpen) { expanded = {}; }
+                        else { const next = {}; reasoned.forEach(([, i]) => next[i] = true); expanded = next; }
+                      ">
+                <span x-text="
+                  (() => {
+                    const rows = promptExchanges(selectedSession);
+                    const reasoned = rows.map((e, i) => [e, i]).filter(([e]) => e.prompt_reasoning);
+                    const allOpen = reasoned.length > 0 && reasoned.every(([, i]) => expanded[i]);
+                    return allOpen ? 'Collapse all reasoning' : 'Expand all reasoning';
+                  })()
+                "></span>
+              </button>
+            </template>
+          </div>
           <template x-if="promptExchanges(selectedSession).length === 0">
             <p class="text-muted" style="font-size:13px">No chat prompts recorded.</p>
           </template>
@@ -415,10 +463,30 @@
                 <template x-if="e.prompt_classification">
                   <span class="badge" :class="promptClassBadge(e.prompt_classification)" x-text="e.prompt_classification"></span>
                 </template>
+                <template x-if="typeof e.prompt_score === 'number'">
+                  <span class="prompt-score" :class="promptScoreClass(e.prompt_score)"
+                        :title="`Prompt quality: ${e.prompt_score}/10 (0 = vague, 10 = professional)`">
+                    <span class="prompt-score-num" x-text="e.prompt_score"></span><span class="prompt-score-suffix">/10</span>
+                  </span>
+                </template>
                 <span class="text-sm text-muted ml-auto"
                       x-text="`${fmtNum((e.prompt_tokens ?? 0) + (e.completion_tokens ?? 0))} tok`"></span>
               </div>
               <pre class="prompt-text" x-text="e.prompt_text || '(prompt not recorded)'"></pre>
+              <template x-if="e.prompt_reasoning">
+                <div class="prompt-footer">
+                  <button type="button" class="prompt-reason-toggle"
+                          :class="{ 'is-open': !!expanded[i] }"
+                          @click="expanded[i] = !expanded[i]"
+                          :aria-expanded="expanded[i] ? 'true' : 'false'">
+                    <span class="prompt-reason-caret" aria-hidden="true">▸</span>
+                    <span x-text="expanded[i] ? 'Hide reasoning' : 'Why this score?'"></span>
+                  </button>
+                  <div class="prompt-reasoning" x-show="!!expanded[i]" x-transition.opacity>
+                    <span class="prompt-reasoning-text" x-text="e.prompt_reasoning"></span>
+                  </div>
+                </div>
+              </template>
             </div>
           </template>
         </div>
@@ -428,7 +496,9 @@
           <div class="card summary-card">
             <h3>Grader Summary</h3>
             <template x-for="line in selectedSession.grade.grader_summary.split(' | ')" :key="line">
-              <p class="summary-line" x-text="line"></p>
+              <p class="summary-line" x-data="{ p: parseSummaryLine(line) }">
+                <span class="summary-prefix" x-show="p.matched" x-text="p.label + ' (' + p.score + '): '"></span><span class="summary-body" x-text="p.matched ? p.body : line"></span>
+              </p>
             </template>
           </div>
         </template>
@@ -468,7 +538,7 @@
       <div class="field">
         <label>
           Session Key
-          <span class="info-icon" title="A unique code (e.g. ABC-1234) the candidate enters in the JivaHire VS Code extension to start their interview. Each key is tied to one candidate and one challenge — it cannot be shared or reused. Choose something easy to read over email; this field is required.">i</span>
+          <span class="info-icon" title="A short code the candidate uses to start their interview.">i</span>
         </label>
         <input type="text" class="input" placeholder="e.g. ABC-1234"
                x-model="inviteForm.sessionKey" :disabled="!!inviteResult" />
@@ -499,47 +569,62 @@
         <div class="field" style="margin-bottom:0">
           <label>
             AI Budget (USD)
-            <span class="info-icon" title="The maximum dollar amount the candidate is allowed to spend on AI chat during their interview. JivaHire tracks every AI request and automatically cuts off access once this limit is reached, so the candidate can't rack up surprise costs or misuse the AI for off-task work. Gives them enough headroom to use AI as a real tool without leaving the cost open-ended. Typical range: $1–$5 per interview.">i</span>
+            <span class="info-icon" title="Maximum the candidate can spend on AI help during the interview.">i</span>
           </label>
           <input type="number" class="input" min="0.50" max="20" step="0.50"
                  x-model.number="inviteForm.budgetUsd" :disabled="!!inviteResult" />
         </div>
       </div>
 
-      <div class="field">
-        <label>
-          Video Meeting Link (optional)
-          <span class="info-icon" title="Paste a Google Meet, Zoom, or Teams link to make this a panel interview. Create the meeting in your own account so you remain the host — the candidate will join and share their screen while coding. Leave blank for the standard async interview.">i</span>
-        </label>
-        <input type="url" class="input" placeholder="https://meet.google.com/xxx-xxxx-xxx"
-               x-model="inviteForm.meetLink" :disabled="!!inviteResult" />
-        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
-          Create the meeting in <strong>your own</strong> Google account so you're the host.
-        </p>
-      </div>
+      <div class="panel-section" :class="{ 'is-open': inviteForm.panelExpanded }">
+        <button type="button" class="panel-toggle"
+                @click="inviteForm.panelExpanded = !inviteForm.panelExpanded"
+                :disabled="!!inviteResult"
+                :aria-expanded="inviteForm.panelExpanded ? 'true' : 'false'">
+          <span class="panel-toggle-caret">▸</span>
+          <span class="panel-toggle-label">
+            <span class="panel-toggle-title">Schedule as a panel interview</span>
+            <span class="panel-toggle-sub">Add a meeting link, start time, and panelists</span>
+          </span>
+        </button>
 
-      <div class="field">
-        <label>
-          Scheduled Start (optional)
-          <span class="info-icon" title="When the live video interview should start. We send everyone a calendar invite (.ics) so the time converts to their local timezone automatically. Pick the time in YOUR local timezone — the browser will convert to UTC behind the scenes. Leave blank if you'll coordinate timing out-of-band.">i</span>
-        </label>
-        <input type="datetime-local" class="input"
-               x-model="inviteForm.scheduledLocal" :disabled="!!inviteResult" />
-        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
-          Pick the start time in your local timezone. A calendar invite will be attached to every email.
-        </p>
-      </div>
+        <div class="panel-body" x-show="inviteForm.panelExpanded" x-transition.opacity>
+          <div class="field">
+            <label>
+              Video Meeting Link
+              <span class="info-icon" title="Required. A Meet, Zoom, or Teams link the candidate and panelists will join.">i</span>
+            </label>
+            <input type="url" class="input" placeholder="https://meet.google.com/xxx-xxxx-xxx"
+                   x-model="inviteForm.meetLink" :disabled="!!inviteResult" />
+            <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+              Create the meeting in <strong>your own</strong> Google account so you're the host.
+            </p>
+          </div>
 
-      <div class="field">
-        <label>
-          Panelist Emails (optional)
-          <span class="info-icon" title="Comma-separated email addresses for the other interviewers on the panel. Each gets a separate invite with the meeting link and scheduled time — but NOT the candidate's session key. Requires a video meeting link.">i</span>
-        </label>
-        <textarea class="input" rows="2" placeholder="lead@x.com, hiring-manager@x.com"
-                  x-model="inviteForm.panelistEmails" :disabled="!!inviteResult"></textarea>
-        <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
-          Comma-separated. Each panelist gets their own email with the meeting link and calendar invite.
-        </p>
+          <div class="field">
+            <label>
+              Scheduled Start
+              <span class="info-icon" title="Required. Pick when the interview starts in your local time. Calendar invites are sent automatically.">i</span>
+            </label>
+            <input type="datetime-local" class="input"
+                   x-model="inviteForm.scheduledLocal" :disabled="!!inviteResult" />
+            <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+              Pick the start time in your local timezone. A calendar invite will be attached to every email.
+            </p>
+          </div>
+
+          <div class="field" style="margin-bottom:0">
+            <label>
+              Panelist Emails (optional)
+              <span class="info-icon" title="Other interviewers to invite. They get the meeting link, not the session key.">i</span>
+            </label>
+            <textarea class="input" rows="2" placeholder="lead@x.com, hiring-manager@x.com"
+                      x-model="inviteForm.panelistEmails" :disabled="!!inviteResult"></textarea>
+            <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
+              Leave blank if only you and the candidate will join. Comma-separated. Each panelist gets the meeting link and calendar invite.
+            </p>
+          </div>
+        </div>
       </div>
 
       <div class="drawer-actions">

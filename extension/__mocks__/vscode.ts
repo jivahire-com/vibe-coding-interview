@@ -3,6 +3,8 @@
 
 export const StatusBarAlignment = { Left: 1, Right: 2 };
 export const ProgressLocation = { Notification: 15, Window: 10, SourceControl: 1 };
+export const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };
+export const TextEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 };
 
 export class ThemeColor {
   constructor(public readonly id: string) {}
@@ -44,6 +46,8 @@ export class CodeLens {
 export class WorkspaceEdit {
   private _edits: Array<{ uri: Uri; range: Range; text: string }> = [];
   replace(uri: Uri, range: Range, text: string): void { this._edits.push({ uri, range, text }); }
+  insert(uri: Uri, pos: Position, text: string): void { this._edits.push({ uri, range: new Range(pos, pos), text }); }
+  createFile(uri: Uri): void { this._edits.push({ uri, range: new Range(new Position(0, 0), new Position(0, 0)), text: '' }); }
   getEdits() { return this._edits; }
 }
 
@@ -65,6 +69,16 @@ export const window = {
   showWarningMessage: jest.fn().mockResolvedValue(undefined),
   showInputBox: jest.fn().mockResolvedValue(undefined),
   showQuickPick: jest.fn().mockResolvedValue(undefined),
+
+  createTextEditorDecorationType: jest.fn().mockReturnValue({ dispose: jest.fn(), key: 'mock-deco' }),
+
+  visibleTextEditors: [] as any[],
+
+  showTextDocument: jest.fn().mockImplementation(() => Promise.resolve({
+    setDecorations: jest.fn(),
+    revealRange: jest.fn(),
+    document: { uri: new Uri('file', '/mock', '/mock') },
+  })),
 
   /** Test-controlled active editor. */
   activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
@@ -152,6 +166,54 @@ export const workspace = {
 
   registerTextDocumentContentProvider: jest.fn().mockReturnValue({ dispose: jest.fn() }),
   applyEdit: jest.fn().mockResolvedValue(true),
+
+  /**
+   * Test-controlled `findFiles` implementation. Production code calls
+   * `vscode.workspace.findFiles(...)`; tests set `_findFilesImpl` to stub
+   * the result list. Defaults to an empty list when not set.
+   */
+  _findFilesImpl: null as ((include: unknown, exclude: unknown, max: number) => Promise<Uri[]>) | null,
+  findFiles: jest.fn().mockImplementation((include: unknown, exclude: unknown, max: number) => {
+    const impl = (workspace as any)._findFilesImpl;
+    if (typeof impl === 'function') return impl(include, exclude, max);
+    return Promise.resolve([]);
+  }),
+
+  asRelativePath: jest.fn().mockImplementation((u: Uri | string, _includeWorkspaceFolderName?: boolean) => {
+    const p = typeof u === 'string' ? u : u.fsPath;
+    const folders = (workspace as { workspaceFolders?: Array<{ uri: Uri }> }).workspaceFolders ?? [];
+    for (const f of folders) {
+      const root = f.uri.fsPath.replace(/[\\/]+$/, '');
+      if (p === root) return '';
+      if (p.startsWith(root + '/')) return p.slice(root.length + 1);
+      if (p.startsWith(root + '\\')) return p.slice(root.length + 1);
+    }
+    return p;
+  }),
+
+  createFileSystemWatcher: jest.fn().mockImplementation(() => {
+    // Capture the latest registered handlers so tests can fire synthetic
+    // file-system events and observe the provider's reaction. Saved on
+    // workspace._lastWatcher so the test can grab the most recent one.
+    const watcher: any = {
+      _onCreate: undefined as ((u: any) => void) | undefined,
+      _onDelete: undefined as ((u: any) => void) | undefined,
+      _onChange: undefined as ((u: any) => void) | undefined,
+      onDidCreate: jest.fn().mockImplementation((cb: any) => { watcher._onCreate = cb; return { dispose: jest.fn() }; }),
+      onDidDelete: jest.fn().mockImplementation((cb: any) => { watcher._onDelete = cb; return { dispose: jest.fn() }; }),
+      onDidChange: jest.fn().mockImplementation((cb: any) => { watcher._onChange = cb; return { dispose: jest.fn() }; }),
+      dispose: jest.fn(),
+    };
+    (workspace as any)._lastWatcher = watcher;
+    return watcher;
+  }),
+
+  openTextDocument: jest.fn().mockImplementation((uriOrPath: any) => {
+    const p = typeof uriOrPath === 'string' ? uriOrPath : (uriOrPath?.fsPath ?? '/mock');
+    return Promise.resolve({ uri: new Uri('file', p, p), getText: () => '' });
+  }),
+
+  textDocuments: [] as any[],
 };
 
 // ─── commands ────────────────────────────────────────────────────────────────

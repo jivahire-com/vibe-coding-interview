@@ -9,7 +9,7 @@ import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
 import { runSubmit, gitCommitAndPushAsync } from "./submit";
 import { TelemetryTracker } from "./telemetry";
-import { AiProposedContentProvider, AiApplyCodeLensProvider, AI_PROPOSED_SCHEME, registerCodeLensProvider, setTelemetryCallback, acceptAiChanges, rejectAiChanges } from "./chat/apply";
+import { AiProposedContentProvider, AiApplyCodeLensProvider, AI_PROPOSED_SCHEME, registerCodeLensProvider, setTelemetryCallback, acceptAiChanges, rejectAiChanges, acceptHunk, rejectHunk, _getSessionForActiveEditor } from "./chat/apply";
 
 const SESSION_KEY = "vibe.session";
 const SERVER_URL_KEY = "vibe.serverUrl";
@@ -64,7 +64,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerCodeLensProvider(aiCodeLensProvider);
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(AI_PROPOSED_SCHEME, aiContentProvider),
-    vscode.languages.registerCodeLensProvider({ scheme: AI_PROPOSED_SCHEME }, aiCodeLensProvider),
+    vscode.languages.registerCodeLensProvider({ scheme: "file" }, aiCodeLensProvider),
     vscode.window.registerWebviewViewProvider("vibe.dashboard", dashboardProvider),
     vscode.window.registerWebviewViewProvider("vibe.chat", chatProvider, {
       webviewOptions: { retainContextWhenHidden: true },
@@ -96,7 +96,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       chatProvider.setConfig(config);
-      vscode.commands.executeCommand("workbench.view.extension.vibe-chat-panel");
+      vscode.commands.executeCommand("workbench.view.extension.vibe-interview-panel");
     }),
     vscode.commands.registerCommand("vibe.submit", async () => {
       const config = context.globalState.get<SessionConfig>(SESSION_KEY);
@@ -110,6 +110,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           // and the candidate can resubmit.
           await context.globalState.update(SESSION_KEY, undefined);
           await context.globalState.update(OPENED_WS_KEY, undefined);
+          // Hide the chat view (which gates on vibe.session.active) and drop
+          // the meet-link flag so a post-submit reload renders the dashboard
+          // alone, matching the IDLE/DONE state.
+          await vscode.commands.executeCommand("setContext", "vibe.session.active", false);
+          await vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", false);
           // Bug fix: also stop the auto-commit interval. The closure still
           // holds the old `config` (with a now-cleared globalState session),
           // so leaving the interval running keeps pushing with a token that
@@ -140,7 +145,71 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("vibe.rejectAiChanges", (blockId: string) => {
       rejectAiChanges(blockId);
     }),
+    vscode.commands.registerCommand("vibe.attachFileToChat", async (uri?: vscode.Uri) => {
+      let target = uri;
+      if (!target) {
+        const editor = vscode.window.activeTextEditor;
+        if (editor) target = editor.document.uri;
+      }
+      if (!target) return;
+      const rel = vscode.workspace.asRelativePath(target, false);
+      chatProvider.attachFile(rel);
+      chatProvider.focus();
+      void vscode.commands.executeCommand("workbench.view.extension.vibe-interview-panel");
+      void vscode.commands.executeCommand("vibe.chat.focus");
+    }),
     timer
+  );
+
+  // Inline hunk commands — file-level (accept/reject ALL) and per-hunk.
+  // The line-0 CodeLens fires these with an explicit blockId string, but the
+  // editor title-bar menu invokes the same command with the active editor's
+  // vscode.Uri as the first argument (VS Code's default for `editor/title`
+  // bindings). So we only treat the arg as a blockId when it is actually a
+  // string — otherwise we fall back to whichever inline-diff session matches
+  // the focused editor. Earlier versions used `arg ?? fallback`, which broke
+  // because a Uri object is truthy and silently became the blockId.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibe.acceptAllHunks", (arg?: unknown) => {
+      const id = typeof arg === 'string' ? arg : _getSessionForActiveEditor()?.id;
+      if (id) acceptAiChanges(id);
+    }),
+    vscode.commands.registerCommand("vibe.rejectAllHunks", (arg?: unknown) => {
+      const id = typeof arg === 'string' ? arg : _getSessionForActiveEditor()?.id;
+      if (id) rejectAiChanges(id);
+    }),
+    vscode.commands.registerCommand("vibe.acceptHunk", (blockId: string, hunkIndex: number) => {
+      acceptHunk(blockId, hunkIndex);
+    }),
+    vscode.commands.registerCommand("vibe.rejectHunk", (blockId: string, hunkIndex: number) => {
+      rejectHunk(blockId, hunkIndex);
+    }),
+  );
+
+  // JivaHire dashboard toggle. The activity-bar approach was abandoned
+  // because VS Code unconditionally opens the primary sidebar when an
+  // activitybar viewsContainer icon is clicked, which clobbers the user's
+  // File Explorer / Debug / Extensions panel. A status-bar button only
+  // triggers a custom command, so we can toggle ONLY the secondary sidebar
+  // and leave the primary sidebar exactly as the user left it.
+  const dashboardToggleStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100,
+  );
+  dashboardToggleStatus.text = "$(jersey) JivaHire";
+  dashboardToggleStatus.tooltip = "Toggle the JivaHire panel (secondary sidebar)";
+  dashboardToggleStatus.command = "vibe.toggleDashboard";
+  dashboardToggleStatus.show();
+  context.subscriptions.push(
+    dashboardToggleStatus,
+    vscode.commands.registerCommand("vibe.toggleDashboard", async () => {
+      const isOpen = dashboardProvider.isVisible() || chatProvider.isVisible();
+      if (isOpen) {
+        await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+      } else {
+        await vscode.commands.executeCommand("workbench.view.extension.vibe-interview-panel");
+      }
+    }),
   );
 
   // Restore session from previous run
@@ -259,6 +328,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   timer.start(savedSession);
   chatProvider.setConfig(savedSession);
   dashboardProvider.setConfig(savedSession);
+  // Drives the `when: vibe.session.active` clause on the vibe.chat view in
+  // package.json — without this context flag, the chat view stays hidden
+  // and the candidate sees only the dashboard in the secondary sidebar.
+  void vscode.commands.executeCommand("setContext", "vibe.session.active", true);
+  if (savedSession.meetLink) {
+    void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
+  }
   try {
     _startSessionServices(savedSession, context);
   } catch (err: unknown) {
@@ -334,25 +410,8 @@ function _startSessionServices(config: SessionConfig, context: vscode.ExtensionC
   // appearing. The earlier ordering had TelemetryTracker construction first;
   // any throw inside its event-listener registration would silently
   // suppress all subsequent setup including the status bar items.
-  const runTestsStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
-  runTestsStatus.text = "$(beaker) Run tests";
-  runTestsStatus.tooltip = "Run the challenge test checklist.";
-  runTestsStatus.command = "vibe.runTests";
-  runTestsStatus.show();
-
-  const chatStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
-  chatStatus.text = "$(comment-discussion) AI chat";
-  chatStatus.tooltip = "Open the JivaHire AI chat panel.";
-  chatStatus.command = "vibe.openChat";
-  chatStatus.show();
-
-  const submitStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
-  submitStatus.text = "$(cloud-upload) Submit";
-  submitStatus.tooltip = "Submit your work for grading.";
-  submitStatus.command = "vibe.submit";
-  submitStatus.show();
-
-  context.subscriptions.push(runTestsStatus, chatStatus, submitStatus);
+  // (Run tests / AI chat / Submit status-bar buttons removed per UX request —
+  // the dashboard panel exposes the same actions.)
 
   const tracker = new TelemetryTracker(config, context);
   context.subscriptions.push(tracker);
@@ -465,13 +524,6 @@ function _startSessionServices(config: SessionConfig, context: vscode.ExtensionC
     if (stopped) return;
     stopped = true;
     clearInterval(autoCommitTimer);
-    // After submit the action buttons must disappear — re-clicking them would
-    // either no-op (post-submit guards) or worse, attempt to push with a
-    // cleared session. Hide rather than dispose so the context.subscriptions
-    // disposal on extension deactivate still fires cleanly.
-    runTestsStatus.hide();
-    chatStatus.hide();
-    submitStatus.hide();
     if (_stopAutoCommit === stop) _stopAutoCommit = undefined;
   };
   _stopAutoCommit = stop;

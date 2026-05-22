@@ -57,12 +57,17 @@ def _migrate() -> None:
         ("sessions", "video_platform", "TEXT NOT NULL DEFAULT 'google_meet'"),
         ("sessions", "scheduled_at", "INTEGER"),
         ("sessions", "panelist_emails", "TEXT"),
+        ("sessions", "video_s3_key", "TEXT"),
+        ("sessions", "video_uploaded_at", "INTEGER"),
+        ("sessions", "video_duration_seconds", "INTEGER"),
         ("chat_exchanges", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "prompt_text", "TEXT"),
         ("chat_exchanges", "prompt_classification", "TEXT"),
+        ("chat_exchanges", "prompt_score", "INTEGER"),
+        ("chat_exchanges", "prompt_reasoning", "TEXT"),
+        ("chat_exchanges", "candidate_prompt_tokens", "INTEGER"),
         ("grades", "prompt_quality_score", "INTEGER"),
-        ("grades", "token_efficiency_score", "INTEGER"),
         ("grades", "developer_confidence_score", "INTEGER"),
         ("grades", "developer_confidence_verdict", "TEXT"),
         ("grades", "developer_confidence_signals", "TEXT"),
@@ -74,3 +79,13 @@ def _migrate() -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
         except Exception:
             pass  # column already exists
+
+    # Column drops (SQLite ≥ 3.35). Silently skip if column is already gone.
+    drops = [
+        ("grades", "token_efficiency_score"),
+    ]
+    for table, column in drops:
+        try:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        except Exception:
+            pass  # column already absent

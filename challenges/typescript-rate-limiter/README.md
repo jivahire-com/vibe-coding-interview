@@ -1,6 +1,6 @@
 # Per-Key Token-Bucket Rate Limiter (TypeScript)
 
-You have **~60 minutes** (90-minute hard cap) to deliver a correct,
+You have **~60 minutes** to deliver a correct,
 production-quality token-bucket rate limiter keyed by user id / IP / route.
 The public API lives in [src/rate_limiter.ts](src/rate_limiter.ts).
 

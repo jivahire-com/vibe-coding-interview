@@ -1,27 +1,15 @@
-import { Timer } from '../timer';
-import * as vscode from 'vscode';
+import { Timer, TimerTick } from '../timer';
 import { makeConfig } from './helpers';
 
 describe('Timer', () => {
   let timer: Timer;
-  let mockBar: ReturnType<typeof makeMockBar>;
-
-  function makeMockBar() {
-    return {
-      command: undefined as string | undefined,
-      text: '',
-      backgroundColor: undefined as vscode.ThemeColor | undefined,
-      show: jest.fn(),
-      hide: jest.fn(),
-      dispose: jest.fn(),
-    };
-  }
+  let ticks: TimerTick[];
 
   beforeEach(() => {
     jest.useFakeTimers();
-    mockBar = makeMockBar();
-    (vscode.window.createStatusBarItem as jest.Mock).mockReturnValue(mockBar);
+    ticks = [];
     timer = new Timer();
+    timer.onTick((t) => ticks.push(t));
   });
 
   afterEach(() => {
@@ -30,76 +18,97 @@ describe('Timer', () => {
     jest.clearAllMocks();
   });
 
-  test('start() shows the status bar and ticks immediately', () => {
+  test('onTick fires immediately with the idle value before start()', () => {
+    // beforeEach already attached the listener — it should have received the
+    // initial "--:--" idle tick so the chat toolbar isn't blank on render.
+    expect(ticks.length).toBe(1);
+    expect(ticks[0].text).toBe('--:--');
+    expect(ticks[0].running).toBe(false);
+  });
+
+  test('start() emits a running tick formatted MM:SS', () => {
     timer.start(makeConfig({ startedAt: Date.now(), maxMinutes: 60 }));
-    expect(mockBar.show).toHaveBeenCalledTimes(1);
-    expect(mockBar.text).toMatch(/\d{2}:\d{2} remaining/);
+    const last = ticks[ticks.length - 1];
+    expect(last.text).toMatch(/^\d{2}:\d{2}$/);
+    expect(last.running).toBe(true);
   });
 
-  test('start() formats MM:SS correctly', () => {
+  test('start() formats minutes correctly', () => {
     const now = Date.now();
-    // 45 min 30 sec remaining
+    // 45 min 30 sec remaining: startedAt = now - (60 - 45) min + 30s
     timer.start(makeConfig({ startedAt: now - (60 - 45) * 60_000 + 30_000, maxMinutes: 60 }));
-    expect(mockBar.text).toContain('45:');
+    const last = ticks[ticks.length - 1];
+    expect(last.text.startsWith('45:')).toBe(true);
   });
 
-  test('stop() hides the status bar', () => {
+  test('stop() emits a final non-running tick', () => {
     timer.start(makeConfig());
+    const beforeStop = ticks.length;
     timer.stop();
-    expect(mockBar.hide).toHaveBeenCalled();
+    expect(ticks.length).toBeGreaterThan(beforeStop);
+    expect(ticks[ticks.length - 1].running).toBe(false);
   });
 
   test('stop() is safe to call when not started', () => {
     expect(() => timer.stop()).not.toThrow();
   });
 
-  test('dispose() stops the interval and disposes the bar', () => {
+  test('dispose() stops the interval and clears listeners', () => {
     timer.start(makeConfig());
     timer.dispose();
-    expect(mockBar.dispose).toHaveBeenCalled();
+    const lenAfterDispose = ticks.length;
+    jest.advanceTimersByTime(5000);
+    // No more ticks should fire after dispose.
+    expect(ticks.length).toBe(lenAfterDispose);
   });
 
-  test('start() called twice replaces the interval without leaking (Bug #16)', () => {
+  test('start() called twice replaces the interval without leaking', () => {
     const config = makeConfig({ startedAt: Date.now(), maxMinutes: 60 });
     timer.start(config);
-    const firstHideCount = mockBar.hide.mock.calls.length;
-    timer.start(config); // second start should stop the first
-    // stop() was called once to cancel the previous interval
-    expect(mockBar.hide.mock.calls.length).toBeGreaterThan(firstHideCount);
+    const after1 = ticks.length;
+    timer.start(config); // second start should stop the first and emit again
+    expect(ticks.length).toBeGreaterThan(after1);
   });
 
-  test('uses error background color when < 2 min remaining', () => {
+  test('severity is "error" when < 2 min remaining', () => {
     const startedAt = Date.now() - 58.5 * 60_000; // 1m30s remaining on 60min session
     timer.start(makeConfig({ startedAt, maxMinutes: 60 }));
-    expect(mockBar.backgroundColor).toBeInstanceOf(vscode.ThemeColor);
-    expect((mockBar.backgroundColor as vscode.ThemeColor).id).toBe('statusBarItem.errorBackground');
+    expect(ticks[ticks.length - 1].severity).toBe('error');
   });
 
-  test('uses warning background color when < 10 min remaining', () => {
+  test('severity is "warn" when < 10 min remaining', () => {
     const startedAt = Date.now() - 52 * 60_000; // 8 min remaining
     timer.start(makeConfig({ startedAt, maxMinutes: 60 }));
-    expect(mockBar.backgroundColor).toBeInstanceOf(vscode.ThemeColor);
-    expect((mockBar.backgroundColor as vscode.ThemeColor).id).toBe('statusBarItem.warningBackground');
+    expect(ticks[ticks.length - 1].severity).toBe('warn');
   });
 
-  test('no special color when plenty of time remains', () => {
+  test('severity is "ok" when plenty of time remains', () => {
     timer.start(makeConfig({ startedAt: Date.now(), maxMinutes: 60 }));
-    expect(mockBar.backgroundColor).toBeUndefined();
+    expect(ticks[ticks.length - 1].severity).toBe('ok');
   });
 
-  test('shows 00:00 and stops when session is expired', () => {
+  test('emits 00:00 and stops when session is expired', () => {
     const startedAt = Date.now() - 120 * 60_000; // 2h ago, 60min session
     timer.start(makeConfig({ startedAt, maxMinutes: 60 }));
-    expect(mockBar.text).toContain('00:00');
-    // stop() hides bar on expiry
-    expect(mockBar.hide).toHaveBeenCalled();
+    const last = ticks[ticks.length - 1];
+    expect(last.text).toBe('00:00');
+    expect(last.running).toBe(false);
   });
 
   test('tick fires every second via setInterval', () => {
     const config = makeConfig({ startedAt: Date.now(), maxMinutes: 60 });
     timer.start(config);
-    mockBar.text = ''; // reset
+    const before = ticks.length;
     jest.advanceTimersByTime(1000);
-    expect(mockBar.text).toMatch(/\d{2}:\d{2} remaining/);
+    expect(ticks.length).toBeGreaterThan(before);
+  });
+
+  test('newly attached listener receives the most recent tick', () => {
+    timer.start(makeConfig({ startedAt: Date.now(), maxMinutes: 60 }));
+    const second: TimerTick[] = [];
+    timer.onTick((t) => second.push(t));
+    // Should be primed with the current running tick, not the idle one.
+    expect(second.length).toBe(1);
+    expect(second[0].running).toBe(true);
   });
 });

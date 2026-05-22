@@ -97,6 +97,11 @@ class ValidateSessionResponse(BaseModel):
     challenge_id: str
     chat_model: str
     available_chat_models: list[str]
+    # Per-million-token pricing for each model in `available_chat_models`, keyed
+    # by model id. The extension uses this to keep its local spend meter in sync
+    # with the server's budget enforcement when new / expensive models are
+    # introduced.
+    pricing_per_million: dict[str, dict[str, float]] = {}
     meet_link: str | None = None
     video_platform: str | None = None
     scheduled_at: int | None = None

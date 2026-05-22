@@ -159,12 +159,13 @@ This section mirrors `GRADING_RUBRICS.md`. **If you change `GRADING_RUBRICS.md`,
 ```
 total_score = (tests_passed / tests_total × 10) × 0.20
             + (traps_detected_w / traps_total_w × 10) × 0.10
-            + code_quality_score × 0.20
-            + prompt_quality_score × 0.15
-            + ai_orchestration_score × 0.15
+            + code_quality_score × 0.24
+            + prompt_quality_score × 0.18
+            + ai_orchestration_score × 0.18
             + architectural_reasoning_score × 0.10
-            + token_efficiency_score × 0.10
 ```
+
+Token usage is no longer a standalone dimension. Instead, the LLM evaluators for code quality, prompt quality, and AI orchestration each see the candidate's total chat-token spend in their signals block and reason about productivity per token (work done relative to tokens used) directly in their score reasoning.
 
 All LLM scores are 1–10. The composite result is 0–10. `traps_detected_w / traps_total_w` is a **severity-weighted** ratio: each trap contributes its `severity` value (1–3) to both numerator (if fixed) and denominator.
 
@@ -176,15 +177,14 @@ Fallback: if any grading stage fails, that dimension scores **5** (neutral). Gra
 |---|---|---|---|
 | Test pass rate | **20%** | Automated — hidden test suite runs against candidate's final commit | Hidden test file at `tests/<hidden-test-file>` with at least one test per tag declared in `rubric.json::tasks[].test_tag` |
 | Trap detection | **10%** | Automated — severity-weighted; a trap is detected if `tag_results[detection_tag]` is `True` | `traps.json` with `detection_tag` matching a tag used in the hidden test file |
-| Code quality | **20%** | LLM evaluation — correctness, idioms, edge-case handling | `rubric.json::code_quality_criteria` (4–8 concise bullet points) and `rubric.json::submission_files` |
-| Prompt quality | **15%** | LLM evaluation — classifies each prompt as `vague`, `specific`, or `professional` | No author action required; driven by candidate chat log |
-| AI orchestration | **15%** | LLM evaluation — strategic use vs. blind copy-paste, correction loops, independence | No author action required; driven by telemetry + chat log |
+| Code quality | **24%** | LLM evaluation — correctness, idioms, edge-case handling; also reasons about token productivity (work done per token) | `rubric.json::code_quality_criteria` (4–8 concise bullet points) and `rubric.json::submission_files` |
+| Prompt quality | **18%** | LLM evaluation — classifies each prompt as `vague`, `specific`, or `professional`; also weighs token spend against prompt mix | No author action required; driven by candidate chat log |
+| AI orchestration | **18%** | LLM evaluation — strategic use vs. blind copy-paste, correction loops, independence; also reasons about token productivity | No author action required; driven by telemetry + chat log |
 | Architectural reasoning | **10%** | LLM evaluation — design decisions the candidate was responsible for | `rubric.json::architectural_criteria` + `rubric.json::starter_code_note` (critical — see below) |
-| Token efficiency | **10%** | Formula — `actual_tokens / max_tokens` ratio | `rubric.json::expected_tokens` measured via `scripts/measure_repo_tokens.py` |
 
 ### Weight overrides
 
-Per-challenge weights live in `rubric.json::composite_weights`. They **merge with** (not replace) the defaults via `{**defaults, **override}` — so you only need to specify the weights you want to change. However, the active weights **must sum to 1.0** or the composite score will be wrong (there is no automatic normalization). Always list all seven keys if you override any.
+Per-challenge weights live in `rubric.json::composite_weights`. They **merge with** (not replace) the defaults via `{**defaults, **override}` — so you only need to specify the weights you want to change. The runner normalises the merged weights to sum to 1.0, so minor drift is tolerated, but for clarity list all six keys if you override any. The old `token_efficiency` key is ignored if present (the runner pops it before scoring).
 
 ### Behavioural signals
 
@@ -298,9 +298,9 @@ When `GRADING_RUBRICS.md` changes:
 | `tasks[].id` | string | yes | Unique within the challenge |
 | `tasks[].points` | int | yes | Relative weight (used in rubric display; actual scoring via `composite_weights`) |
 | `tasks[].test_tag` | string | yes | Must match a tag used in the hidden test file |
-| `composite_weights` | object | no | Override default weights; must sum to 1.0 if provided; merges with defaults |
+| `composite_weights` | object | no | Override default weights; merges with defaults and is normalised to sum to 1.0 |
 | `total_points` | int | yes | Sum of `tasks[].points`; for display only |
-| `expected_tokens` | int | yes | Measured via `scripts/measure_repo_tokens.py`; used in token efficiency scoring |
+| `expected_tokens` | int | no | Optional; informational only. Token usage is now factored into the code/prompt/AI evaluators directly, not a standalone score |
 | `size_exceptions` | object[] | no | Justify cap overrides; requires PR reviewer sign-off |
 
 **Copy-paste template (annotated):**
@@ -344,23 +344,18 @@ When `GRADING_RUBRICS.md` changes:
 
   "total_points": 100,
 
-  "expected_tokens": 0,
-
   "composite_weights": {
     "test_score":              0.20,
     "trap_score":              0.10,
-    "code_quality":            0.20,
-    "prompt_quality":          0.15,
-    "ai_orchestration":        0.15,
-    "architectural_reasoning": 0.10,
-    "token_efficiency":        0.10
+    "code_quality":            0.24,
+    "prompt_quality":          0.18,
+    "ai_orchestration":        0.18,
+    "architectural_reasoning": 0.10
   }
 }
 ```
 
-> Leave `expected_tokens` as `0` initially; populate it in step 10 of the §10 checklist after running `scripts/measure_repo_tokens.py`.
-
-> `composite_weights` shown above matches the system defaults exactly. Omit the field to use defaults, or include the full object with all seven keys summing to 1.0 to override.
+> `composite_weights` shown above matches the system defaults exactly. Omit the field to use defaults, or include the full object summing to 1.0 to override. The legacy `token_efficiency` key is ignored if present.
 
 ---
 
@@ -408,12 +403,11 @@ When `GRADING_RUBRICS.md` changes:
 |---|---|---|
 | `submission_files` contains a test file | Grader credits the candidate for editing their own tests | Only list production source files |
 | `detection_tag` typo or casing mismatch | Trap is never marked detected even when fixed | Double-check against the tag string in the hidden test |
-| `composite_weights` does not sum to 1.0 | Composite score silently wrong | Always include all 7 keys summing to exactly 1.0 |
-| `difficulty` missing | Token baseline silently falls back to `"mid"` | Always set explicitly |
+| `composite_weights` does not sum to 1.0 | Runner normalises but explicit weights are clearer | List the 6 active keys summing to 1.0 |
+| `difficulty` missing | Defaults to `"mid"` for size-cap and prompt sizing | Always set explicitly |
 | `code_quality_criteria` is empty | LLM evaluator gets a generic prompt; scores regress to the mean | Provide 4+ concise, challenge-specific bullets |
 | `starter_code_note` absent or vague | Architectural-reasoning evaluator credits inherited design choices | Write it precisely — name the exact structures and algorithms provided |
 | Hidden test uses a tag not in `tasks` or `traps` | Tag produces no score signal (orphan tag) | Add a `tasks` entry or a `traps` entry referencing that tag |
-| `expected_tokens` left at `0` | Token efficiency score is meaningless | Run `scripts/measure_repo_tokens.py` and populate the field |
 
 ---
 
@@ -672,22 +666,15 @@ Expected output:
 
 ## §9. Token Budgeting
 
-Run this command once after all starter code is written:
+Token usage is no longer a standalone grading score. The candidate's total chat-token spend is shown to the code-quality, prompt-quality, and AI-orchestration evaluators as a signal so they can judge productivity per token directly. `rubric.json::expected_tokens` is no longer required for grading.
+
+The platform still measures repo tokens for **per-session LLM budget enforcement** (the in-process check in `llm_proxy.py`). If you want a per-challenge baseline for documentation, run:
 
 ```bash
 python scripts/measure_repo_tokens.py <<REPLACE: challenge-id>> --force
 ```
 
-This prints the token count for the challenge tree. Copy the number into `rubric.json::expected_tokens`.
-
-The grader uses it to compute `max_tokens` (the token efficiency denominator) via the formula in §3. If `expected_tokens` is `0`, the token-efficiency score will be meaningless.
-
-**Re-measure when:**
-- Starter code files change by more than ~50 lines.
-- A new support file or fixture is added.
-- A file is removed from the challenge.
-
-Do not hand-tune `expected_tokens` — always use the measured value. The formula already adds a buffer (`× 1.5` plus difficulty tokens), so the measured baseline does not need manual inflation.
+and store the result in `rubric.json::expected_tokens` (optional, informational only).
 
 ---
 
@@ -714,14 +701,14 @@ Work through these steps in order. Each step that produces a file references the
 
 - [ ] **7. Write the public test file** — use the stub from §11.A, §11.B, or **§11.D** (drafts). Most tests pass on the unmodified starter; 1–3 should fail as hints toward the traps.
 
-- [ ] **8. Fill in `rubric.json`** — copy template from §4.2. Fill `tasks` (matching your `detection_tag`s), `code_quality_criteria`, `architectural_criteria`, `starter_code_note`, `submission_files`. Leave `expected_tokens` at `0` for now.
+- [ ] **8. Fill in `rubric.json`** — copy template from §4.2. Fill `tasks` (matching your `detection_tag`s), `code_quality_criteria`, `architectural_criteria`, `starter_code_note`, `submission_files`. `expected_tokens` is optional and informational only (see §9).
 
 - [ ] **9. Write `README.md` and `SETUP.md`** — copy skeletons from §8, fill all placeholders.
 
-- [ ] **10. Measure token count and set `expected_tokens`** *(skip for drafts — leave at `0`; this is run when the challenge is promoted to active)*
+- [ ] **10. Measure token count for the per-session budget** *(optional; informational. Token usage is no longer a standalone grading score — see §9.)*
   ```bash
   python scripts/measure_repo_tokens.py <<REPLACE: challenge-id>> --force
-  # Copy the printed count into rubric.json::expected_tokens
+  # Optionally copy the printed count into rubric.json::expected_tokens
   ```
 
 - [ ] **11. Size-cap self-check**
@@ -758,7 +745,6 @@ Work through these steps in order. Each step that produces a file references the
   - [ ] `submission_files` contains only production source files (no test files, no build configs)
   - [ ] Hidden tests fail on the unmodified starter (step 12 verified)
   - [ ] Public tests behave as intended (mostly pass; deliberate failures are hints)
-  - [ ] `expected_tokens` is non-zero and was measured by the script
   - [ ] No secrets, credentials, or PII anywhere in the challenge
   - [ ] No compiled binaries or generated artefacts committed
 
@@ -1335,13 +1321,13 @@ Complete §11.C, then add a §11.X appendix for the new language following the s
 | Term | Definition |
 |---|---|
 | **challenge_id** | Kebab-case slug uniquely identifying the challenge; matches the directory name and `metadata.json::challenge_id` |
-| **composite score** | The weighted sum of all seven grading dimensions; 0–10 scale; formula in §3 |
+| **composite score** | The weighted sum of all six grading dimensions; 0–10 scale; formula in §3 |
 | **detection_tag** | The test tag in `traps.json` that the grader checks to determine if a trap was fixed |
 | **developer confidence** | Separate behavioral score (not in composite) computed from telemetry — file exploration, IDE-native usage, post-AI-edit patterns |
 | **starter_code_note** | `rubric.json` field that tells the architectural-reasoning LLM evaluator what design decisions were already made in the starter code and must not be credited |
 | **submission_files** | List of files the grader reads for code-quality evaluation; edits outside this list are ignored |
 | **tag** | A string label on a test used to group tests by concern; author-defined; used to wire `tasks` and `traps` in `rubric.json` / `traps.json` |
-| **token efficiency** | Score (0–10) measuring `actual_tokens / max_tokens`; formula-based, no LLM evaluation |
+| **token productivity** | Not a standalone score. The code-quality, prompt-quality, and AI-orchestration LLM evaluators each see the candidate's total chat-token spend in their signals and judge whether the tokens produced useful work |
 | **trap** | An intentional planted bug in the starter code; graded via `traps.json` + hidden tests |
 
 **Cross-references:**

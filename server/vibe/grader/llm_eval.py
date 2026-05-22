@@ -13,10 +13,6 @@ from vibe.db import execute, query
 
 _FALLBACK_SCORE = 5
 
-_CONTEXT_RELOAD_FACTOR = 1.5
-_PER_TASK_OVERHEAD = 3500
-_DIFFICULTY_TOKENS = {"junior": 8000, "mid": 15000, "senior": 25000}
-
 # Temperatures for self-consistency runs (indexed by run index)
 _SC_TEMPERATURES = [0.0, 0.4, 0.7]
 
@@ -73,15 +69,13 @@ def evaluate(session_id: str, challenge_id: str, test_results: dict, clone_dir: 
                              detected_traps or [], missed_traps or [], signals, session_id)
     ao = _eval_ai_orchestration(client, ctx, code, chat_log, signals, session_id)
     ar = _eval_architectural_reasoning(client, ctx, code, rubric, session_id)
-    pq = _eval_prompt_quality(client, session_id, chat_log)
-    te = _eval_token_efficiency(ctx, session_id, rubric, challenge_root, signals)
+    pq = _eval_prompt_quality(client, session_id, chat_log, signals)
 
     summary = (
         f"Code quality ({cq['score']}/10): {cq['reasoning']} | "
         f"AI orchestration ({ao['score']}/10): {ao['reasoning']} | "
         f"Architectural reasoning ({ar['score']}/10): {ar['reasoning']} | "
-        f"Prompt quality ({pq['score']}/10): {pq['reasoning']} | "
-        f"Token efficiency ({te['score']}/10): {te['reasoning']}"
+        f"Prompt quality ({pq['score']}/10): {pq['reasoning']}"
     )
 
     return {
@@ -89,7 +83,6 @@ def evaluate(session_id: str, challenge_id: str, test_results: dict, clone_dir: 
         "ai_orchestration_score": ao["score"],
         "architectural_reasoning_score": ar["score"],
         "prompt_quality_score": pq["score"],
-        "token_efficiency_score": te["score"],
         "summary": summary,
     }
 
@@ -141,6 +134,8 @@ def _gather_signals(session_id: str, chat_log: list) -> dict:
     total_cached = sum(r["cached_input_tokens"] or 0 for r in cx_rows)
     total_reasoning = sum(r["reasoning_tokens"] or 0 for r in cx_rows)
     total_completion = sum(r["completion_tokens"] or 0 for r in cx_rows)
+    total_chat_tokens = total_prompt_tokens + total_completion
+    num_exchanges = len(cx_rows)
 
     cache_hit_ratio = round(total_cached / max(total_prompt_tokens, 1) * 100, 1)
     reasoning_token_share = round(total_reasoning / max(total_completion, 1) * 100, 1)
@@ -159,6 +154,10 @@ def _gather_signals(session_id: str, chat_log: list) -> dict:
         "correction_loops": correction_loops,
         "cache_hit_ratio": cache_hit_ratio,
         "reasoning_token_share": reasoning_token_share,
+        "total_chat_tokens": total_chat_tokens,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion,
+        "num_chat_exchanges": num_exchanges,
     }
 
 
@@ -171,8 +170,22 @@ def _signals_block(signals: dict) -> str:
         f" | Paste%: {signals['paste_pct']:.0f}%\n"
         f"- AI-applied chars: {signals['ai_applied_chars']:,} | AI-applied%: {signals['ai_applied_pct']:.0f}%\n"
         f"- Window switches: {signals['window_switches']} | Suspicious pastes: {signals['suspicious_pastes']}\n"
-        f"- Correction loops: {signals['correction_loops']} | Cache-hit ratio: {signals['cache_hit_ratio']:.0f}%"
+        f"- Correction loops: {signals['correction_loops']} | Cache-hit ratio: {signals['cache_hit_ratio']:.0f}%\n"
+        f"- Chat exchanges: {signals.get('num_chat_exchanges', 0)} | "
+        f"Total chat tokens: {signals.get('total_chat_tokens', 0):,} "
+        f"(prompt {signals.get('total_prompt_tokens', 0):,} + completion {signals.get('total_completion_tokens', 0):,})"
     )
+
+
+_TOKEN_PRODUCTIVITY_GUIDANCE = (
+    "TOKEN-USAGE LENS (do NOT score raw token count — judge productivity per token):\n"
+    "- Tokens are only meaningful relative to working code and useful direction. Lots of tokens with passing tests, "
+    "trap fixes, and visible iteration is fine; few tokens with broken or empty code is bad.\n"
+    "- Heavy spend with little working output, repeated regenerations of the same code, or long prompts that "
+    "ignore prior context are negatives. Concise, targeted prompts that produce code the candidate then adapts "
+    "are positives.\n"
+    "- If chat tokens are zero but code is solid, that is independent work — neutral-to-positive, not a penalty."
+)
 
 
 def _challenge_ctx(challenge_id: str, rubric: dict) -> dict:
@@ -241,12 +254,15 @@ CANDIDATE CODE:
 
 {sigs}
 
+{_TOKEN_PRODUCTIVITY_GUIDANCE}
+
 CRITERIA:
 {_bullet_list(criteria)}
 
 ADJUSTMENTS:
 - If paste% > 70%, cap the score at 7 unless the code shows evidence of post-paste edits, refactoring, or adaptation (do not reward verbatim AI output).
 - If TRAPS THE CANDIDATE MISSED is non-empty, deduct at least 1 point per critical miss visible in the code.
+- Reference token productivity in your analysis: relate chat-token spend to how much working code resulted. Heavy spend with broken or thin code is a negative; lean spend with solid code is a positive. Do not penalise low token use when the code is sound.
 
 Respond with JSON only — emit "analysis" BEFORE "score" to reason first:
 {{"analysis": "<3-5 sentences of explicit reasoning>", "score": <int 1-10>, "confidence": <float 0.0-1.0>}}"""
@@ -258,7 +274,7 @@ Respond with JSON only — emit "analysis" BEFORE "score" to reason first:
 def _eval_ai_orchestration(client, ctx: dict, code: str, chat_log: list,
                              signals: dict, session_id: str) -> dict:
     if not chat_log:
-        return {"score": 5, "reasoning": "No AI chat exchanges recorded — unable to evaluate AI usage."}
+        return {"score": 1, "reasoning": "No AI chat exchanges recorded — scored at the floor because AI orchestration cannot be evaluated without any AI usage."}
 
     exchanges_text = "\n\n".join(
         f"[{i+1}] Candidate: {e.get('prompt_text','')}\n    AI: {e.get('response_text','')[:400]}"
@@ -283,11 +299,14 @@ FINAL CODE SUBMITTED:
 
 {sigs}
 
+{_TOKEN_PRODUCTIVITY_GUIDANCE}
+
 CRITERIA:
 - Prompt quality: specific and targeted vs vague/generic
 - Adaptation: understood and adapted AI suggestions rather than blindly copying
 - Iteration: followed up on problems; correction loops show self-correction
 - Independence: evidence of own reasoning alongside AI use
+- Token productivity: did the chat-token spend convert into useful direction and working code? Repeated regenerations or long context-bare prompts that yield little are a negative; tight prompts that produced code the candidate then adapted are a positive.
 - If paste% > 70% and correction_loops < 2, deduct for probable blind copy-paste
 - If suspicious_pastes > 0, note this as a risk signal
 
@@ -346,7 +365,7 @@ Respond with JSON only — emit "analysis" BEFORE "score":
                  session_id, "llm_eval.architectural_reasoning", use_sc=True)
 
 
-def _eval_prompt_quality(client, session_id: str, chat_log: list) -> dict:
+def _eval_prompt_quality(client, session_id: str, chat_log: list, signals: dict) -> dict:
     if not chat_log:
         return {"score": 1, "reasoning": "No prompts to evaluate."}
 
@@ -354,18 +373,23 @@ def _eval_prompt_quality(client, session_id: str, chat_log: list) -> dict:
     if not prompts:
         return {"score": 1, "reasoning": "No prompt text found in chat log."}
 
-    classification_prompt = f"""Classify each candidate prompt as one of: vague, specific, professional.
+    classification_prompt = f"""Classify each candidate prompt as one of: vague, specific, professional, and assign a 0–10 quality score (0 = totally vague, 10 = highly professional).
 
 Definitions:
 - vague: generic requests without technical context, e.g. "fix this", "please fix this code", "make it work"
 - specific: includes the problem or symptom but lacks technical precision, e.g. "function X is returning the wrong value"
 - professional: cites exact errors, types, line numbers, constraints, or runtime behaviour, e.g. "function X returns Y for input Z because the loop terminates one iteration early"
 
+Score guidance:
+- 0–3: vague
+- 4–7: specific (4 = barely specific, 7 = strong specific)
+- 8–10: professional (10 = exemplary precision and context)
+
 PROMPTS (numbered):
 {chr(10).join(f"[{i+1}] {p}" for i, p in enumerate(prompts))}
 
 Respond with JSON only — a list of objects in the same order:
-[{{"index": 1, "classification": "vague|specific|professional", "reason": "<one line>"}}]"""
+[{{"index": 1, "classification": "vague|specific|professional", "score": <int 0-10>, "reason": "<one sentence explaining why this prompt earned that classification and score>"}}]"""
 
     try:
         resp = client.chat.completions.create(
@@ -383,9 +407,14 @@ Respond with JSON only — a list of objects in the same order:
         )
         for i, cls in enumerate(classifications):
             if i < len(rows):
+                score_val = cls.get("score")
+                if isinstance(score_val, (int, float)):
+                    score_val = max(0, min(10, int(round(score_val))))
+                else:
+                    score_val = None
                 execute(
-                    "UPDATE chat_exchanges SET prompt_classification=? WHERE id=?",
-                    (cls.get("classification"), rows[i]["id"]),
+                    "UPDATE chat_exchanges SET prompt_classification=?, prompt_score=?, prompt_reasoning=? WHERE id=?",
+                    (cls.get("classification"), score_val, cls.get("reason"), rows[i]["id"]),
                 )
     except Exception:
         classifications = []
@@ -400,6 +429,10 @@ Respond with JSON only — a list of objects in the same order:
     score = (counts["professional"] * 10 + counts["specific"] * 7 + counts["vague"] * 3) / total
     score = max(1, min(10, round(score)))
 
+    total_tokens = signals.get("total_chat_tokens", 0) if signals else 0
+    num_ex = signals.get("num_chat_exchanges", 0) if signals else 0
+    avg_tokens_per_exchange = round(total_tokens / num_ex) if num_ex else 0
+
     commentary_prompt = f"""You are reviewing prompt quality for a coding interview candidate.
 
 CLASSIFICATION BREAKDOWN:
@@ -408,67 +441,17 @@ CLASSIFICATION BREAKDOWN:
 - Vague prompts: {counts['vague']} ({counts['vague'] / total * 100:.0f}%)
 - Total prompts evaluated: {total}
 
-Write 2-3 sentences describing the candidate's prompting patterns based on the breakdown above (e.g., what mix of prompt types they used, what that suggests about their problem-isolation skill). Do not state a score."""
+TOKEN USAGE:
+- Total chat tokens spent across all exchanges: {total_tokens:,}
+- Average tokens per exchange: {avg_tokens_per_exchange:,}
+
+Write 2-3 sentences describing the candidate's prompting patterns based on the breakdown above (e.g., what mix of prompt types they used, what that suggests about their problem-isolation skill). Comment on whether their token spend looks productive given the prompt mix — vague prompts with high token spend is a negative signal; professional prompts that stayed lean is a positive one. Do not state a score."""
 
     reasoning = _commentary_call(
         client, commentary_prompt,
         "Prompt quality evaluated from classifications.",
         session_id,
     )
-    return {"score": score, "reasoning": reasoning}
-
-
-def _eval_token_efficiency(ctx: dict, session_id: str, rubric: dict,
-                            challenge_root: Path, signals: dict) -> dict:
-    from vibe.grader.repo_tokens import get_repo_tokens
-
-    rows = query(
-        "SELECT SUM(prompt_tokens + completion_tokens) AS total FROM chat_exchanges WHERE session_id=?",
-        (session_id,),
-    )
-    actual_tokens = (rows[0]["total"] or 0) if rows else 0
-
-    if actual_tokens == 0:
-        return {"score": 1, "reasoning": "No token usage recorded — unable to evaluate token efficiency."}
-
-    try:
-        repo_tokens = get_repo_tokens(challenge_root, settings.chat_model)
-    except Exception as e:
-        return {"score": 5, "reasoning": f"Token efficiency: could not measure repo tokens ({e})."}
-
-    num_tasks = len(rubric.get("tasks", []))
-    difficulty = rubric.get("difficulty", "mid")
-    diff_tokens = _DIFFICULTY_TOKENS.get(difficulty, _DIFFICULTY_TOKENS["mid"])
-    max_tokens = int(repo_tokens * _CONTEXT_RELOAD_FACTOR + _PER_TASK_OVERHEAD * num_tasks + diff_tokens)
-
-    if max_tokens == 0:
-        return {"score": 5, "reasoning": "Cannot compute token efficiency — max_tokens is zero."}
-
-    ratio = actual_tokens / max_tokens
-    pct = ratio * 100
-
-    if ratio < 0.50:
-        score = 10
-        bucket = "seasoned (well under budget)"
-    elif ratio <= 0.80:
-        score = round(9 - (ratio - 0.50) / 0.30 * 3)
-        bucket = "acceptable (within reasonable budget)"
-    elif ratio <= 1.00:
-        score = round(5 - (ratio - 0.80) / 0.20 * 3)
-        bucket = "inefficient (approaching budget limit)"
-    else:
-        score = 1
-        bucket = "exhausted (over budget)"
-
-    score = max(1, min(10, score))
-
-    extras = ""
-    if signals:
-        cache_pct = signals.get("cache_hit_ratio", 0)
-        reasoning_share = signals.get("reasoning_token_share", 0)
-        extras = f" Cache-hit {cache_pct:.0f}% of prompt tokens; reasoning tokens {reasoning_share:.0f}% of completion."
-
-    reasoning = f"Used {pct:.0f}% of max tokens ({actual_tokens:,}/{max_tokens:,}) — {bucket}.{extras}"
     return {"score": score, "reasoning": reasoning}
 
 

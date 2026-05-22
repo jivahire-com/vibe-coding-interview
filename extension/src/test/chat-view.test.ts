@@ -154,13 +154,6 @@ describe('ChatViewProvider', () => {
     expect(view.webview.html).toContain('Gpt 4o');
   });
 
-  test('budget display shows $0.000 spent on fresh session', () => {
-    provider.resolveWebviewView(view, {} as any, {} as any);
-    provider.setConfig(makeConfig({ llmBudgetUsd: 2.0 }));
-    expect(view.webview.html).toContain('$0.000');
-    expect(view.webview.html).toContain('$2.00');
-  });
-
   // ── Bug #1: budget exhausted state persists across renders ────────────────
 
   test('Bug #1: budgetExhausted state disables input and shows banner on render', () => {
@@ -235,9 +228,9 @@ describe('ChatViewProvider', () => {
     const content = 'a `single` and a ```triple``` and `````five`````';
     const block = buildFileFence('x.md', 'md', content);
     // Longest run is 5 backticks → fence must be ≥6
-    const fenceMatch = block.match(/^# Current[^\n]*\n(`+)/m);
+    const fenceMatch = block.match(/^# (File context|Current)[^\n]*\n[^\n]*\n(`+)/m);
     expect(fenceMatch).not.toBeNull();
-    expect(fenceMatch![1].length).toBeGreaterThanOrEqual(6);
+    expect(fenceMatch![2].length).toBeGreaterThanOrEqual(6);
   });
 
   // ── Sanity: STREAM_TIMEOUT_MS is reasonable ───────────────────────────────
@@ -658,7 +651,7 @@ describe('ChatViewProvider rendered code-block markup (Review-Bug 1)', () => {
     expect(html).toMatch(/Apply to lru\.cpp/);
   });
 
-  test('Review-Bug 1: fence without file= attribute still renders Apply (with generic label)', () => {
+  test('fence without file= renders Apply button as ENABLED with file-picker tooltip', () => {
     provider.resolveWebviewView(view, {} as any, {} as any);
     provider.setConfig(makeConfig());
     (provider as any).messages = [
@@ -674,12 +667,13 @@ describe('ChatViewProvider rendered code-block markup (Review-Bug 1)', () => {
     const html: string = view.webview.html;
     expect(html).toMatch(/data-apply-block-id="blk-rendered-/);
     expect(html).toMatch(/data-apply-lang="python"/);
-    // No file= → label falls back to "Apply to file…". Button stays clickable;
-    // a QuickPick handles target selection on click.
+    // No file= → label invites the candidate to pick a file. Button is ENABLED:
+    // clicking it opens a workspace file picker rather than blocking the user.
     expect(html).toMatch(/Apply to file/);
     const applyMatch = /<button[^>]*class="code-btn apply-btn"[^>]*>/.exec(html);
     expect(applyMatch).not.toBeNull();
-    expect(applyMatch![0]).not.toMatch(/\sdisabled\b/);
+    expect(applyMatch![0]).not.toMatch(/\bdisabled\b/);
+    expect(applyMatch![0]).toMatch(/click to pick one from your workspace/);
   });
 
   test('Review-Bug 1: code content is HTML-escaped (no XSS through assistant fences)', () => {

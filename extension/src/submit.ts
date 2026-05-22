@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
 import { SessionConfig, submitSession } from "./api";
+import { openVideoRecorder } from "./video/recorder";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,10 +38,10 @@ export function buildUnauthedRemoteUrl(repoUrl: string): string {
 }
 
 export interface SubmitDeps {
+  /** Stops the countdown timer on successful submit. */
+  onStopTimer?: () => void;
   /** Clears the persisted session on successful submit. */
   onSubmitted?: () => Promise<void> | void;
-  /** Stops the status-bar countdown timer. */
-  onStopTimer?: () => void;
   /** Tells the dashboard to swap to read-only "Submitted" state. */
   onMarkSubmitted?: () => void;
 }
@@ -75,16 +76,21 @@ export async function runSubmit(
       try {
         const ts = new Date().toISOString();
         gitCommitAndPush(ws, config, `submit: ${ts}`, true);
-        await submitSession(config);
+        const resp = await submitSession(config);
         // Bug fix: advance the IDLE → SUBMITTING → DONE state machine. Without
         // this, the candidate can keep using AI chat budget and resubmit after
         // the server has already marked the session DONE.
-        deps.onStopTimer?.();
         await deps.onSubmitted?.();
         deps.onMarkSubmitted?.();
         vscode.window.showInformationMessage(
           "Submitted! Grading will appear in the recruiter dashboard shortly."
         );
+        // Post-submit identity-verification video. Server gates this behind a
+        // config check and returns `video_upload` only when S3/CloudFront are
+        // configured. Recording is optional and runs in parallel with grading.
+        if (resp.video_upload) {
+          try { openVideoRecorder(config); } catch { /* never block submit */ }
+        }
       } catch (err: unknown) {
         vscode.window.showErrorMessage(_friendlyErrorMessage(err, "submit"));
       }

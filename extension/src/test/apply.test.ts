@@ -13,7 +13,6 @@ import {
   _pendingSizeForTests,
   _disposeApplyForTests,
   _isInsideWorkspace,
-  AI_PROPOSED_SCHEME,
 } from '../chat/apply';
 
 // ── Review-Bug 3: pure unit tests for _isInsideWorkspace ───────────────────
@@ -299,21 +298,63 @@ describe('multi-block surgical merge', () => {
   });
 });
 
-describe('_closeDiffTab robustness (Bug: green/red diff stays open after Accept)', () => {
+// ── Regression: Windows files use CRLF, LLM returns LF. The diff must still
+//    recognise unchanged lines or the entire file collapses into a single
+//    "delete-all + insert-all" hunk and looks like the AI rewrote everything.
+
+describe('_buildHunks across mixed line endings (CRLF vs LF)', () => {
+  let _buildHunks: typeof import('../chat/apply')._buildHunks;
+  beforeAll(async () => {
+    const mod = await import('../chat/apply');
+    _buildHunks = mod._buildHunks;
+  });
+
+  test('CRLF original and LF proposed share unchanged lines (no giant hunk)', () => {
+    const original = ['#include <list>', '#include <utility>', 'int x = 1;', '// end'].join('\r\n');
+    // Single line changed in the middle, otherwise identical content but in LF.
+    const proposed = ['#include <list>', '#include <utility>', 'int x = 99;', '// end'].join('\n');
+
+    const hunks = _buildHunks(original, proposed);
+    // Exactly one hunk that touches just the changed line — NOT a whole-file
+    // replacement.
+    expect(hunks.length).toBe(1);
+    expect(hunks[0].originalLines).toEqual(['int x = 1;']);
+    expect(hunks[0].newLines).toEqual(['int x = 99;']);
+  });
+
+  test('all-LF input on both sides still works (no double-eol confusion)', () => {
+    const original = 'a\nb\nc\n';
+    const proposed = 'a\nB\nc\n';
+    const hunks = _buildHunks(original, proposed);
+    expect(hunks.length).toBe(1);
+    expect(hunks[0].originalLines).toEqual(['b']);
+    expect(hunks[0].newLines).toEqual(['B']);
+  });
+
+  test('identical content modulo line endings produces no hunks', () => {
+    const original = 'a\r\nb\r\nc\r\n';
+    const proposed = 'a\nb\nc\n';
+    expect(_buildHunks(original, proposed)).toEqual([]);
+  });
+});
+
+describe('inline session lifecycle', () => {
   let tmpDir: string;
   let target: string;
   let acceptAiChanges: typeof import('../chat/apply').acceptAiChanges;
+  let rejectAiChanges: typeof import('../chat/apply').rejectAiChanges;
 
   beforeEach(async () => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'close-diff-'));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'inline-session-'));
     target = path.join(tmpDir, 'foo.cpp');
-    fs.writeFileSync(target, '// stuff\n', 'utf8');
+    fs.writeFileSync(target, '// original\n', 'utf8');
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
       { uri: { fsPath: tmpDir } } as { uri: { fsPath: string } },
     ];
     jest.clearAllMocks();
     const mod = await import('../chat/apply');
     acceptAiChanges = mod.acceptAiChanges;
+    rejectAiChanges = mod.rejectAiChanges;
   });
 
   afterEach(() => {
@@ -322,77 +363,57 @@ describe('_closeDiffTab robustness (Bug: green/red diff stays open after Accept)
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
   });
 
-  test('closes the AI diff tab even when stored URI path differs from the recorded path', async () => {
+  test('session is registered immediately (before first await) and resolves after acceptAiChanges', async () => {
     const { applyCodeBlock } = await import('../chat/apply');
-    const { TabInputTextDiff } = await import('vscode') as unknown as {
-      TabInputTextDiff: new (orig: vscode.Uri, mod: vscode.Uri) => unknown;
-    };
 
-    // Simulate VS Code returning a tab whose `modified.path` is normalised
-    // and no longer matches what we passed. Pre-fix, the closer would skip
-    // this tab and the candidate would stare at green/red highlighting.
-    (vscode.commands.executeCommand as jest.Mock).mockImplementation(
-      (cmd: string, _orig: vscode.Uri, proposed: vscode.Uri): Promise<unknown> => {
-        if (cmd === 'vscode.diff') {
-          const normalised = vscode.Uri.from({
-            scheme: proposed.scheme,
-            path: proposed.path + '?normalised', // arbitrary normalisation
-          });
-          (vscode.window as unknown as { tabGroups: { _tabs: unknown[] } }).tabGroups._tabs.push({
-            input: new TabInputTextDiff(_orig, normalised),
-          });
-        }
-        return Promise.resolve();
-      },
-    );
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
+    const p = applyCodeBlock('foo.cpp', 'int main() { return 1; }\n', 'blk-lifecycle');
 
-    const p = applyCodeBlock('foo.cpp', 'int main() { return 1; }\n', 'blk-close-fallback');
-    await new Promise((r) => setImmediate(r));
-    acceptAiChanges('blk-close-fallback');
+    // Session is available synchronously (no await needed).
+    expect(_pendingSizeForTests()).toBe(1);
+    // Initial preview applyEdit fires immediately.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+
+    acceptAiChanges('blk-lifecycle');
     await p;
 
-    // Scheme-based fallback should still close the tab.
-    expect((vscode.window as unknown as { tabGroups: { _tabs: unknown[] } }).tabGroups._tabs.length).toBe(0);
+    // Session cleaned up. Accept fires a second applyEdit dropping red lines.
+    expect(_pendingSizeForTests()).toBe(0);
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
   });
 
-  test('falls back to closeActiveEditor when tabGroups.close fails to remove the tab', async () => {
+  test('accepting writes the final state — applyEdit called twice (preview + drop-original)', async () => {
     const { applyCodeBlock } = await import('../chat/apply');
-    const { TabInputTextDiff } = await import('vscode') as unknown as {
-      TabInputTextDiff: new (orig: vscode.Uri, mod: vscode.Uri) => unknown;
-    };
 
-    let closeCalls = 0;
-    (vscode.commands.executeCommand as jest.Mock).mockImplementation(
-      (cmd: string, ...args: unknown[]): Promise<unknown> => {
-        if (cmd === 'vscode.diff') {
-          const proposed = args[1] as vscode.Uri;
-          (vscode.window as unknown as { tabGroups: { _tabs: unknown[] } }).tabGroups._tabs.push({
-            input: new TabInputTextDiff(args[0] as vscode.Uri, proposed),
-          });
-        }
-        if (cmd === 'workbench.action.closeActiveEditor') {
-          closeCalls++;
-          // Simulate the command actually removing the tab.
-          (vscode.window as unknown as { tabGroups: { _tabs: unknown[] } }).tabGroups._tabs.length = 0;
-        }
-        return Promise.resolve();
-      },
-    );
-    // tabGroups.close is a no-op — does NOT remove the tab. This is the
-    // production-observed failure mode that the fallback exists for.
-    (vscode.window as unknown as { tabGroups: { close: jest.Mock } }).tabGroups.close
-      = jest.fn().mockResolvedValue(false);
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
-
-    const p = applyCodeBlock('foo.cpp', 'int main() { return 1; }\n', 'blk-stuck-tab');
+    const p = applyCodeBlock('foo.cpp', 'int main() { return 99; }\n', 'blk-accept');
     await new Promise((r) => setImmediate(r));
-    acceptAiChanges('blk-stuck-tab');
+
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+    acceptAiChanges('blk-accept');
     await p;
 
-    // Fallback fired and the tab is gone.
-    expect(closeCalls).toBeGreaterThanOrEqual(1);
-    expect((vscode.window as unknown as { tabGroups: { _tabs: unknown[] } }).tabGroups._tabs.length).toBe(0);
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
+    const finalEdit = (vscode.workspace.applyEdit as jest.Mock).mock.calls[1][0];
+    const finalText = (finalEdit.getEdits() as Array<{ text: string }>)[0].text;
+    // After accept the file is the new content only.
+    expect(finalText).toContain('return 99');
+    expect(finalText).not.toContain('// original');
+  });
+
+  test('rejecting reverts the file — applyEdit called twice (preview + drop-new)', async () => {
+    const { applyCodeBlock } = await import('../chat/apply');
+
+    const p = applyCodeBlock('foo.cpp', 'int main() { return 99; }\n', 'blk-reject');
+    await new Promise((r) => setImmediate(r));
+
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+    rejectAiChanges('blk-reject');
+    await p;
+
+    // Reject drops the green (new) lines, restoring the original content.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
+    const revertEdit = (vscode.workspace.applyEdit as jest.Mock).mock.calls[1][0];
+    const edits = revertEdit.getEdits() as Array<{ text: string }>;
+    expect(edits[0].text).toBe('// original\n');
   });
 });
 
@@ -408,7 +429,6 @@ describe('applyCodeBlock surgical multi-block merge (Bug: Apply wipes file)', ()
       { uri: { fsPath: tmpDir } } as { uri: { fsPath: string } },
     ];
     jest.clearAllMocks();
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
     const mod = await import('../chat/apply');
     acceptAiChanges = mod.acceptAiChanges;
   });
@@ -419,7 +439,7 @@ describe('applyCodeBlock surgical multi-block merge (Bug: Apply wipes file)', ()
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
   });
 
-  test('two-method JS snippet anchors both regions — NO modal, NO file wipe', async () => {
+  test('two-method JS snippet anchors both regions — NO modal, applied immediately', async () => {
     const original = [
       'class UserSearch {',
       '  constructor() { this.q = ""; }',
@@ -450,42 +470,45 @@ describe('applyCodeBlock surgical multi-block merge (Bug: Apply wipes file)', ()
     ].join('\n');
 
     const p = applyCodeBlock('user_search.js', snippet, 'blk-multi');
-    await new Promise((r) => setImmediate(r));
-    acceptAiChanges('blk-multi');
-    await p;
-
-    // No destructive-confirm modal — surgical merge means the diff already
-    // showed exactly what gets written.
+    // Inline-diff mode: applyEdit fires immediately, no modal.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
     expect(vscode.window.showWarningMessage).not.toHaveBeenCalled();
-    expect(vscode.workspace.applyEdit).toHaveBeenCalled();
 
-    // The WorkspaceEdit should contain TWO surgical edits, not one full-file edit.
+    // Inline-diff mode is one full-file preview edit. The preview contains
+    // BOTH the original setQuery/getState (red) and the new ones (green),
+    // plus all surrounding untouched code.
     const edit = (vscode.workspace.applyEdit as jest.Mock).mock.calls[0][0];
     const edits = edit.getEdits() as Array<{ range: vscode.Range; text: string }>;
-    expect(edits.length).toBe(2);
-    // Each edit text contains exactly one of the methods, properly reindented.
-    const joined = edits.map((e) => e.text).join('\n');
-    expect(joined).toContain('this.dirty = true');
-    expect(joined).toContain('Math.ceil');
-    expect(joined).not.toContain('destroy()'); // we don't touch the untouched method
+    expect(edits.length).toBe(1);
+    const previewText = edits[0].text;
+    expect(previewText).toContain('this.dirty = true');     // new green line
+    expect(previewText).toContain('Math.ceil');             // new green line
+    expect(previewText).toContain('Math.floor');            // original red line (still visible in preview)
+    expect(previewText).toContain('destroy()');             // untouched method preserved
+
+    acceptAiChanges('blk-multi');
+    await p;
+    // Accept fires a second applyEdit that drops the red (original) lines.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
+    const finalText = ((vscode.workspace.applyEdit as jest.Mock).mock.calls[1][0]
+      .getEdits() as Array<{ text: string }>)[0].text;
+    expect(finalText).toContain('this.dirty = true');
+    expect(finalText).toContain('Math.ceil');
+    expect(finalText).not.toContain('Math.floor');          // original line dropped
+    expect(finalText).toContain('destroy()');               // untouched still present
   });
 
-  test('partial snippet that cannot anchor any block → still shows full-file modal', async () => {
+  test('partial snippet that cannot anchor any block → applied as full-file, no modal', async () => {
     fs.writeFileSync(target, '// existing js file\nfunction other() { return 1; }\n', 'utf8');
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
 
     const snippet = 'function brandNewFunction() {\n  return 42;\n}';
     const p = applyCodeBlock('user_search.js', snippet, 'blk-noanchor');
-    await new Promise((r) => setImmediate(r));
+    // Applied immediately as full-file replacement — no modal in inline mode.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+    expect(vscode.window.showWarningMessage).not.toHaveBeenCalled();
+
     acceptAiChanges('blk-noanchor');
     await p;
-
-    // Modal fires because the snippet cannot be safely merged.
-    expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/REPLACE the entire contents/),
-      expect.objectContaining({ modal: true }),
-      'Replace entire file',
-    );
   });
 });
 
@@ -511,84 +534,60 @@ describe('applyCodeBlock lifecycle', () => {
     (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
   });
 
-  test('Bug #10: closing the diff tab without Accept/Reject resolves as a Reject (no leak)', async () => {
-    // Mock vscode.diff so opening the diff editor doesn't try to actually open
-    let diffOpened = false;
-    (vscode.commands.executeCommand as jest.Mock).mockImplementation(
-      (cmd: string): Promise<unknown> => {
-        if (cmd === 'vscode.diff') diffOpened = true;
-        return Promise.resolve();
-      },
-    );
-
+  test('session is registered before first await — synchronous callers can accept immediately', async () => {
     const applyPromise = applyCodeBlock(
       'foo.cpp',
       'int main() { return 1; }',
       'blk-1',
     );
 
-    // The pending entry has been registered
+    // Session registered synchronously (before any await in applyCodeBlock).
     expect(_pendingSizeForTests()).toBe(1);
-    expect(diffOpened).toBe(true);
+    // applyEdit was also called immediately.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
 
-    // Simulate VS Code closing the diff document without Accept/Reject
-    const wsExt = vscode.workspace as unknown as {
-      _docCloseCallback: ((d: { uri: { scheme: string; path: string } }) => void) | null;
-    };
-    expect(wsExt._docCloseCallback).not.toBeNull();
-    wsExt._docCloseCallback!({ uri: { scheme: AI_PROPOSED_SCHEME, path: '/blk-1' } });
-
-    // applyCodeBlock now resolves (because the close watcher fired resolve(false))
+    const { acceptAiChanges } = await import('../chat/apply');
+    acceptAiChanges('blk-1');
     await expect(applyPromise).resolves.toBeUndefined();
     expect(_pendingSizeForTests()).toBe(0);
   });
 
-  test('Bug #11: full-file replacement on a non-empty file requires explicit user confirmation', async () => {
+  test('full-file replacement applies immediately — no confirmation modal', async () => {
     fs.writeFileSync(originalFile, '// hand-written code\nint main() {\n  return 42;\n}\n', 'utf8');
 
-    // Track command + dialog calls
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue(undefined); // user dismisses
-
-    // Drive the apply: open diff, then immediately accept via the CodeLens.
-    // The accept triggers the destructive-confirm guard, which we have set to
-    // resolve undefined → caller declines → applyEdit must NOT have run.
     const applyPromise = applyCodeBlock(
       'foo.cpp',
       '#pragma once\nclass A {};\nclass B {};\n', // looksLikeFullFile → true
-      'blk-confirm',
+      'blk-fullfile',
     );
     const { acceptAiChanges } = await import('../chat/apply');
-    acceptAiChanges('blk-confirm');
+    // Initial preview applyEdit fires immediately — no modal needed.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+    expect(vscode.window.showWarningMessage).not.toHaveBeenCalled();
+
+    acceptAiChanges('blk-fullfile');
     await applyPromise;
 
-    // The destructive-confirm dialog was shown
-    expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/REPLACE the entire contents/),
-      expect.objectContaining({ modal: true }),
-      'Replace entire file',
-    );
-    // The user did not confirm — applyEdit must NOT have been invoked
-    expect(vscode.workspace.applyEdit).not.toHaveBeenCalled();
-    // Original file is unchanged on disk (the WorkspaceEdit is what would have changed it)
-    expect(fs.readFileSync(originalFile, 'utf8')).toContain('hand-written code');
+    // Accept fires a second applyEdit dropping the red (original) lines.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
   });
 
-  test('Bug #11: confirmation accepted → applyEdit runs and the file gets the new contents', async () => {
-    fs.writeFileSync(originalFile, '// old code\n', 'utf8');
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
+  test('empty target file → applyEdit fires immediately and accept needs no second edit', async () => {
+    const empty = path.join(tmpDir, 'new.cpp');
+    fs.writeFileSync(empty, '', 'utf8');
 
     const applyPromise = applyCodeBlock(
-      'foo.cpp',
+      'new.cpp',
       '#pragma once\nclass A {};\nclass B {};\n',
-      'blk-yes',
+      'blk-empty',
     );
     const { acceptAiChanges } = await import('../chat/apply');
-    acceptAiChanges('blk-yes');
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(1);
+    acceptAiChanges('blk-empty');
     await applyPromise;
-
-    expect(vscode.workspace.applyEdit).toHaveBeenCalled();
+    // For pure insertion (empty original) there are no red lines to drop, but
+    // the implementation still issues the final write to be consistent.
+    expect(vscode.workspace.applyEdit).toHaveBeenCalledTimes(2);
   });
 
   // ── Review-Bug 3: symlink-aware path-traversal guard ───────────────────
@@ -608,19 +607,17 @@ describe('applyCodeBlock lifecycle', () => {
     }
 
     (vscode.window.showErrorMessage as jest.Mock).mockClear();
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
 
     // Try to apply via the symlinked dir to a path that physically lands in
     // /outside. Pre-fix code only checked `resolved.startsWith(ws + sep)` and
     // would have allowed this.
     await applyCodeBlock('evil/leaked.txt', 'pwn', 'blk-symlink');
 
-    // Must have been rejected with the unsafe-path error and never opened a diff.
+    // Must have been rejected with the unsafe-path error and never applied any edit.
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
       expect.stringMatching(/Unsafe path/),
     );
-    const cmdCalls = (vscode.commands.executeCommand as jest.Mock).mock.calls;
-    expect(cmdCalls.find((c) => c[0] === 'vscode.diff')).toBeUndefined();
+    expect(vscode.workspace.applyEdit).not.toHaveBeenCalled();
 
     // And the file was never written
     expect(fs.existsSync(path.join(outside, 'leaked.txt'))).toBe(false);
@@ -629,9 +626,6 @@ describe('applyCodeBlock lifecycle', () => {
   });
 
   test('Review-Bug 3: applying to a NEW file (parent exists, file does not) is allowed', async () => {
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
-
     const newFile = path.join(tmpDir, 'subdir', 'new.cpp');
     fs.mkdirSync(path.dirname(newFile));
     // Sanity: file does not exist yet.
@@ -646,26 +640,5 @@ describe('applyCodeBlock lifecycle', () => {
     // (which exists) and confirmed it's inside the workspace realpath.
     const errCalls = (vscode.window.showErrorMessage as jest.Mock).mock.calls;
     expect(errCalls.find((c) => /Unsafe path/.test(String(c[0])))).toBeUndefined();
-  });
-
-  test('Bug #11: empty target file → NO confirmation needed (no destructive risk)', async () => {
-    const empty = path.join(tmpDir, 'new.cpp');
-    fs.writeFileSync(empty, '', 'utf8');
-
-    (vscode.commands.executeCommand as jest.Mock).mockResolvedValue(undefined);
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Replace entire file');
-
-    const applyPromise = applyCodeBlock(
-      'new.cpp',
-      '#pragma once\nclass A {};\nclass B {};\n',
-      'blk-empty',
-    );
-    const { acceptAiChanges } = await import('../chat/apply');
-    acceptAiChanges('blk-empty');
-    await applyPromise;
-
-    // No destructive-confirm dialog — original was empty, nothing to lose
-    expect(vscode.window.showWarningMessage).not.toHaveBeenCalled();
-    expect(vscode.workspace.applyEdit).toHaveBeenCalled();
   });
 });

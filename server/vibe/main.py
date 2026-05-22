@@ -1,4 +1,5 @@
 import os
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -6,14 +7,16 @@ from vibe.db import bootstrap
 from vibe.sessions import router as sessions_router
 from vibe.telemetry import router as telemetry_router
 from vibe.submit import router as submit_router
-from vibe.llm_proxy import router as llm_router
+from vibe.llm_proxy import router as llm_router, backfill_candidate_tokens
 from vibe.challenges_page import router as challenges_page_router
 from vibe.author_docs import router as author_docs_router
+from vibe.video import router as video_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     bootstrap()
+    threading.Thread(target=backfill_candidate_tokens, daemon=True).start()
     yield
 
 
@@ -24,6 +27,7 @@ app.include_router(submit_router)
 app.include_router(llm_router)
 app.include_router(challenges_page_router)
 app.include_router(author_docs_router)
+app.include_router(video_router)
 
 from fastapi.responses import FileResponse
 

@@ -435,31 +435,28 @@ describe('Reopen dialog → next activation does not re-prompt (Bug #3)', () => 
   });
 });
 
-// ── Bug A: silent auto-commit failures must surface in the status bar ─────
+// ── Bug A: silent auto-commit failures must surface in the chat panel ─────
 
-describe('auto-commit failures surface in the status bar (Bug A)', () => {
-  test('after 2 consecutive push failures, a warning status-bar item is shown; resets on next success', async () => {
+describe('auto-commit failures surface in the chat panel (Bug A)', () => {
+  test('after 2 consecutive push failures, chatProvider.setOfflineState is invoked; clears on next success', async () => {
     const submitMod = require('../submit');
     let nextResult: Promise<unknown> = Promise.resolve(undefined);
     submitMod.gitCommitAndPushAsync = jest.fn(() => nextResult);
 
-    // Hold a reference to the single created status bar item so we can
-    // inspect text/show/hide regardless of how many times the production
-    // code (re-)creates it.
-    const items: any[] = [];
-    (vscode.window.createStatusBarItem as jest.Mock).mockImplementation(() => {
-      const item = {
-        command: undefined as string | undefined,
-        text: '',
-        tooltip: '',
-        backgroundColor: undefined,
-        show: jest.fn(),
-        hide: jest.fn(),
-        dispose: jest.fn(),
-      };
-      items.push(item);
-      return item;
-    });
+    // Spy on ChatViewProvider's setOfflineState — the action buttons and the
+    // offline banner now live inside the chat webview, so the production code
+    // surfaces auto-commit health through that method.
+    const chatMod = require('../chat/view');
+    const setOfflineSpy = jest.fn();
+    chatMod.ChatViewProvider.mockImplementation(() => ({
+      attachTimer: jest.fn(),
+      setConfig: jest.fn(),
+      setOfflineState: setOfflineSpy,
+      markEnded: jest.fn(),
+      focus: jest.fn(),
+      dispose: jest.fn(),
+      resolveWebviewView: jest.fn(),
+    }));
 
     jest.useFakeTimers();
     try {
@@ -468,50 +465,47 @@ describe('auto-commit failures surface in the status bar (Bug A)', () => {
       const ctx = makeMockContext({ 'vibe.session': makeConfig() });
       await activate(ctx);
 
+      // Helper: a rejected promise with a no-op .catch() pre-attached so Node
+      // 20's unhandled-rejection check doesn't crash the worker before the
+      // production code attaches its own .catch() inside the timer callback.
+      const rejected = (msg: string): Promise<unknown> => {
+        const p = Promise.reject(new Error(msg));
+        p.catch(() => { /* observed */ });
+        return p;
+      };
+
       // Tick 1 — failure
-      nextResult = Promise.reject(new Error('push rejected'));
+      nextResult = rejected('push rejected');
       jest.advanceTimersByTime(180_000);
       await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
 
-      // After only 1 failure, no warning yet.
-      const firstItemAfterOne = items[0];
-      if (firstItemAfterOne) {
-        expect(firstItemAfterOne.show).not.toHaveBeenCalled();
-      }
+      // After only 1 failure, no offline banner yet.
+      const offlineCallsAfterOne = setOfflineSpy.mock.calls.filter(([on]) => on === true);
+      expect(offlineCallsAfterOne.length).toBe(0);
 
       // Tick 2 — second consecutive failure
-      nextResult = Promise.reject(new Error('push rejected again'));
+      nextResult = rejected('push rejected again');
       jest.advanceTimersByTime(180_000);
       await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
 
-      // Now we must have an item that has been shown with the warning text.
-      expect(items.length).toBeGreaterThanOrEqual(1);
-      const warned = items.find((i) => i.show.mock.calls.length > 0);
-      expect(warned).toBeDefined();
-      expect(warned.text).toMatch(/Auto-save offline/i);
-      expect(String(warned.tooltip)).toMatch(/auto-save/i);
+      // Now setOfflineState(true, ...) must have been called with a
+      // candidate-readable warning message.
+      const offlineCallsAfterTwo = setOfflineSpy.mock.calls.filter(([on]) => on === true);
+      expect(offlineCallsAfterTwo.length).toBeGreaterThanOrEqual(1);
+      const [, message] = offlineCallsAfterTwo[offlineCallsAfterTwo.length - 1];
+      expect(String(message)).toMatch(/auto-save offline/i);
 
       // Tick 3 — recovery
       nextResult = Promise.resolve(undefined);
       jest.advanceTimersByTime(180_000);
       await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
 
-      // After success either hide() is called or the text is cleared.
-      const wasHidden =
-        warned.hide.mock.calls.length > 0 || warned.text === '';
-      expect(wasHidden).toBe(true);
+      // After success setOfflineState(false) must have been called.
+      const clearCalls = setOfflineSpy.mock.calls.filter(([on]) => on === false);
+      expect(clearCalls.length).toBeGreaterThanOrEqual(1);
     } finally {
       jest.useRealTimers();
-      // Restore default factory so later tests don't share our item array.
-      (vscode.window.createStatusBarItem as jest.Mock).mockImplementation(() => ({
-        command: undefined,
-        text: '',
-        tooltip: '',
-        backgroundColor: undefined,
-        show: jest.fn(),
-        hide: jest.fn(),
-        dispose: jest.fn(),
-      }));
+      chatMod.ChatViewProvider.mockReset();
     }
   });
 });
@@ -519,21 +513,26 @@ describe('auto-commit failures surface in the status bar (Bug A)', () => {
 // ── Bug B: Esc on the Reopen/Start Fresh modal must surface guidance ──────
 
 describe('Reopen modal dismissal surfaces inline guidance (Bug B)', () => {
-  test('dismissing the modal (undefined) calls reportSessionError with a candidate-friendly message mentioning both options', async () => {
+  test('dismissing the modal (undefined) drops the brief and surfaces a Command-Palette resume hint', async () => {
     mockedFs.existsSync.mockReturnValue(true);
     (vscode.workspace as any).workspaceFolders = [
       { uri: { fsPath: '/some/other/folder' } },
     ];
     (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue(undefined);
+    (vscode.window.showInformationMessage as jest.Mock).mockResolvedValue(undefined);
 
-    // Spy on the auto-mocked DashboardViewProvider's reportSessionError.
+    // Spy on the auto-mocked DashboardViewProvider's dismiss() — the working
+    // tree changed the dismissal branch to drop the brief via dismiss() and
+    // raise a separate showInformationMessage toast with the resume hint,
+    // rather than embedding the guidance in the dashboard error slot.
     const panelMod = require('../welcome/panel');
-    const reportSpy = jest.fn();
+    const dismissSpy = jest.fn();
     panelMod.DashboardViewProvider.mockImplementation(() => ({
       setConfig: jest.fn(),
       clearConfig: jest.fn(),
       markSubmitted: jest.fn(),
-      reportSessionError: reportSpy,
+      reportSessionError: jest.fn(),
+      dismiss: dismissSpy,
       dispose: jest.fn(),
       resolveWebviewView: jest.fn(),
     }));
@@ -541,10 +540,11 @@ describe('Reopen modal dismissal surfaces inline guidance (Bug B)', () => {
     const ctx = makeMockContext({ 'vibe.session': makeConfig() });
     await activate(ctx);
 
-    expect(reportSpy).toHaveBeenCalledTimes(1);
-    const msg = reportSpy.mock.calls[0][0] as string;
-    expect(msg).toMatch(/Reopen/);
-    expect(msg).toMatch(/Start Fresh/);
+    expect(dismissSpy).toHaveBeenCalledTimes(1);
+    const infoCalls = (vscode.window.showInformationMessage as jest.Mock).mock.calls;
+    const resumeToast = infoCalls.find((c) => typeof c[0] === 'string' && /Enter Session Key/i.test(c[0]));
+    expect(resumeToast).toBeDefined();
+    expect(resumeToast![0]).toMatch(/Command Palette/i);
 
     // Restore default auto-mock behaviour so subsequent tests aren't affected.
     panelMod.DashboardViewProvider.mockReset();
