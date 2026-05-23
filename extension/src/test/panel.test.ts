@@ -235,8 +235,10 @@ describe('DashboardViewProvider', () => {
     provider.setConfig(makeConfig());
     const html: string = view.webview.html;
     expect(html).toMatch(/data-action="runTests"/);
-    expect(html).toMatch(/data-action="openChat"/);
     expect(html).toMatch(/data-action="submit"/);
+    // openChat was removed from the dashboard once the chat moved into a
+    // dedicated secondary-sidebar view that's always open during a session —
+    // there's no longer a button here to wire it to.
   });
 
   // ── Bug #16: dashboard interval stops once the session expires ────────────

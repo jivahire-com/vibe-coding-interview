@@ -194,10 +194,10 @@ describe('ChatViewProvider', () => {
   test('Bug #11: handles multiple backtick runs of varying length', () => {
     const content = 'a `single` and a ```triple``` and `````five`````';
     const block = buildFileFence('x.md', 'md', content);
-    // Longest run is 5 backticks → fence must be ≥6
-    const fenceMatch = block.match(/^# (File context|Current)[^\n]*\n[^\n]*\n(`+)/m);
+    // Longest run is 5 backticks → opening fence must be ≥6
+    const fenceMatch = block.match(/^(`{4,})md\n/m);
     expect(fenceMatch).not.toBeNull();
-    expect(fenceMatch![2].length).toBeGreaterThanOrEqual(6);
+    expect(fenceMatch![1].length).toBeGreaterThanOrEqual(6);
   });
 
   // ── Sanity: STREAM_TIMEOUT_MS is reasonable ───────────────────────────────

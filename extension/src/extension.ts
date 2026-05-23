@@ -356,7 +356,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
   }
   try {
-    _startSessionServices(savedSession, context);
+    _startSessionServices(savedSession, context, chatProvider);
   } catch (err: unknown) {
     // Surface the failure instead of silently losing the auto-commit timer
     // and status bar buttons. activate() doesn't catch synchronous throws
@@ -421,6 +421,7 @@ export function _samePath(a: string | undefined, b: string | undefined): boolean
 function _startSessionServices(
   config: SessionConfig,
   context: vscode.ExtensionContext,
+  chatProvider: ChatViewProvider,
 ): void {
   // Always-visible action buttons. The dashboard webview lives in the activity
   // bar sidebar, so it's hidden whenever the candidate switches to the File
@@ -494,7 +495,6 @@ function _startSessionServices(
   let stopped = false;
   let consecutiveFailures = 0;
   let lastSuccessAt = Date.now();
-  let offlineStatus: vscode.StatusBarItem | undefined;
   const autoCommitTimer = setInterval(() => {
     if (stopped || autoCommitInFlight) return;
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -516,21 +516,18 @@ function _startSessionServices(
         tracker.emit("auto_commit", { ts });
         consecutiveFailures = 0;
         lastSuccessAt = Date.now();
-        if (offlineStatus) offlineStatus.hide();
+        chatProvider.setOfflineState(false);
       })
       .catch((err: unknown) => {
         if (stopped) return;
         consecutiveFailures += 1;
         getLogger()?.errorFromException("auto_commit_failed", err, { consecutiveFailures });
         if (consecutiveFailures >= 2) {
-          if (!offlineStatus) {
-            offlineStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-            context.subscriptions.push(offlineStatus);
-          }
           const mins = Math.max(1, Math.round((Date.now() - lastSuccessAt) / 60_000));
-          offlineStatus.text = "$(warning) Auto-save offline";
-          offlineStatus.tooltip = `Last successful auto-save was ${mins} minutes ago — check your network.`;
-          offlineStatus.show();
+          chatProvider.setOfflineState(
+            true,
+            `Auto-save offline — last successful save ${mins} minute${mins === 1 ? "" : "s"} ago. Check your network.`,
+          );
         }
       })
       .finally(() => {

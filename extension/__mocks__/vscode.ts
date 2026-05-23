@@ -235,9 +235,20 @@ export const workspace = {
 
 // ─── commands ────────────────────────────────────────────────────────────────
 
+// Registry of commands registered via registerCommand, so executeCommand can
+// actually dispatch — the real VS Code does this, and tests that exercise
+// command-driven flows (e.g. paste interception) depend on it.
+const _commandHandlers = new Map<string, (...args: any[]) => any>();
 export const commands = {
-  executeCommand: jest.fn().mockResolvedValue(undefined),
-  registerCommand: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+  registerCommand: jest.fn((id: string, handler: (...args: any[]) => any) => {
+    _commandHandlers.set(id, handler);
+    return { dispose: jest.fn(() => { _commandHandlers.delete(id); }) };
+  }),
+  executeCommand: jest.fn(async (id: string, ...args: any[]) => {
+    const handler = _commandHandlers.get(id);
+    if (handler) return handler(...args);
+    return undefined;
+  }),
 };
 
 // ─── languages ───────────────────────────────────────────────────────────────

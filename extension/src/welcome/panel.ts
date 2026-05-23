@@ -284,9 +284,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       case "runTests":
         this.runTests();
         break;
-      case "openChat":
-        vscode.commands.executeCommand("vibe.openChat");
-        break;
       case "submit":
         vscode.commands.executeCommand("vibe.submit");
         break;
