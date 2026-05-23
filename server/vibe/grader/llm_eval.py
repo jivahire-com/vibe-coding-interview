@@ -79,8 +79,8 @@ def evaluate(
 
     ctx = _challenge_ctx(challenge_id, rubric)
     code = _read_submission(clone_dir, rubric.get("submission_files", []))
-    chat_log = _read_chat_log(clone_dir, session_id)
-    timeline = _read_unified_timeline(clone_dir, session_id)
+    chat_log = _chat_log_from_db(session_id)
+    timeline = _unified_timeline_from_db(session_id)
     signals = _gather_signals(session_id, chat_log)
 
     client = OpenAI(api_key=settings.openai_api_key, base_url=settings.llm_base_url)
@@ -168,18 +168,13 @@ def _eval_llm_communication(client, ctx, chat_log, timeline, signals, session_id
         return {"score": _FALLBACK_SCORE, "breakdown": {"reason": "no config"}}
 
     if not chat_log:
-        db_count = query(
-            "SELECT COUNT(*) AS n FROM chat_exchanges "
-            "WHERE session_id=? AND prompt_text IS NOT NULL",
-            (session_id,),
-        )[0]["n"]
-        reason = (
-            "no chat exchanges recorded for this session"
-            if db_count == 0
-            else f"{db_count} chat exchange(s) in DB but none reachable for grading — "
-                 "candidate's branch is missing .jivahire_chat_log.json"
-        )
-        return {"score": 1.0, "breakdown": {"reason": reason, "criteria": {}}}
+        return {
+            "score": 1.0,
+            "breakdown": {
+                "reason": "no chat exchanges recorded for this session",
+                "criteria": {},
+            },
+        }
 
     exchanges = _format_chat_exchanges(chat_log, max_chars=400)
     timeline_excerpt = _format_timeline_excerpt(timeline, limit=40)
@@ -624,48 +619,12 @@ def _read_submission(clone_dir: Path, submission_files: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def _read_chat_log(clone_dir: Path, session_id: str | None = None) -> list[dict[str, Any]]:
-    """Chat-only entries from `.jivahire_chat_log.json` (filtered for the
-    LLM Communication evaluator, which only wants prompt/response pairs).
-
-    If the on-branch JSON copy is missing or empty (auto-commit hadn't pushed
-    yet, candidate gitignored the file, file write failed, etc.), fall back to
-    the `chat_exchanges` DB rows so prompt-side scoring isn't silently floored
-    when the prompts actually existed. The DB has no response_text column, so
-    reconstructed entries leave it blank — downstream prompts still grade the
-    candidate's wording, which is the dimension's actual target.
-    """
-    entries = _load_log_entries(clone_dir)
-    chat = [
-        e for e in entries
-        if isinstance(e, dict) and e.get("event_type", "chat") == "chat"
-    ]
-    if chat or not session_id:
-        return chat
-    return _chat_log_from_db(session_id)
-
-
-def _read_unified_timeline(
-    clone_dir: Path, session_id: str | None = None
-) -> list[dict[str, Any]]:
-    """Full unified timeline (chat + edits + tests + focus, in seq order).
-
-    Used by the LLM Communication evaluator so it can cite "test ran 45s after
-    AI apply" or "follow-up #7 referenced response #6" with sequence numbers
-    as evidence. Same fallback as `_read_chat_log`: when the on-branch file is
-    missing we reconstruct chat events from the DB. Non-chat events (edits,
-    test runs, focus) live only in the file — they're lost in fallback mode
-    but the dimension can still score the prompt side.
-    """
-    entries = _load_log_entries(clone_dir)
-    timeline = [e for e in entries if isinstance(e, dict)]
-    if timeline or not session_id:
-        return timeline
-    return _chat_log_from_db(session_id)
-
-
 def _chat_log_from_db(session_id: str) -> list[dict[str, Any]]:
-    """Rebuild chat entries from `chat_exchanges` when the git copy is gone."""
+    """Chat-only entries from `chat_exchanges` (sole source of truth since
+    the on-branch `.jivahire_chat_log.json` was retired). Used by the LLM
+    Communication evaluator, which scores the prompts the candidate sent.
+    The DB has no response_text column; entries leave it blank.
+    """
     rows = query(
         "SELECT id, ts, prompt_text, prompt_tokens, completion_tokens, model "
         "FROM chat_exchanges WHERE session_id=? AND prompt_text IS NOT NULL "
@@ -687,13 +646,47 @@ def _chat_log_from_db(session_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _load_log_entries(clone_dir: Path) -> list[dict[str, Any]]:
-    path = clone_dir / ".jivahire_chat_log.json"
-    try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-    return entries if isinstance(entries, list) else []
+def _unified_timeline_from_db(session_id: str) -> list[dict[str, Any]]:
+    """Merge `chat_exchanges` + `telemetry` rows into one timeline, sorted by
+    ts, with a sequence number assigned in chronological order. Used by the
+    LLM Communication evaluator so it can cite "test ran 45s after AI apply"
+    or "follow-up #7 referenced response #6" as evidence.
+
+    The on-branch JSON file used to carry the same shape with a sequence
+    counter incremented at write time; we now compute the sequence at grade
+    time. The two are equivalent so long as ts ordering matches the live
+    counter — which it does, because the extension emits events in real time.
+    """
+    chats = query(
+        "SELECT ts, prompt_text FROM chat_exchanges "
+        "WHERE session_id=? AND prompt_text IS NOT NULL",
+        (session_id,),
+    )
+    events = query(
+        "SELECT ts, event_type, payload FROM telemetry WHERE session_id=?",
+        (session_id,),
+    )
+    merged: list[dict[str, Any]] = []
+    for c in chats:
+        merged.append({
+            "ts": c["ts"],
+            "event_type": "chat",
+            "prompt_text": c["prompt_text"] or "",
+        })
+    for e in events:
+        try:
+            payload = json.loads(e["payload"]) if isinstance(e["payload"], str) else (e["payload"] or {})
+        except Exception:
+            payload = {}
+        merged.append({
+            "ts": e["ts"],
+            "event_type": e["event_type"],
+            "payload": payload,
+        })
+    merged.sort(key=lambda x: x["ts"])
+    for i, entry in enumerate(merged):
+        entry["sequence"] = i + 1
+    return merged
 
 
 def _load_json(path: Path) -> dict[str, Any]:

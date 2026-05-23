@@ -5,7 +5,6 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { SessionConfig, DEFAULT_MODEL_PRICING, ModelPricing } from "../api";
-import { ChatLog } from "./chatlog";
 import { applyCodeBlock } from "./apply";
 import { Timer, TimerTick } from "../timer";
 
@@ -55,7 +54,6 @@ export const SYSTEM_PROMPT = [
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private _view: vscode.WebviewView | undefined;
   private messages: Message[] = [];
-  private chatLog?: ChatLog;
   private isLoading = false;
   private streamingText = "";
   private spentUsd = 0;
@@ -126,21 +124,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.render();
   }
 
-  /**
-   * Inject the session-scoped ChatLog from extension.ts so chat exchanges
-   * and telemetry events share the same sequence-numbered audit trail.
-   */
-  setChatLog(chatLog: ChatLog): void {
-    this.chatLog = chatLog;
-  }
-
   setConfig(config: SessionConfig): void {
     this.config = config;
     this.selectedModel = config.availableChatModels[0] ?? config.chatModel;
-    if (!this.chatLog) {
-      const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-      this.chatLog = new ChatLog(ws);
-    }
     void this.refreshWorkspaceFiles();
     this.render();
   }
@@ -374,9 +360,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Bug fix: budget exhaustion is treated as a terminal error for THIS
     // request. The proxy emitted an `error` chunk before any content arrived
     // (or partway through), so we must NOT pollute the audit trail with a
-    // phantom assistant turn that contains an empty / truncated response. The
-    // grader parses .jivahire_chat_log.json and would otherwise see an
-    // attempted prompt against the candidate with `response_tokens: 0`.
+    // phantom assistant turn that contains an empty / truncated response.
     if (budgetExhausted) {
       this.budgetExhausted = true;
       // Drop the optimistic user message so the visible history matches what
@@ -411,18 +395,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const inputCost  = (billablePromptTokens / 1_000_000) * _p.input;
     const outputCost = (completionTokens     / 1_000_000) * _p.output;
     this.spentUsd += inputCost + outputCost;
-
-    this.chatLog?.append({
-      timestamp: Date.now(),
-      prompt_text: userText,
-      response_text: assistantText,
-      model_used: requestModel ?? "gpt-4o-mini",
-      prompt_tokens: promptTokens,
-      response_tokens: completionTokens,
-      response_latency_ms: latencyMs,
-      topic_hint: "",
-      correction_loop: false,
-    });
 
     this.render();
   }

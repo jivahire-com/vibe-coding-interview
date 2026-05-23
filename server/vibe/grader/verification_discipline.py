@@ -3,8 +3,7 @@ Verification Discipline (13% of composite, telemetry-derived, ungameable).
 
 Scores how thoroughly the candidate verified AI-generated code before moving on.
 Pure-deterministic — no LLM call. Signals come straight from the per-session
-telemetry stream populated by the VS Code extension; the same events appear in
-the unified `.jivahire_chat_log.json` timeline on the candidate's branch.
+telemetry stream populated by the VS Code extension.
 
 Sub-signals per the rubric (GRADING_RUBRICS.md, "Verification Discipline"):
 

@@ -4,7 +4,6 @@
  * Covers:
  *  Bug #3  – resolveWebviewView() after setConfig() renders the chat UI
  *  Bug #4  – handleMessage("send") with no config does not crash
- *  Bug #7  – ChatLog is created with the correct workspace path
  *  Bug #15 – dispose() does not throw (provider is disposable)
  */
 import * as path from 'path';
@@ -13,9 +12,6 @@ import * as fs from 'fs';
 import { ChatViewProvider, buildFileFence, STREAM_TIMEOUT_MS } from '../chat/view';
 import * as vscode from 'vscode';
 import { makeConfig, makeMockContext, makeMockWebviewView } from './helpers';
-
-// We don't want ChatLog to actually touch the filesystem in most tests.
-// Override workspaceFolders to a real temp dir where needed.
 describe('ChatViewProvider', () => {
   let context: ReturnType<typeof makeMockContext>;
   let provider: ChatViewProvider;
@@ -93,38 +89,9 @@ describe('ChatViewProvider', () => {
     }).not.toThrow();
   });
 
-  // ── Bug #7 ────────────────────────────────────────────────────────────────
-
-  test('Bug #7: ChatLog created with the current workspace path', () => {
-    const config = makeConfig();
-    provider.setConfig(config);
-
-    // The chat log file should exist in the temp workspace
-    const logFile = path.join(tmpDir, '.jivahire_chat_log.json');
-    expect(fs.existsSync(logFile)).toBe(true);
-  });
-
-  test('Bug #7: second setConfig() call does not recreate ChatLog with wrong path', () => {
-    const config = makeConfig();
-    provider.setConfig(config);
-
-    const logFileBefore = path.join(tmpDir, '.jivahire_chat_log.json');
-    const mtimeBefore = fs.statSync(logFileBefore).mtimeMs;
-
-    // Change workspace — should NOT affect the already-created ChatLog
-    const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-view-test2-'));
-    try {
-      (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: tmpDir2 } }];
-      provider.setConfig(config); // second call — ChatLog guard should prevent recreation
-
-      // original log file still exists and is the one being used
-      expect(fs.existsSync(logFileBefore)).toBe(true);
-      // new dir does NOT get a log file (ChatLog not recreated)
-      expect(fs.existsSync(path.join(tmpDir2, '.jivahire_chat_log.json'))).toBe(false);
-    } finally {
-      fs.rmSync(tmpDir2, { recursive: true, force: true });
-    }
-  });
+  // Bug #7 tests were removed when the on-branch chat log file was retired —
+  // chat history now lives in the `chat_exchanges` DB table only. Nothing for
+  // the extension to create / guard against re-creation here.
 
   // ── Bug #15 / dispose ─────────────────────────────────────────────────────
 
@@ -342,11 +309,6 @@ describe('ChatViewProvider streamChat error handling', () => {
     const arg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0];
     expect(arg).toMatch(/AI chat error/);
 
-    // Chat log must NOT contain an "Error:" response
-    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
-    const entries = JSON.parse(fs.readFileSync(logPath, 'utf8'));
-    expect(entries).toEqual([]);
-
     // The optimistically-pushed user message must have been removed so the user can retry
     expect((provider as any).messages).toEqual([]);
 
@@ -371,9 +333,7 @@ describe('ChatViewProvider streamChat error handling', () => {
     await setupSend('still trying');
 
     expect((vscode.window.showErrorMessage as jest.Mock)).toHaveBeenCalled();
-    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
-    const entries = JSON.parse(fs.readFileSync(logPath, 'utf8'));
-    expect(entries).toEqual([]);
+    expect((provider as any).messages).toEqual([]);
   });
 
   test('Bug #10: successful response IS logged with the request-time model', async () => {
@@ -417,15 +377,10 @@ describe('ChatViewProvider streamChat error handling', () => {
 
     await done;
 
-    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
-    const entries = JSON.parse(fs.readFileSync(logPath, 'utf8'));
-    expect(entries).toHaveLength(1);
-    expect(entries[0].response_text).toBe('Hello world');
-    // The logged model must be the request-time model, not the post-switch model
-    expect(entries[0].model_used).toBe('openai/gpt-4o-mini');
-
-    // Per-message model is captured on the assistant message
+    // Per-message model is captured on the assistant message — must be the
+    // request-time model, not the post-switch model.
     const msgs = (provider as any).messages;
+    expect(msgs[1].content).toBe('Hello world');
     expect(msgs[1].model).toBe('openai/gpt-4o-mini');
   });
 
@@ -461,17 +416,10 @@ describe('ChatViewProvider streamChat error handling', () => {
 
     await setupSend('what is the answer?');
 
-    // Pre-fix, this would log an entry with response_text='half-' and
-    // prompt_text='what is the answer?' — polluting the audit trail.
-    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
-    const entries = JSON.parse(fs.readFileSync(logPath, 'utf8'));
-    expect(entries).toEqual([]);
-
-    // The optimistic user message must also be removed from the in-memory
-    // history so the visible chat matches what was actually exchanged.
+    // The optimistic user message must be removed from the in-memory history
+    // so the visible chat matches what was actually exchanged — and the
+    // provider stays flagged as budget-exhausted across renders.
     expect((provider as any).messages).toEqual([]);
-
-    // Provider stays flagged as budget-exhausted across renders.
     expect((provider as any).budgetExhausted).toBe(true);
   });
 

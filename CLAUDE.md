@@ -68,7 +68,7 @@ Never flush synchronously on the hot path — buffer first, flush async.
 
 ### Auto-Commit Audit Trail
 
-Every 3 minutes: `git add -A && git commit -m "auto: <timestamp>" && git push`. The `.jivahire_chat_log.json` file (append-only JSON array of chat exchanges) is committed alongside code changes. This creates a tamper-evident timeline the grader parses — do not change commit message format without updating the grader's parser.
+Every 3 minutes: `git add -A && git commit -m "auto: <timestamp>" && git push`. This commits the candidate's code changes — chat history and telemetry events are NOT on the branch; they live in the server's `chat_exchanges` and `telemetry` tables. Do not change the auto-commit message format without checking how the grader uses commit history.
 
 ### Grading Pipeline (Celery)
 
@@ -113,7 +113,7 @@ These apply whenever writing code in this repo:
 
 ## Privacy and Security Constraints
 
-- Candidate prompt history is persisted in `chat_exchanges.prompt_text` (alongside token/cost metadata) and is also written to `.jivahire_chat_log.json` in the candidate's git branch. The DB copy is what the recruiter dashboard renders in the Candidate Prompts card on the session detail view; the git-branch copy is what the grader parses for AI-orchestration / prompt-quality evaluation. When deleting a session, drop the `chat_exchanges` rows too — the git branch alone is no longer the sole copy.
+- Candidate prompt history is persisted in `chat_exchanges.prompt_text` (alongside token/cost metadata). It is the sole source of truth — both the recruiter dashboard's Candidate Prompts card and the grader's LLM-communication evaluator read from it. When deleting a session, drop the `chat_exchanges` rows too; telemetry events for the session live in `telemetry` and should be deleted as well.
 - Session keys must be rate-limited (5 attempts/IP/hour) before any DB lookup.
 - The `.jivahire/` directory in challenge repos (rubric, traps, hidden tests) must be stripped before creating the candidate branch — verify this in branch-creation logic.
 - GitHub tokens are short-lived installation tokens (~1 hour); never store long-lived PATs.

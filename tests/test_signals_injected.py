@@ -81,49 +81,57 @@ def test_gather_signals_counts_correction_loops_from_chat_log():
     assert signals["correction_loops"] == 2
 
 
-def test_read_chat_log_falls_back_to_chat_exchanges_when_branch_file_missing(tmp_path):
-    """Regression: RAH-141 had two chat_exchanges rows but the candidate's
-    branch was missing .jivahire_chat_log.json, so the grader saw zero prompts
-    and floored the score. The DB copy must be the fallback."""
-    sid = "sig-fallback"
+def test_chat_log_from_db_returns_prompts_in_ts_order(tmp_path):
+    """chat_exchanges is the sole source for the LLM Communication evaluator
+    since the on-branch JSON file was retired. Two prompts in must produce two
+    chat entries out, in timestamp order, with sequence 1/2."""
+    sid = "sig-chat-log"
     _seed_session(sid)
-    execute(
-        "INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, "
-        "completion_tokens, cost_usd, prompt_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (sid, 1000, "claude-sonnet-4.6", 100, 50, 0.01, "fix lru_cache.hpp"),
-    )
     execute(
         "INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, "
         "completion_tokens, cost_usd, prompt_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (sid, 2000, "claude-sonnet-4.6", 200, 80, 0.02, "what hidden tests might exist?"),
     )
+    execute(
+        "INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, "
+        "completion_tokens, cost_usd, prompt_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sid, 1000, "claude-sonnet-4.6", 100, 50, 0.01, "fix lru_cache.hpp"),
+    )
 
-    chat = llm_eval._read_chat_log(tmp_path, sid)
+    chat = llm_eval._chat_log_from_db(sid)
 
     assert len(chat) == 2
-    assert chat[0]["prompt_text"] == "fix lru_cache.hpp"
-    assert chat[1]["prompt_text"] == "what hidden tests might exist?"
-    assert chat[0]["sequence"] == 1 and chat[1]["sequence"] == 2
-    assert chat[0]["event_type"] == "chat"
+    assert [c["prompt_text"] for c in chat] == [
+        "fix lru_cache.hpp", "what hidden tests might exist?",
+    ]
+    assert [c["sequence"] for c in chat] == [1, 2]
+    assert all(c["event_type"] == "chat" for c in chat)
 
 
-def test_read_chat_log_prefers_branch_file_when_present(tmp_path):
-    """When both copies exist the branch file wins — it has response_text and
-    non-chat events that the DB can't reproduce."""
-    sid = "sig-prefers-file"
+def test_unified_timeline_merges_chats_and_telemetry_in_ts_order(tmp_path):
+    """The unified timeline (used for "test ran 45s after AI apply" evidence)
+    merges chat_exchanges + telemetry rows by ts, with sequence assigned
+    in chronological order."""
+    sid = "sig-timeline"
     _seed_session(sid)
     execute(
         "INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, "
         "completion_tokens, cost_usd, prompt_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (sid, 1000, "claude-sonnet-4.6", 100, 50, 0.01, "db-only prompt"),
+        (sid, 1500, "claude-sonnet-4.6", 100, 50, 0.01, "fix this"),
     )
-    (tmp_path / ".jivahire_chat_log.json").write_text(json.dumps([
-        {"sequence": 1, "timestamp": 1, "event_type": "chat",
-         "prompt_text": "branch-file prompt", "response_text": "branch-file response"},
-    ]))
+    for ts, evt, payload in [
+        (1000, "file_open", json.dumps({"file": "a.cpp"})),
+        (2000, "edit_ai_applied", json.dumps({"file": "a.cpp", "chars": 32})),
+        (1200, "edit_typed", json.dumps({"file": "a.cpp", "chars": 10})),
+    ]:
+        execute(
+            "INSERT INTO telemetry (session_id, ts, event_type, payload) VALUES (?, ?, ?, ?)",
+            (sid, ts, evt, payload),
+        )
 
-    chat = llm_eval._read_chat_log(tmp_path, sid)
+    timeline = llm_eval._unified_timeline_from_db(sid)
 
-    assert len(chat) == 1
-    assert chat[0]["prompt_text"] == "branch-file prompt"
-    assert chat[0]["response_text"] == "branch-file response"
+    assert [e["event_type"] for e in timeline] == [
+        "file_open", "edit_typed", "chat", "edit_ai_applied",
+    ]
+    assert [e["sequence"] for e in timeline] == [1, 2, 3, 4]

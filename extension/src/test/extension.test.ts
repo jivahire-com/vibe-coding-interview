@@ -55,9 +55,6 @@ beforeEach(() => {
 
   // os.homedir() → predictable path
   mockedOs.homedir.mockReturnValue('/home/testuser');
-  // os.tmpdir() is consumed by ChatLog._atomicWrite. Return a string so
-  // path.join doesn't blow up when the activate flow eagerly constructs a
-  // shared ChatLog for the chat view + telemetry tracker.
   mockedOs.tmpdir.mockReturnValue('/tmp');
 
   // fs.realpathSync → identity (no real symlinks in tests)
@@ -455,7 +452,6 @@ describe('auto-commit failures surface in the chat panel (Bug A)', () => {
     chatMod.ChatViewProvider.mockImplementation(() => ({
       attachTimer: jest.fn(),
       setConfig: jest.fn(),
-      setChatLog: jest.fn(),
       setOfflineState: setOfflineSpy,
       markEnded: jest.fn(),
       focus: jest.fn(),

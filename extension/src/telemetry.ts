@@ -3,7 +3,6 @@ import * as http from "http";
 import * as https from "https";
 import * as path from "path";
 import { SessionConfig } from "./api";
-import { ChatLog } from "./chat/chatlog";
 
 interface TelemetryEvent {
   ts: number;
@@ -55,7 +54,6 @@ export class TelemetryTracker implements vscode.Disposable {
   private _disposables: vscode.Disposable[] = [];
   private _config: SessionConfig;
   private _context: vscode.ExtensionContext;
-  private _chatLog: ChatLog | undefined;
   private _lastUnfocusedAt: number | null = null;
   private _justRefocusedUntil: number = 0;
   private _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
@@ -70,10 +68,9 @@ export class TelemetryTracker implements vscode.Disposable {
   // verification window. Cleared on emit when the entry expires.
   private _recentApplies: Map<string, { blockId: string; until: number }> = new Map();
 
-  constructor(config: SessionConfig, context: vscode.ExtensionContext, chatLog?: ChatLog) {
+  constructor(config: SessionConfig, context: vscode.ExtensionContext) {
     this._config = config;
     this._context = context;
-    this._chatLog = chatLog;
 
     // Restore any buffered events from previous session
     const saved = context.globalState.get<TelemetryEvent[]>(BUFFER_KEY, []);
@@ -134,14 +131,6 @@ export class TelemetryTracker implements vscode.Disposable {
       }
     }
     this._buffer.push({ ts: Date.now(), event_type, payload, id: _nextId() });
-    // Mirror to the on-disk audit log so the grader sees the full timeline
-    // (edits, pastes, AI applies, test runs, debug sessions, focus changes,
-    // auto-commits) alongside chat exchanges in `.jivahire_chat_log.json`.
-    // ChatLog writes are best-effort — a disk error never blocks telemetry.
-    if (this._chatLog) {
-      try { this._chatLog.appendEvent(event_type, payload); }
-      catch { /* swallow */ }
-    }
     if (this._buffer.length >= FLUSH_THRESHOLD) {
       void this._flush();
     }
