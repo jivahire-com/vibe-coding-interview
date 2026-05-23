@@ -4,8 +4,9 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from vibe.db import bootstrap, execute, immediate_transaction, query
 from vibe.jobs import claim_job, complete_job, fail_job
 from vibe.grader import runner
+from vibe.logging_config import configure_logging, log_context
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+configure_logging("worker")
 logger = logging.getLogger(__name__)
 
 sched = BlockingScheduler()
@@ -52,14 +53,15 @@ def drain_grade_queue() -> None:
     job = claim_job()
     if not job:
         return
-    logger.info("grading session %s (job %s, attempt %d)", job["session_id"], job["id"], job["attempts"])
-    try:
-        runner.run(job["session_id"])
-        complete_job(job["id"])
-        logger.info("graded session %s OK", job["session_id"])
-    except Exception as e:
-        fail_job(job["id"], str(e), job["attempts"])
-        logger.error("grading session %s failed: %s", job["session_id"], e)
+    with log_context(session_id=job["session_id"], job_id=str(job["id"])):
+        logger.info("grading session %s (job %s, attempt %d)", job["session_id"], job["id"], job["attempts"])
+        try:
+            runner.run(job["session_id"])
+            complete_job(job["id"])
+            logger.info("graded session %s OK", job["session_id"])
+        except Exception as e:
+            fail_job(job["id"], str(e), job["attempts"])
+            logger.exception("grading session %s failed: %s", job["session_id"], e)
 
 
 if __name__ == "__main__":

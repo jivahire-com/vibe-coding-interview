@@ -12,6 +12,7 @@ services:
     environment:
       DB_PATH: /app/data/vibe.db
       CHALLENGES_DIR: /app/challenges
+      VIBE_LOG_DIR: /app/data/logs
     restart: unless-stopped
 
   worker:
@@ -24,6 +25,7 @@ services:
     environment:
       DB_PATH: /app/data/vibe.db
       CHALLENGES_DIR: /app/challenges
+      VIBE_LOG_DIR: /app/data/logs
     depends_on:
       - backend
     restart: unless-stopped

@@ -111,3 +111,16 @@ CREATE TABLE IF NOT EXISTS video_upload_tokens (
     used_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_video_tokens_session ON video_upload_tokens(session_id);
+
+CREATE TABLE IF NOT EXISTS app_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,             -- epoch millis (matches client clock)
+    source TEXT NOT NULL,            -- 'extension' | 'server' | 'worker' | 'grader'
+    level TEXT NOT NULL,             -- DEBUG / INFO / WARNING / ERROR / CRITICAL
+    logger TEXT,                     -- e.g. 'vibe.http', 'extension.chat'
+    message TEXT NOT NULL,
+    session_id TEXT REFERENCES sessions(id),
+    context TEXT                     -- JSON-encoded extra fields
+);
+CREATE INDEX IF NOT EXISTS idx_app_logs_session_ts ON app_logs(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_app_logs_level_ts ON app_logs(level, ts);
