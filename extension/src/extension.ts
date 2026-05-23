@@ -7,6 +7,7 @@ import { validateSession, SessionConfig } from "./api";
 import { Timer } from "./timer";
 import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
+import { ChatLog } from "./chat/chatlog";
 import { runSubmit, gitCommitAndPushAsync } from "./submit";
 import { TelemetryTracker } from "./telemetry";
 import { AiProposedContentProvider, AiApplyCodeLensProvider, AI_PROPOSED_SCHEME, registerCodeLensProvider, setTelemetryCallback, acceptAiChanges, rejectAiChanges, acceptHunk, rejectHunk, _getSessionForActiveEditor } from "./chat/apply";
@@ -326,6 +327,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   timer.start(savedSession);
+  // Shared audit-trail log: chat exchanges + telemetry events share one
+  // sequence-numbered timeline so the grader sees them in true order.
+  // Injected before setConfig so the lazy fallback inside setConfig is skipped.
+  // Construction is best-effort — a filesystem hiccup must not block activate().
+  let sharedChatLog: ChatLog | undefined;
+  if (currentWs) {
+    try { sharedChatLog = new ChatLog(currentWs); }
+    catch { /* swallow — telemetry just won't mirror to disk this session */ }
+  }
+  if (sharedChatLog) chatProvider.setChatLog(sharedChatLog);
+  // Idempotent: ensures the Explorer exclusion is present even on sessions
+  // that were cloned before the exclusion was wired into _gitClone.
+  if (currentWs) {
+    try { _writeWorkspaceExclude(currentWs); } catch { /* swallow */ }
+  }
   chatProvider.setConfig(savedSession);
   dashboardProvider.setConfig(savedSession);
   // Drives the `when: vibe.session.active` clause on the vibe.chat view in
@@ -336,7 +352,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
   }
   try {
-    _startSessionServices(savedSession, context);
+    _startSessionServices(savedSession, context, sharedChatLog);
   } catch (err: unknown) {
     // Surface the failure instead of silently losing the auto-commit timer
     // and status bar buttons. activate() doesn't catch synchronous throws
@@ -365,6 +381,30 @@ function _gitClone(session: SessionConfig, cloneDir: string): void {
     ["clone", "-b", session.branch, authedUrl, cloneDir],
     { stdio: "pipe", shell: false }
   );
+  _writeWorkspaceExclude(cloneDir);
+}
+
+/**
+ * Merge `.jivahire_chat_log.json` into the workspace's `files.exclude` so it
+ * is invisible in VS Code's Explorer and quick-open. Called once after clone;
+ * safe to call multiple times (idempotent merge).
+ */
+export function _writeWorkspaceExclude(dir: string): void {
+  const vscodePath = path.join(dir, ".vscode");
+  const settingsPath = path.join(vscodePath, "settings.json");
+
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); }
+    catch { /* start fresh if corrupt */ }
+  }
+
+  const exclude = (settings["files.exclude"] as Record<string, boolean> | undefined) ?? {};
+  exclude[".jivahire_chat_log.json"] = true;
+  settings["files.exclude"] = exclude;
+
+  if (!fs.existsSync(vscodePath)) fs.mkdirSync(vscodePath, { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }
 
 /**
@@ -398,7 +438,11 @@ export function _samePath(a: string | undefined, b: string | undefined): boolean
   return na === nb || na.toLowerCase() === nb.toLowerCase();
 }
 
-function _startSessionServices(config: SessionConfig, context: vscode.ExtensionContext): void {
+function _startSessionServices(
+  config: SessionConfig,
+  context: vscode.ExtensionContext,
+  chatLog?: ChatLog,
+): void {
   // Always-visible action buttons. The dashboard webview lives in the activity
   // bar sidebar, so it's hidden whenever the candidate switches to the File
   // Explorer or another activity bar view. Status bar items stay visible
@@ -413,7 +457,7 @@ function _startSessionServices(config: SessionConfig, context: vscode.ExtensionC
   // (Run tests / AI chat / Submit status-bar buttons removed per UX request —
   // the dashboard panel exposes the same actions.)
 
-  const tracker = new TelemetryTracker(config, context);
+  const tracker = new TelemetryTracker(config, context, chatLog);
   context.subscriptions.push(tracker);
 
   // Wire apply.ts telemetry back to the tracker

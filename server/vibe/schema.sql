@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     video_platform TEXT NOT NULL DEFAULT 'google_meet',
     scheduled_at INTEGER,
     panelist_emails TEXT,
+    typed_chars INTEGER NOT NULL DEFAULT 0,
+    pasted_chars INTEGER NOT NULL DEFAULT 0,
+    ai_applied_chars INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(session_key);
@@ -43,7 +46,10 @@ CREATE TABLE IF NOT EXISTS chat_exchanges (
     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
     prompt_text TEXT,
-    prompt_classification TEXT
+    prompt_classification TEXT,
+    prompt_level INTEGER,
+    applied INTEGER NOT NULL DEFAULT 0,
+    correction_of INTEGER REFERENCES chat_exchanges(id)
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session_ts ON chat_exchanges(session_id, ts);
 
@@ -53,10 +59,20 @@ CREATE TABLE IF NOT EXISTS grades (
     tests_total INTEGER,
     traps_detected INTEGER,
     traps_total INTEGER,
-    code_quality_score INTEGER,
-    ai_orchestration_score INTEGER,
-    architectural_reasoning_score INTEGER,
-    prompt_quality_score INTEGER,
+    code_quality_score REAL,
+    code_quality_breakdown TEXT,
+    architectural_reasoning_score REAL,
+    architectural_reasoning_breakdown TEXT,
+    llm_communication_score REAL,
+    llm_communication_breakdown TEXT,
+    verification_discipline_score REAL,
+    verification_discipline_breakdown TEXT,
+    ai_judgment_score REAL,
+    ai_judgment_breakdown TEXT,
+    challenge_specific_score REAL,
+    challenge_specific_breakdown TEXT,
+    trap_attribution TEXT,
+    composite_breakdown TEXT,
     total_score REAL,
     grader_summary TEXT,
     raw_output TEXT,
@@ -86,3 +102,12 @@ CREATE TABLE IF NOT EXISTS grading_errors (
     traceback TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_grading_errors_session ON grading_errors(session_id, ts);
+
+CREATE TABLE IF NOT EXISTS video_upload_tokens (
+    token_hash TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_video_tokens_session ON video_upload_tokens(session_id);

@@ -24,7 +24,10 @@ def submit(session=Depends(get_session)):
     )
     enqueue(session["id"])
     resp: dict = {"status": "submitted", "message": "Grading queued."}
-    if video_feature_enabled():
+    # Skip the post-submit explainer when the session is a live panel interview
+    # (meet_link is set). The panelists have already verified identity in real
+    # time, so the extra recording is redundant.
+    if video_feature_enabled() and not session.get("meet_link"):
         resp["video_upload"] = {
             "deadline_unix": submitted_at + UPLOAD_WINDOW_SECONDS,
             "min_duration_seconds": MIN_DURATION_SECONDS,

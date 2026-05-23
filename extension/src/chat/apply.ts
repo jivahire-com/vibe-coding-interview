@@ -365,14 +365,19 @@ async function _resolveAllPending(blockId: string, status: 'accepted' | 'rejecte
   const session = _inlineSessions.get(blockId);
   if (!session) return;
   let mutated = false;
+  const transitionedHunks: Hunk[] = [];
   for (const h of session.hunks) {
     if (h.status === 'pending') {
       h.status = status;
       mutated = true;
+      transitionedHunks.push(h);
     }
   }
   if (mutated) {
     await _writeSessionState(session);
+    if (status === 'rejected' && transitionedHunks.length > 0) {
+      _emitRejectedTelemetry(session, transitionedHunks);
+    }
   }
   // Always refresh + resolve if everything is done — even if nothing changed,
   // the session may have been left dangling.
@@ -401,12 +406,33 @@ async function _resolveHunk(blockId: string, hunkIndex: number, status: 'accepte
   if (!hunk || hunk.status !== 'pending') return;
   hunk.status = status;
   await _writeSessionState(session);
+  if (status === 'rejected') _emitRejectedTelemetry(session, [hunk]);
   _refreshDecorations(session);
   _codeLensProvider?.refresh();
   _refreshStatusBarItems();
   if (session.hunks.every((h) => h.status !== 'pending')) {
     session._resolve();
   }
+}
+
+/**
+ * Emit one `edit_ai_rejected` event per apply-session whenever the candidate
+ * declines AI-proposed hunks. The grader uses this as the strongest signal for
+ * the AI Judgment & Rejection dimension — telemetry-only, ungameable.
+ *
+ * `chars` is the byte length the AI proposed to add in the rejected hunks
+ * (joined with `\n`). Matches the convention used by `edit_ai_applied` so the
+ * server's per-session counters can sum both event types uniformly.
+ */
+function _emitRejectedTelemetry(session: InlineSession, hunks: Hunk[]): void {
+  if (!_telemetryCallback || hunks.length === 0) return;
+  const chars = hunks.reduce((sum, h) => sum + h.newLines.join('\n').length, 0);
+  _telemetryCallback("edit_ai_rejected", {
+    file: session.relativePath,
+    block_id: session.id,
+    chars,
+    hunks: hunks.length,
+  });
 }
 
 /** @internal */

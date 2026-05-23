@@ -1,6 +1,12 @@
 import * as vscode from "vscode";
 import * as crypto from "crypto";
-import { SessionConfig, videoComplete, videoInit, VideoInitResponse } from "../api";
+import {
+  SessionConfig,
+  videoBrowserLink,
+  videoComplete,
+  videoInit,
+  VideoInitResponse,
+} from "../api";
 
 const PANEL_ID = "jivahireVideoRecorder";
 const PANEL_TITLE = "Record Solution Explainer";
@@ -57,12 +63,60 @@ export function openVideoRecorder(config: SessionConfig): void {
         });
       }
     } else if (msg.type === "no-camera") {
-      vscode.window.showWarningMessage(
-        "Camera or microphone unavailable in this environment. The solution explainer is optional — your code submission has already been received.",
-        "Dismiss",
+      void offerBrowserFallback(
+        config,
+        "Camera or microphone unavailable in this environment. Your code submission has already been received — you can record the explainer from another device instead.",
+      );
+    } else if (msg.type === "request-browser-link") {
+      void offerBrowserFallback(
+        config,
+        "We'll open the recorder in your default browser. You can also copy the link and open it on a phone.",
       );
     }
   });
+}
+
+/**
+ * Mint a one-time recording URL and offer the candidate three ways to use it:
+ *   1. Open it now in the default browser.
+ *   2. Copy it to clipboard (so they can text/email it to their phone).
+ *
+ * The link is bound to the candidate's session and expires after ~15 minutes
+ * or when the 10-minute post-submit upload window closes, whichever is sooner.
+ */
+async function offerBrowserFallback(
+  config: SessionConfig,
+  preamble: string,
+): Promise<void> {
+  let link: { url: string; expires_unix: number };
+  try {
+    link = await videoBrowserLink(config);
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const m = raw.match(/HTTP\s+(\d{3})/i);
+    const status = m ? parseInt(m[1], 10) : 0;
+    let msg = "Could not create a browser recording link. Contact your recruiter.";
+    if (status === 410) msg = "The 10-minute upload window has closed.";
+    else if (status === 409) msg = "A video has already been uploaded for this session.";
+    else if (status === 503) msg = "Video upload is not configured on this server.";
+    vscode.window.showWarningMessage(msg, "Dismiss");
+    return;
+  }
+
+  const choice = await vscode.window.showInformationMessage(
+    preamble,
+    { modal: false },
+    "Open in browser",
+    "Copy link",
+  );
+  if (choice === "Open in browser") {
+    void vscode.env.openExternal(vscode.Uri.parse(link.url));
+  } else if (choice === "Copy link") {
+    await vscode.env.clipboard.writeText(link.url);
+    vscode.window.showInformationMessage(
+      "Recording link copied. Open it on a phone or another browser to record.",
+    );
+  }
 }
 
 function friendlyInitError(err: unknown): string {
@@ -80,6 +134,7 @@ function friendlyInitError(err: unknown): string {
 type VideoWebviewMessage =
   | { type: "init" }
   | { type: "no-camera" }
+  | { type: "request-browser-link" }
   | { type: "complete"; s3_key: string; duration_seconds: number };
 
 function renderHtml(cspSource: string, nonce: string): string {
@@ -143,6 +198,13 @@ function renderHtml(cspSource: string, nonce: string): string {
 
   <div class="progress" id="progress"><div></div></div>
   <div class="status" id="status">Requesting camera access…</div>
+
+  <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border, #444);">
+    <button id="browser-link" class="secondary">Record from another device</button>
+    <span style="margin-left: 8px; font-size: 12px; color: var(--vscode-descriptionForeground);">
+      Opens a short-lived link in your browser — useful if this machine has no camera.
+    </span>
+  </div>
 
 <script nonce="${nonce}">
 (function() {
@@ -240,6 +302,10 @@ function renderHtml(cspSource: string, nonce: string): string {
 
   stopBtn.addEventListener('click', () => {
     if (recorder && recorder.state === 'recording') recorder.stop();
+  });
+
+  $('browser-link').addEventListener('click', () => {
+    vscode.postMessage({ type: 'request-browser-link' });
   });
 
   function pickMime() {

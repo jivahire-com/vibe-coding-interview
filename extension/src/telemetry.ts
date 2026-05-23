@@ -3,6 +3,7 @@ import * as http from "http";
 import * as https from "https";
 import * as path from "path";
 import { SessionConfig } from "./api";
+import { ChatLog } from "./chat/chatlog";
 
 interface TelemetryEvent {
   ts: number;
@@ -19,6 +20,11 @@ const FLUSH_THRESHOLD = 500;
 export const MAX_BUFFERED_EVENTS = 5000;
 export const TELEMETRY_POST_TIMEOUT_MS = 15_000;
 const CONSECUTIVE_FAIL_WARN_THRESHOLD = 3;
+// Rubric Verification-Discipline window: edits a candidate makes to a file
+// within 90s of an AI apply count as "review" of that apply. Carrying the
+// originating block_id on each follow-up edit lets the grader compute the
+// apply-then-edit rate and semantic edit distance without re-running diffs.
+const POST_APPLY_WINDOW_MS = 90_000;
 
 let _idCounter = 0;
 function _nextId(): string {
@@ -49,6 +55,7 @@ export class TelemetryTracker implements vscode.Disposable {
   private _disposables: vscode.Disposable[] = [];
   private _config: SessionConfig;
   private _context: vscode.ExtensionContext;
+  private _chatLog: ChatLog | undefined;
   private _lastUnfocusedAt: number | null = null;
   private _justRefocusedUntil: number = 0;
   private _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
@@ -58,10 +65,15 @@ export class TelemetryTracker implements vscode.Disposable {
   private _openedFiles: Set<string> = new Set();
   private _consecutiveFailures = 0;
   private _networkWarningShown = false;
+  // file → { block_id, until } for the most recent AI apply per file. Drives
+  // post_apply_of attachment on subsequent typed/pasted edits within the 90s
+  // verification window. Cleared on emit when the entry expires.
+  private _recentApplies: Map<string, { blockId: string; until: number }> = new Map();
 
-  constructor(config: SessionConfig, context: vscode.ExtensionContext) {
+  constructor(config: SessionConfig, context: vscode.ExtensionContext, chatLog?: ChatLog) {
     this._config = config;
     this._context = context;
+    this._chatLog = chatLog;
 
     // Restore any buffered events from previous session
     const saved = context.globalState.get<TelemetryEvent[]>(BUFFER_KEY, []);
@@ -112,10 +124,41 @@ export class TelemetryTracker implements vscode.Disposable {
   }
 
   emit(event_type: string, payload: Record<string, unknown>): void {
+    // Remember the most recent AI apply per file so subsequent typed/pasted
+    // edits inside the 90s window can be attributed to it.
+    if (event_type === "edit_ai_applied" || event_type === "edit_ai_rejected") {
+      const file = typeof payload.file === "string" ? payload.file : undefined;
+      const blockId = typeof payload.block_id === "string" ? payload.block_id : undefined;
+      if (event_type === "edit_ai_applied" && file && blockId) {
+        this._recentApplies.set(file, { blockId, until: Date.now() + POST_APPLY_WINDOW_MS });
+      }
+    }
     this._buffer.push({ ts: Date.now(), event_type, payload, id: _nextId() });
+    // Mirror to the on-disk audit log so the grader sees the full timeline
+    // (edits, pastes, AI applies, test runs, debug sessions, focus changes,
+    // auto-commits) alongside chat exchanges in `.jivahire_chat_log.json`.
+    // ChatLog writes are best-effort — a disk error never blocks telemetry.
+    if (this._chatLog) {
+      try { this._chatLog.appendEvent(event_type, payload); }
+      catch { /* swallow */ }
+    }
     if (this._buffer.length >= FLUSH_THRESHOLD) {
       void this._flush();
     }
+  }
+
+  /**
+   * Returns the `block_id` of the most recent AI apply to `file` if still
+   * inside the 90s window, else undefined. Expired entries are removed lazily.
+   */
+  private _recentApplyFor(file: string): string | undefined {
+    const entry = this._recentApplies.get(file);
+    if (!entry) return undefined;
+    if (Date.now() > entry.until) {
+      this._recentApplies.delete(file);
+      return undefined;
+    }
+    return entry.blockId;
   }
 
   private _onActiveEditor(editor: vscode.TextEditor | undefined): void {
@@ -182,7 +225,10 @@ export class TelemetryTracker implements vscode.Disposable {
 
       if (isPaste) {
         const suspicious_paste = Date.now() < this._justRefocusedUntil;
-        this.emit("edit_pasted", { file: rel, chars: change.text.length, suspicious_paste });
+        const payload: Record<string, unknown> = { file: rel, chars: change.text.length, suspicious_paste };
+        const postApplyOf = this._recentApplyFor(rel);
+        if (postApplyOf) payload.post_apply_of = postApplyOf;
+        this.emit("edit_pasted", payload);
       } else if (change.text.length > 0) {
         this._aggregateTyped(rel, change.text.length);
       }
@@ -197,7 +243,13 @@ export class TelemetryTracker implements vscode.Disposable {
       const timer = setTimeout(() => {
         const agg = this._typedAgg.get(file);
         if (agg) {
-          this.emit("edit_typed", { file, chars: agg.chars });
+          const payload: Record<string, unknown> = { file, chars: agg.chars };
+          // Check the apply window at flush time, not insert time — gives the
+          // candidate the full 90s post-apply window even if they paused
+          // mid-aggregation.
+          const postApplyOf = this._recentApplyFor(file);
+          if (postApplyOf) payload.post_apply_of = postApplyOf;
+          this.emit("edit_typed", payload);
           this._typedAgg.delete(file);
         }
       }, 1000);

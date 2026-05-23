@@ -201,6 +201,23 @@ export async function videoComplete(
   );
 }
 
+export interface BrowserLinkResponse {
+  url: string;
+  expires_unix: number;
+}
+
+/** Mint a short-lived browser-recording URL the candidate can open in any
+ *  browser (incl. on a phone) when VS Code's webview has no camera. */
+export async function videoBrowserLink(
+  config: SessionConfig
+): Promise<BrowserLinkResponse> {
+  return (await post(
+    `${config.llmProxyUrl}/api/v1/video/browser-link`,
+    "{}",
+    config.sessionKey
+  )) as BrowserLinkResponse;
+}
+
 function post(url: string, body: string, bearerToken?: string): Promise<any> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);

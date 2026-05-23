@@ -1,0 +1,55 @@
+{
+  "$schema_version": "1.0",
+  "_comment": "Pinned config for all LLM grader evaluations. Weights match GRADING_RUBRICS.md; re-graded sessions must use the same model_version + weights to be comparable.",
+
+  "model": {
+    "name": "openai/gpt-4o-mini",
+    "version": "2024-07-18",
+    "temperature": 0,
+    "self_consistency_n": 3,
+    "max_tokens": 1200
+  },
+
+  "code_quality": {
+    "weight_in_composite": 0.15,
+    "criteria": {
+      "correctness":      {"weight": 0.30, "description": "Passes hidden tests, fixes planted traps"},
+      "idiomatic":        {"weight": 0.20, "description": "Proper language conventions, standard library use"},
+      "clarity":          {"weight": 0.15, "description": "Readable structure, well-named identifiers"},
+      "edge_cases":       {"weight": 0.15, "description": "Robust failure modes, boundary conditions"},
+      "no_ai_defects":    {"weight": 0.20, "description": "No new races, security holes, hallucinated APIs, or unnecessary abstractions from AI"}
+    }
+  },
+
+  "llm_communication": {
+    "weight_in_composite": 0.17,
+    "criteria": {
+      "context_framing":     {"weight": 0.25, "description": "Provides file contents, errors, constraints upfront"},
+      "constraint_spec":     {"weight": 0.15, "description": "Explicit requirements (O(1), thread-safe, no allocations)"},
+      "decomposition":       {"weight": 0.20, "description": "Breaks complex tasks into 2-3 focused prompts"},
+      "iterative_refinement":{"weight": 0.15, "description": "Specific feedback on wrong output ('line 12 has a race because...')"},
+      "debug_loop":          {"weight": 0.15, "description": "After test failure, includes failing assertion + relevant snippet"},
+      "token_discipline":    {"weight": 0.10, "description": "Tokens proportionate to problem (0.5-2x baseline)"}
+    },
+    "prompt_classification_ladder": {
+      "5": "Model-native: minimal-but-sufficient context, structured prompts, 1-2 tries",
+      "4": "Professional: cites exact errors, types, line numbers; 2-3 iterations max",
+      "3": "Competent: clear problems, some context, occasional back-and-forth",
+      "2": "Naive: generic descriptions, over-relies on model to figure out intent",
+      "1": "Counterproductive: massive dumps, 'fix this', no context"
+    }
+  },
+
+  "architectural_reasoning": {
+    "weight_in_composite": 0.10,
+    "criteria": {
+      "why_before_how":      {"weight": 0.15, "description": "Asks 'what are the tradeoffs of X vs Y' before 'implement Z'"},
+      "algorithm_choice":    {"weight": 0.15, "description": "Only credited if candidate selected the algorithm (not starter)"},
+      "data_structure_choice":{"weight": 0.15, "description": "Only credited if candidate selected the structure (not starter)"},
+      "concurrency_design":  {"weight": 0.25, "description": "Lock placement, primitive choice, deadlock avoidance"},
+      "edge_case_awareness": {"weight": 0.15, "description": "Boundary handling, capacity constraints, unexpected inputs"},
+      "constraint_driven":   {"weight": 0.10, "description": "Solution respects stated constraints because candidate specified them"},
+      "not_over_engineered": {"weight": 0.05, "description": "Didn't add AI-suggested abstractions the problem doesn't need"}
+    }
+  }
+}

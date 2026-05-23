@@ -7,7 +7,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { ChatLog, ChatEntry } from '../chat/chatlog';
 
-function makeEntry(): Omit<ChatEntry, 'sequence'> {
+function makeEntry(): Omit<ChatEntry, 'sequence' | 'event_type'> {
   return {
     timestamp: Date.now(),
     prompt_text: 'What is an LRU cache?',
@@ -114,7 +114,8 @@ describe('ChatLog', () => {
   test('handles corrupt log file on append without throwing', () => {
     const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
     const log = new ChatLog(tmpDir);
-    // Corrupt the file after construction
+    // Simulate filesystem corruption: lift read-only, corrupt, then restore.
+    fs.chmodSync(logPath, 0o644);
     fs.writeFileSync(logPath, 'corrupted', 'utf8');
     expect(() => log.append(makeEntry())).not.toThrow();
   });
@@ -213,6 +214,56 @@ describe('ChatLog', () => {
     expect(final).toHaveLength(5);
     // Sequence numbers are contiguous because each new instance resumes from max(seq).
     expect(final.map((e: { sequence: number }) => e.sequence)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('chat entries are tagged with event_type: "chat"', () => {
+    const log = new ChatLog(tmpDir);
+    log.append(makeEntry());
+    const entries = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, '.jivahire_chat_log.json'), 'utf8'),
+    );
+    expect(entries[0].event_type).toBe('chat');
+  });
+
+  test('appendEvent() writes a non-chat event with the given type + payload', () => {
+    const log = new ChatLog(tmpDir);
+    log.appendEvent('edit_typed', { file: 'src/main.cpp', chars: 42 });
+    const entries = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, '.jivahire_chat_log.json'), 'utf8'),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].sequence).toBe(1);
+    expect(entries[0].event_type).toBe('edit_typed');
+    expect(entries[0].payload).toEqual({ file: 'src/main.cpp', chars: 42 });
+    expect(typeof entries[0].timestamp).toBe('number');
+  });
+
+  test('chat appends and event appends share one sequence counter', () => {
+    const log = new ChatLog(tmpDir);
+    log.append(makeEntry());                                  // seq 1
+    log.appendEvent('edit_typed', { file: 'a', chars: 1 });   // seq 2
+    log.append(makeEntry());                                  // seq 3
+    log.appendEvent('edit_pasted', { file: 'a', chars: 9 });  // seq 4
+    const entries = JSON.parse(
+      fs.readFileSync(path.join(tmpDir, '.jivahire_chat_log.json'), 'utf8'),
+    );
+    expect(entries.map((e: { sequence: number; event_type: string }) =>
+      [e.sequence, e.event_type])
+    ).toEqual([
+      [1, 'chat'],
+      [2, 'edit_typed'],
+      [3, 'chat'],
+      [4, 'edit_pasted'],
+    ]);
+  });
+
+  test('chat log file is written read-only (candidate cannot edit)', () => {
+    const logPath = path.join(tmpDir, '.jivahire_chat_log.json');
+    const log = new ChatLog(tmpDir);
+    log.append(makeEntry());
+    const mode = fs.statSync(logPath).mode & 0o777;
+    // Owner has no write bit; world and group have no write bit.
+    expect(mode & 0o222).toBe(0);
   });
 
   test('Review-Bug 5: a peeked-at workspace mid-write never sees a .tmp sibling (smoke test)', () => {

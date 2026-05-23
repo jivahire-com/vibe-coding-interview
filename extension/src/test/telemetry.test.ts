@@ -150,6 +150,60 @@ describe('TelemetryTracker', () => {
     expect(emitSpy).toHaveBeenCalledWith('edit_pasted', expect.objectContaining({ chars: 50 }));
   });
 
+  test('typed edits within 90s of edit_ai_applied carry post_apply_of=<block_id>', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    // Record an AI apply via the public emit() path so the tracker's recent-
+    // applies map gets populated the same way apply.ts does in prod. File
+    // path must match the one `fireDocChange` will simulate edits on.
+    tracker.emit('edit_ai_applied', { file: 'src/main.cpp', block_id: 'blk-7', chars: 100 });
+    emitSpy.mockClear();
+
+    fireDocChange([{ text: 'extra', rangeLength: 0 }]);
+    jest.advanceTimersByTime(1001);
+    expect(emitSpy).toHaveBeenCalledWith(
+      'edit_typed',
+      expect.objectContaining({ chars: 5, post_apply_of: 'blk-7' }),
+    );
+  });
+
+  test('paste within 90s of edit_ai_applied carries post_apply_of=<block_id>', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    tracker.emit('edit_ai_applied', { file: 'src/main.cpp', block_id: 'blk-8', chars: 200 });
+    emitSpy.mockClear();
+
+    fireDocChange([{ text: 'x'.repeat(40), rangeLength: 0 }]);
+    expect(emitSpy).toHaveBeenCalledWith(
+      'edit_pasted',
+      expect.objectContaining({ chars: 40, post_apply_of: 'blk-8' }),
+    );
+  });
+
+  test('edits past the 90s window do NOT carry post_apply_of', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    tracker.emit('edit_ai_applied', { file: 'src/main.cpp', block_id: 'blk-9', chars: 50 });
+    emitSpy.mockClear();
+
+    jest.advanceTimersByTime(90_001);
+    fireDocChange([{ text: 'late', rangeLength: 0 }]);
+    jest.advanceTimersByTime(1001);
+    const typedCall = emitSpy.mock.calls.find((c) => c[0] === 'edit_typed');
+    expect(typedCall).toBeDefined();
+    expect((typedCall![1] as Record<string, unknown>).post_apply_of).toBeUndefined();
+  });
+
+  test('edits in a different file do NOT inherit post_apply_of from another file', () => {
+    const emitSpy = jest.spyOn(tracker, 'emit');
+    // Apply landed in src/main.cpp; the next edit is to src/other.cpp.
+    tracker.emit('edit_ai_applied', { file: 'src/main.cpp', block_id: 'blk-10', chars: 50 });
+    emitSpy.mockClear();
+
+    fireDocChange([{ text: 'hi', rangeLength: 0 }], 'src/other.cpp');
+    jest.advanceTimersByTime(1001);
+    const typedCall = emitSpy.mock.calls.find((c) => c[0] === 'edit_typed');
+    expect(typedCall).toBeDefined();
+    expect((typedCall![1] as Record<string, unknown>).post_apply_of).toBeUndefined();
+  });
+
   test('changes outside the workspace are ignored', () => {
     const emitSpy = jest.spyOn(tracker, 'emit');
     const cb = getDocChangeCb()!;

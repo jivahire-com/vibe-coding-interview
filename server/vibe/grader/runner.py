@@ -1,22 +1,56 @@
+"""
+Grading runner — orchestrates the full pipeline for a submitted session.
+
+Pipeline (per GRADING_RUBRICS.md):
+  1. clone the candidate's branch
+  2. build + run the hidden test suite (per-tag pass/fail)
+  3. trap detection (`traps.evaluate_traps`)
+  4. trap attribution (hand-fixed / ai-fixed-reviewed / ai-fixed-blind)
+  5. LLM-graded dimensions (Code Quality, LLM Communication, Arch Reasoning)
+  6. Telemetry-derived dimensions (Verification Discipline, AI Judgment)
+  7. Challenge-specific bonus
+  8. Composite weighted sum across the 8 dimensions
+
+The composite weights below come straight from GRADING_RUBRICS.md and must sum
+to 1.0; deviations indicate a config drift and should be caught immediately.
+"""
+
+from __future__ import annotations
+
 import json
 import shutil
 import time
 import traceback as tb_module
 from pathlib import Path
+from typing import Any
 
 from openai import OpenAI
 
 from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
-from vibe.grader import cpp_runner, python_runner, typescript_runner, llm_eval, traps as traps_module
-from vibe.grader import developer_signals
+from vibe.grader import (
+    ai_judgment,
+    challenge_specific,
+    cpp_runner,
+    developer_signals,
+    llm_eval,
+    python_runner,
+    trap_attribution,
+    traps as traps_module,
+    typescript_runner,
+    verification_discipline,
+)
 from vibe.grader.git_ops import clone_branch
 
 _STAGE_MESSAGES = {
     "clone": "We could not access your submission repository. Please contact support.",
     "build": "We could not build your submission. Please contact support.",
     "traps": "An error occurred during trap evaluation. Please contact support.",
+    "attribution": "Trap attribution could not be computed; grade unaffected.",
     "llm_eval": "AI grading is temporarily unavailable. Please contact support.",
+    "verification_discipline": "Verification-discipline scoring failed; grade unaffected.",
+    "ai_judgment": "AI-judgment scoring failed; grade unaffected.",
+    "challenge_specific": "Challenge-specific bonus failed; grade unaffected.",
     "developer_confidence": "Developer-signal computation failed; grade is unaffected.",
 }
 
@@ -25,6 +59,20 @@ _GRADER_BACKENDS = {
     "python": python_runner,
     "typescript": typescript_runner,
 }
+
+# Per GRADING_RUBRICS.md. Must sum to 1.0.
+COMPOSITE_WEIGHTS = {
+    "tests":                   0.20,
+    "traps":                   0.12,
+    "verification_discipline": 0.13,
+    "ai_judgment":             0.08,
+    "llm_communication":       0.17,
+    "code_quality":            0.15,
+    "architectural_reasoning": 0.10,
+    "challenge_specific":      0.05,
+}
+
+_FALLBACK = 5.0
 
 
 def _load_challenge_config(challenge_dir: Path) -> tuple[dict, dict, list[str]]:
@@ -55,6 +103,7 @@ def run(session_id: str) -> None:
         shutil.rmtree(clone_dir)
 
     try:
+        # ── 1. Clone ───────────────────────────────────────────────────────
         try:
             clone_branch(repo_for_challenge(session["challenge_id"]), session["branch_name"], clone_dir)
         except Exception:
@@ -64,6 +113,7 @@ def run(session_id: str) -> None:
 
         challenge_dir = Path(settings.challenges_dir) / session["challenge_id"]
 
+        # ── 2. Build + run hidden tests ───────────────────────────────────
         try:
             metadata, rubric, tags = _load_challenge_config(challenge_dir)
             hidden_test = challenge_dir / metadata["hidden_test_file"]
@@ -71,37 +121,73 @@ def run(session_id: str) -> None:
             tag_results, raw_output = backend.build_and_test(clone_dir, hidden_test, tags)
         except Exception:
             _record_error(session_id, "build")
-            tag_results, raw_output = {}, ""
-            rubric = {}
-        weights = rubric.get("composite_weights", {})
+            tag_results, raw_output, rubric = {}, "", {}
 
+        # ── 3. Trap detection ─────────────────────────────────────────────
         try:
-            traps_detected, traps_total, detected_traps, missed_traps, traps_detected_w, traps_total_w = traps_module.evaluate_traps(challenge_dir, tag_results)
+            traps_detected, traps_total, detected_traps, missed_traps, traps_detected_w, traps_total_w = \
+                traps_module.evaluate_traps(challenge_dir, tag_results)
         except Exception:
             _record_error(session_id, "traps")
-            traps_detected, traps_total, detected_traps, missed_traps, traps_detected_w, traps_total_w = 0, 0, [], [], 0, 0
+            traps_detected, traps_total, detected_traps, missed_traps, traps_detected_w, traps_total_w = \
+                0, 0, [], [], 0, 0
 
+        # ── 4. Trap attribution ───────────────────────────────────────────
         try:
-            llm_scores = llm_eval.evaluate(session_id, session["challenge_id"], tag_results, clone_dir, detected_traps, missed_traps)
+            attribution = trap_attribution.classify(session_id, detected_traps)
+        except Exception:
+            _record_error(session_id, "attribution")
+            attribution = {"attributions": {}, "session_signals": {}}
+
+        # ── 5. LLM-graded dimensions ──────────────────────────────────────
+        try:
+            llm_dims = llm_eval.evaluate(
+                session_id, session["challenge_id"], tag_results, clone_dir,
+                detected_traps, missed_traps,
+            )
         except Exception:
             _record_error(session_id, "llm_eval")
-            llm_scores = {
-                "code_quality_score": _FALLBACK,
-                "ai_orchestration_score": _FALLBACK,
-                "architectural_reasoning_score": _FALLBACK,
-                "prompt_quality_score": _FALLBACK,
-                "summary": "AI grading failed — partial results only.",
-            }
+            llm_dims = _llm_fallback()
 
+        # ── 6. Telemetry-derived dimensions ───────────────────────────────
+        try:
+            vd = verification_discipline.compute(session_id, session.get("submitted_at"))
+        except Exception:
+            _record_error(session_id, "verification_discipline")
+            vd = {"score": _FALLBACK, "breakdown": {"reason": "computation failed"}}
+
+        try:
+            aj = ai_judgment.compute(session_id, clone_dir, attribution)
+        except Exception:
+            _record_error(session_id, "ai_judgment")
+            aj = {"score": _FALLBACK, "breakdown": {"reason": "computation failed"}}
+
+        # ── 7. Challenge-specific bonus ───────────────────────────────────
+        try:
+            cs = challenge_specific.compute(session["challenge_id"], clone_dir, rubric)
+        except Exception:
+            _record_error(session_id, "challenge_specific")
+            cs = {"score": _FALLBACK, "breakdown": {"reason": "computation failed"}}
+
+        # ── 8. Composite ──────────────────────────────────────────────────
         tags_passed = sum(1 for v in tag_results.values() if v)
         tests_total = len(tag_results)
+        tests_score = (tags_passed / tests_total * 10) if tests_total else 0
+        traps_score = (traps_detected_w / traps_total_w * 10) if traps_total_w else 0
 
-        total_score = _composite_score(
-            tags_passed, tests_total, traps_detected_w, traps_total_w, llm_scores, weights
-        )
+        dim_scores = {
+            "tests": tests_score,
+            "traps": traps_score,
+            "verification_discipline": vd["score"],
+            "ai_judgment": aj["score"],
+            "llm_communication": llm_dims["llm_communication"]["score"],
+            "code_quality": llm_dims["code_quality"]["score"],
+            "architectural_reasoning": llm_dims["architectural_reasoning"]["score"],
+            "challenge_specific": cs["score"],
+        }
+        total_score, composite_breakdown = _composite(dim_scores)
 
-        # Developer-confidence signal — independent of grading. A failure here
-        # must never affect the composite or block the row insert.
+        # Developer-confidence signal — independent of grading, recruiter-only.
         try:
             dev_client = OpenAI(api_key=settings.openai_api_key, base_url=settings.llm_base_url)
             dev_conf = developer_signals.compute_developer_confidence(session_id, dev_client)
@@ -112,24 +198,35 @@ def run(session_id: str) -> None:
         execute(
             "INSERT OR REPLACE INTO grades "
             "(session_id, tests_passed, tests_total, traps_detected, traps_total, "
-            "code_quality_score, ai_orchestration_score, architectural_reasoning_score, "
-            "prompt_quality_score, "
-            "total_score, grader_summary, raw_output, "
-            "developer_confidence_score, developer_confidence_verdict, "
-            "developer_confidence_signals, developer_confidence_reasoning) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " code_quality_score, code_quality_breakdown, "
+            " architectural_reasoning_score, architectural_reasoning_breakdown, "
+            " llm_communication_score, llm_communication_breakdown, "
+            " verification_discipline_score, verification_discipline_breakdown, "
+            " ai_judgment_score, ai_judgment_breakdown, "
+            " challenge_specific_score, challenge_specific_breakdown, "
+            " trap_attribution, composite_breakdown, "
+            " total_score, grader_summary, raw_output, "
+            " developer_confidence_score, developer_confidence_verdict, "
+            " developer_confidence_signals, developer_confidence_reasoning) "
+            "VALUES (?, ?, ?, ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?,  ?, ?, "
+            "        ?, ?,  ?, ?, ?,  ?, ?, ?, ?)",
             (
-                session_id, tags_passed, tests_total,
-                traps_detected, traps_total,
-                llm_scores["code_quality_score"],
-                llm_scores["ai_orchestration_score"],
-                llm_scores["architectural_reasoning_score"],
-                llm_scores["prompt_quality_score"],
+                session_id, tags_passed, tests_total, traps_detected, traps_total,
+                llm_dims["code_quality"]["score"],
+                json.dumps(llm_dims["code_quality"]["breakdown"]),
+                llm_dims["architectural_reasoning"]["score"],
+                json.dumps(llm_dims["architectural_reasoning"]["breakdown"]),
+                llm_dims["llm_communication"]["score"],
+                json.dumps(llm_dims["llm_communication"]["breakdown"]),
+                vd["score"], json.dumps(vd["breakdown"]),
+                aj["score"], json.dumps(aj["breakdown"]),
+                cs["score"], json.dumps(cs["breakdown"]),
+                json.dumps(attribution),
+                json.dumps(composite_breakdown),
                 round(total_score, 2),
-                llm_scores["summary"],
+                llm_dims.get("summary", ""),
                 raw_output[:50_000],
-                dev_conf["score"],
-                dev_conf["verdict"],
+                dev_conf["score"], dev_conf["verdict"],
                 json.dumps(dev_conf["signals"]) if dev_conf["signals"] is not None else None,
                 dev_conf["reasoning"],
             ),
@@ -140,7 +237,33 @@ def run(session_id: str) -> None:
             shutil.rmtree(clone_dir)
 
 
-_FALLBACK = 5
+def _composite(dim_scores: dict[str, float]) -> tuple[float, dict[str, Any]]:
+    """Weighted sum across the 8 rubric dimensions. Returns (score, breakdown)."""
+    if abs(sum(COMPOSITE_WEIGHTS.values()) - 1.0) > 1e-9:
+        raise ValueError("COMPOSITE_WEIGHTS must sum to 1.0")
+    contributions = {}
+    total = 0.0
+    for k, w in COMPOSITE_WEIGHTS.items():
+        s = float(dim_scores.get(k, 0.0))
+        contrib = s * w
+        contributions[k] = {
+            "raw_score": round(s, 2),
+            "weight": w,
+            "weighted_contribution": round(contrib, 3),
+        }
+        total += contrib
+    return total, {"dimensions": contributions, "weights": COMPOSITE_WEIGHTS,
+                   "total": round(total, 2)}
+
+
+def _llm_fallback() -> dict[str, Any]:
+    fb = {"score": _FALLBACK, "breakdown": {"reason": "LLM grading failed — fallback"}}
+    return {
+        "code_quality": fb,
+        "architectural_reasoning": fb,
+        "llm_communication": fb,
+        "summary": "AI grading failed — partial results only.",
+    }
 
 
 def _record_error(session_id: str, stage: str) -> None:
@@ -156,38 +279,3 @@ def _record_error(session_id: str, stage: str) -> None:
             tb_module.format_exc(),
         ),
     )
-
-
-_DEFAULT_WEIGHTS = {
-    "test_score": 0.20,
-    "trap_score": 0.10,
-    "code_quality": 0.24,
-    "ai_orchestration": 0.18,
-    "architectural_reasoning": 0.10,
-    "prompt_quality": 0.18,
-}
-
-
-def _composite_score(
-    tests_passed: int,
-    tests_total: int,
-    traps_detected_w: int,
-    traps_total_w: int,
-    llm_scores: dict,
-    weights: dict,
-) -> float:
-    w = {**_DEFAULT_WEIGHTS, **weights}
-    w.pop("token_efficiency", None)
-    total_w = sum(w.values())
-    if total_w > 0 and abs(total_w - 1.0) > 1e-9:
-        w = {k: v / total_w for k, v in w.items()}
-    test_score = (tests_passed / tests_total * 10) if tests_total else 0
-    trap_score = (traps_detected_w / traps_total_w * 10) if traps_total_w else 0
-    automated = test_score * w["test_score"] + trap_score * w["trap_score"]
-    llm = (
-        llm_scores["code_quality_score"] * w["code_quality"]
-        + llm_scores["ai_orchestration_score"] * w["ai_orchestration"]
-        + llm_scores["architectural_reasoning_score"] * w["architectural_reasoning"]
-        + llm_scores["prompt_quality_score"] * w["prompt_quality"]
-    )
-    return automated + llm

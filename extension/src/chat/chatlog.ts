@@ -5,6 +5,7 @@ import * as path from "path";
 export interface ChatEntry {
   sequence: number;
   timestamp: number;
+  event_type: "chat";
   prompt_text: string;
   response_text: string;
   model_used: string;
@@ -14,6 +15,15 @@ export interface ChatEntry {
   topic_hint: string;
   correction_loop: boolean;
 }
+
+export interface EventEntry {
+  sequence: number;
+  timestamp: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+}
+
+export type LogEntry = ChatEntry | EventEntry;
 
 export class ChatLog {
   private filePath: string;
@@ -39,13 +49,33 @@ export class ChatLog {
     }
   }
 
-  append(entry: Omit<ChatEntry, "sequence">): void {
+  append(entry: Omit<ChatEntry, "sequence" | "event_type">): void {
     try {
       const entries = ChatLog._parseEntries(fs.readFileSync(this.filePath, "utf8"));
-      entries.push({ sequence: ++this.sequence, ...entry });
+      entries.push({ sequence: ++this.sequence, event_type: "chat", ...entry });
       this._atomicWrite(JSON.stringify(entries, null, 2));
     } catch (e) {
       console.warn("[ChatLog] append failed:", e);
+    }
+  }
+
+  /**
+   * Record a non-chat event (file change, edit, paste, test run, etc.) into
+   * the same audit-trail log. Entries share the sequence counter with chat
+   * appends so the grader sees a unified, monotonically ordered timeline.
+   */
+  appendEvent(event_type: string, payload: Record<string, unknown>): void {
+    try {
+      const entries = ChatLog._parseEntries(fs.readFileSync(this.filePath, "utf8"));
+      entries.push({
+        sequence: ++this.sequence,
+        timestamp: Date.now(),
+        event_type,
+        payload,
+      });
+      this._atomicWrite(JSON.stringify(entries, null, 2));
+    } catch (e) {
+      console.warn("[ChatLog] appendEvent failed:", e);
     }
   }
 
@@ -54,12 +84,12 @@ export class ChatLog {
    * the array if valid; throws otherwise. Avoids the `existing.length` bug
    * where a corrupted `{}` would silently become `NaN` sequence numbers.
    */
-  private static _parseEntries(raw: string): ChatEntry[] {
+  private static _parseEntries(raw: string): LogEntry[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
       throw new Error("chat log root is not an array");
     }
-    return parsed as ChatEntry[];
+    return parsed as LogEntry[];
   }
 
   /**
@@ -91,7 +121,11 @@ export class ChatLog {
       const code = (e as NodeJS.ErrnoException)?.code;
       if (code === "EXDEV") {
         try {
+          // Lift read-only before overwriting (set on a previous write), then
+          // restore it after. swallow chmod errors — they're best-effort.
+          try { fs.chmodSync(this.filePath, 0o644); } catch { /* swallow */ }
           fs.writeFileSync(this.filePath, content, "utf8");
+          try { fs.chmodSync(this.filePath, 0o444); } catch { /* swallow */ }
           try { fs.unlinkSync(tmp); } catch { /* swallow */ }
           return;
         } catch (writeErr) {
@@ -102,5 +136,9 @@ export class ChatLog {
       try { fs.unlinkSync(tmp); } catch { /* swallow */ }
       throw e;
     }
+    // Deny writes so the candidate cannot tamper with the chat history.
+    // rename(2) is controlled by directory permissions, not file permissions,
+    // so future atomic writes succeed even with the file marked read-only.
+    try { fs.chmodSync(this.filePath, 0o444); } catch { /* swallow */ }
   }
 }

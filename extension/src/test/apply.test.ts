@@ -415,6 +415,27 @@ describe('inline session lifecycle', () => {
     const edits = revertEdit.getEdits() as Array<{ text: string }>;
     expect(edits[0].text).toBe('// original\n');
   });
+
+  test('rejecting fires edit_ai_rejected telemetry with block_id + chars', async () => {
+    const { applyCodeBlock, setTelemetryCallback } = await import('../chat/apply');
+    const calls: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    setTelemetryCallback((event, payload) => calls.push({ event, payload: payload as Record<string, unknown> }));
+
+    const p = applyCodeBlock('foo.cpp', 'int main() { return 99; }\n', 'blk-reject-tel');
+    await new Promise((r) => setImmediate(r));
+    rejectAiChanges('blk-reject-tel');
+    await p;
+
+    const rejected = calls.filter((c) => c.event === 'edit_ai_rejected');
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].payload.block_id).toBe('blk-reject-tel');
+    expect(rejected[0].payload.file).toBe('foo.cpp');
+    expect(typeof rejected[0].payload.chars).toBe('number');
+    expect((rejected[0].payload.chars as number)).toBeGreaterThan(0);
+
+    // Reset for other tests.
+    setTelemetryCallback(() => {});
+  });
 });
 
 describe('applyCodeBlock surgical multi-block merge (Bug: Apply wipes file)', () => {

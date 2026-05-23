@@ -126,6 +126,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.render();
   }
 
+  /**
+   * Inject the session-scoped ChatLog from extension.ts so chat exchanges
+   * and telemetry events share the same sequence-numbered audit trail.
+   */
+  setChatLog(chatLog: ChatLog): void {
+    this.chatLog = chatLog;
+  }
+
   setConfig(config: SessionConfig): void {
     this.config = config;
     this.selectedModel = config.availableChatModels[0] ?? config.chatModel;

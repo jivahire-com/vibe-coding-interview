@@ -10,7 +10,7 @@ from vibe.submit import router as submit_router
 from vibe.llm_proxy import router as llm_router, backfill_candidate_tokens
 from vibe.challenges_page import router as challenges_page_router
 from vibe.author_docs import router as author_docs_router
-from vibe.video import router as video_router
+from vibe.video import router as video_router, public_router as video_public_router
 
 
 @asynccontextmanager
@@ -28,6 +28,8 @@ app.include_router(llm_router)
 app.include_router(challenges_page_router)
 app.include_router(author_docs_router)
 app.include_router(video_router)
+# Must be registered before the static `/` mount so /video-record reaches it.
+app.include_router(video_public_router)
 
 from fastapi.responses import FileResponse
 
