@@ -1,3 +1,4 @@
+import logging
 import time
 from fastapi import APIRouter, Depends, HTTPException
 from vibe.auth import get_session
@@ -11,11 +12,13 @@ from vibe.video import (
 )
 
 router = APIRouter(prefix="/api/v1")
+log = logging.getLogger("vibe.submit")
 
 
 @router.post("/submit", status_code=202)
 def submit(session=Depends(get_session)):
     if session["status"] not in ("active",):
+        log.warning("submit_wrong_status", extra={"context": {"status": session["status"]}})
         raise HTTPException(409, f"Session is {session['status']}")
     submitted_at = int(time.time())
     execute(
@@ -23,6 +26,7 @@ def submit(session=Depends(get_session)):
         (submitted_at, session["id"]),
     )
     enqueue(session["id"])
+    log.info("submit_received", extra={"context": {"challenge_id": session.get("challenge_id")}})
     resp: dict = {"status": "submitted", "message": "Grading queued."}
     # Skip the post-submit explainer when the session is a live panel interview
     # (meet_link is set). The panelists have already verified identity in real

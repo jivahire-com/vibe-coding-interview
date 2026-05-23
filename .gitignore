@@ -12,3 +12,4 @@ node_modules/
 extension/dist/
 *.vsix
 /tmp/grade-*/
+logs/

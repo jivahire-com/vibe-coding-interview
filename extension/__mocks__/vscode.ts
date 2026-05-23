@@ -106,6 +106,23 @@ export const window = {
 
   registerWebviewViewProvider: jest.fn().mockReturnValue({ dispose: jest.fn() }),
 
+  /**
+   * Output channel mock. Each created channel keeps every line in `_lines`
+   * so a test can assert on what was logged.
+   */
+  createOutputChannel: jest.fn().mockImplementation((_name: string) => {
+    const _lines: string[] = [];
+    return {
+      _lines,
+      appendLine: jest.fn().mockImplementation((s: string) => { _lines.push(s); }),
+      append: jest.fn().mockImplementation((s: string) => { _lines.push(s); }),
+      clear: jest.fn().mockImplementation(() => { _lines.length = 0; }),
+      show: jest.fn(),
+      hide: jest.fn(),
+      dispose: jest.fn(),
+    };
+  }),
+
   /** Stores the last registered callback so tests can fire window-state events. */
   _windowStateCallback: null as ((s: { focused: boolean }) => void) | null,
   onDidChangeWindowState: jest.fn().mockImplementation(

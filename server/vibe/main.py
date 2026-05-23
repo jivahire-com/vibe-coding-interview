@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from vibe.db import bootstrap
+from vibe.logging_config import configure_logging, request_id_middleware
 from vibe.sessions import router as sessions_router
 from vibe.telemetry import router as telemetry_router
 from vibe.submit import router as submit_router
@@ -11,6 +12,9 @@ from vibe.llm_proxy import router as llm_router, backfill_candidate_tokens
 from vibe.challenges_page import router as challenges_page_router
 from vibe.author_docs import router as author_docs_router
 from vibe.video import router as video_router, public_router as video_public_router
+from vibe.app_logs import router as app_logs_router
+
+configure_logging("server")
 
 
 @asynccontextmanager
@@ -21,6 +25,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Vibe Interview Server", lifespan=lifespan)
+app.middleware("http")(request_id_middleware)
 app.include_router(sessions_router)
 app.include_router(telemetry_router)
 app.include_router(submit_router)
@@ -28,6 +33,7 @@ app.include_router(llm_router)
 app.include_router(challenges_page_router)
 app.include_router(author_docs_router)
 app.include_router(video_router)
+app.include_router(app_logs_router)
 # Must be registered before the static `/` mount so /video-record reaches it.
 app.include_router(video_public_router)
 
