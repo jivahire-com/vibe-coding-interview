@@ -55,6 +55,18 @@ def log_context(**kwargs: str | None) -> Iterator[None]:
             var.reset(tok)
 
 
+def bind_session(session_id: str | None) -> None:
+    """Set session_id on the current task's context without a paired reset.
+
+    FastAPI dependencies run inside the per-request task, and contextvars
+    are copied per-task, so a `set()` here is naturally scoped to the
+    request that triggered the dependency. Use this from `get_session` so
+    every log line inside an authenticated route carries the session_id
+    without callers having to thread it through explicitly.
+    """
+    _session_id.set(session_id)
+
+
 class JsonFormatter(logging.Formatter):
     """One-line JSON per record. Adds contextvars + any `extra={'context': ...}`."""
 

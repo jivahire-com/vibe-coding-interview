@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
 import { SessionConfig, submitSession } from "./api";
+import { getLogger } from "./logger";
 import { openVideoRecorder } from "./video/recorder";
 
 const execFileAsync = promisify(execFile);
@@ -73,10 +74,13 @@ export async function runSubmit(
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "JivaHire: Submitting…" },
     async () => {
+      const log = getLogger();
+      log?.info("submit_started", { challengeId: config.challengeId });
       try {
         const ts = new Date().toISOString();
         gitCommitAndPush(ws, config, `submit: ${ts}`, true);
         const resp = await submitSession(config);
+        log?.info("submit_succeeded", { hasVideoUpload: !!resp.video_upload });
         // Bug fix: advance the IDLE → SUBMITTING → DONE state machine. Without
         // this, the candidate can keep using AI chat budget and resubmit after
         // the server has already marked the session DONE.
@@ -92,6 +96,7 @@ export async function runSubmit(
           try { openVideoRecorder(config); } catch { /* never block submit */ }
         }
       } catch (err: unknown) {
+        log?.errorFromException("submit_failed", err);
         vscode.window.showErrorMessage(_friendlyErrorMessage(err, "submit"));
       }
     }

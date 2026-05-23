@@ -9,6 +9,7 @@ import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
 import { runSubmit, gitCommitAndPushAsync } from "./submit";
 import { TelemetryTracker } from "./telemetry";
+import { Logger, setSharedLogger, getLogger } from "./logger";
 import { AiProposedContentProvider, AiApplyCodeLensProvider, AI_PROPOSED_SCHEME, registerCodeLensProvider, setTelemetryCallback, acceptAiChanges, rejectAiChanges, acceptHunk, rejectHunk, _getSessionForActiveEditor } from "./chat/apply";
 
 const SESSION_KEY = "vibe.session";
@@ -38,6 +39,11 @@ const AUTO_COMMIT_TIMEOUT_MS = 120_000;
 let _stopAutoCommit: (() => void) | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const logger = new Logger(context);
+  setSharedLogger(logger);
+  context.subscriptions.push(logger);
+  logger.info("extension_activated");
+
   // Clear stale server URLs from previous installs so the new default takes effect.
   // Also clear the saved session — its llmProxyUrl came from the old server and is wrong.
   const cachedUrl = context.globalState.get<string>(SERVER_URL_KEY);
@@ -214,7 +220,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Restore session from previous run
   const savedSession = context.globalState.get<SessionConfig>(SESSION_KEY);
-  if (!savedSession) return;
+  if (!savedSession) {
+    logger.info("no_saved_session");
+    return;
+  }
+  logger.setSession(savedSession);
+  logger.info("session_restored", { sessionId: savedSession.sessionId, challengeId: savedSession.challengeId });
 
   const cloneDir = path.join(os.homedir(), `vibe-${savedSession.sessionId.slice(0, 8)}`);
   const cloneDirExists = fs.existsSync(cloneDir);
@@ -507,9 +518,10 @@ function _startSessionServices(
         lastSuccessAt = Date.now();
         if (offlineStatus) offlineStatus.hide();
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (stopped) return;
         consecutiveFailures += 1;
+        getLogger()?.errorFromException("auto_commit_failed", err, { consecutiveFailures });
         if (consecutiveFailures >= 2) {
           if (!offlineStatus) {
             offlineStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -588,6 +600,7 @@ async function promptForSession(
     await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(cloneDir), false);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    getLogger()?.errorFromException("validate_session_failed", err);
     vscode.window.showErrorMessage(`Could not start session: ${message}`);
     dashboardProvider.reportSessionError(message);
   }

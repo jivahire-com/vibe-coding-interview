@@ -61,7 +61,12 @@ export class Logger implements vscode.Disposable {
   private _channel: vscode.OutputChannel;
   private _config: SessionConfig | undefined;
   private _context: vscode.ExtensionContext;
-  private _flushInFlight = false;
+  /** When a flush is in-flight, holds its Promise so concurrent callers can
+   * await the same outcome (instead of bailing early and missing the result).
+   * The TelemetryBuffer's bool flag works for it because nothing awaits the
+   * flush; here we want `await log.flush()` to mean "buffer is drained by
+   * the time this resolves" — for tests and for the dispose path. */
+  private _flushInFlight: Promise<void> | undefined;
   private _consecutiveFailures = 0;
   private _minLevel: LogLevel = "DEBUG";
 
@@ -71,13 +76,13 @@ export class Logger implements vscode.Disposable {
     // Restore offline-buffered records so they survive a crash / reload.
     const saved = context.globalState.get<LogRecord[]>(BUFFER_KEY, []);
     this._buffer = saved.map((r) => (r.id ? r : { ...r, id: _nextId() }));
-    this._flushTimer = setInterval(() => { void this._flush(); }, FLUSH_INTERVAL_MS);
+    this._flushTimer = setInterval(() => { void this.flush(); }, FLUSH_INTERVAL_MS);
   }
 
   /** Attach a session so flushes can authenticate. Drains any buffered logs immediately. */
   setSession(config: SessionConfig): void {
     this._config = config;
-    void this._flush();
+    void this.flush();
   }
 
   clearSession(): void {
@@ -118,54 +123,61 @@ export class Logger implements vscode.Disposable {
     const ctxStr = context ? " " + this._safeJson(context) : "";
     this._channel.appendLine(`[${new Date(record.ts).toISOString()}] ${level} ${message}${ctxStr}`);
     this._buffer.push(record);
-    if (this._buffer.length >= FLUSH_THRESHOLD) void this._flush();
+    if (this._buffer.length >= FLUSH_THRESHOLD) void this.flush();
   }
 
   private _safeJson(obj: unknown): string {
     try { return JSON.stringify(obj); } catch { return "[unserializable]"; }
   }
 
-  private async _flush(): Promise<void> {
-    if (this._flushInFlight) return;
-    if (!this._config) return;             // pre-auth — keep buffering
-    if (this._buffer.length === 0) return;
-    this._flushInFlight = true;
+  /**
+   * Drain the buffer to the server immediately. Normally called by the 10s
+   * interval timer or whenever the buffer crosses FLUSH_THRESHOLD; exposed
+   * publicly so the dispose path (and tests) can force a flush deterministically.
+   * Concurrent callers receive the same in-flight Promise.
+   */
+  flush(): Promise<void> {
+    if (this._flushInFlight) return this._flushInFlight;
+    if (!this._config) return Promise.resolve();    // pre-auth — keep buffering
+    if (this._buffer.length === 0) return Promise.resolve();
+    const p = this._doFlush();
+    this._flushInFlight = p.finally(() => { this._flushInFlight = undefined; });
+    return this._flushInFlight;
+  }
+
+  private async _doFlush(): Promise<void> {
     const batch = this._buffer.splice(0, this._buffer.length);
+    // Persist the now-shorter buffer before the network call so an
+    // extension-host crash mid-POST cannot lose records that were already
+    // moved out of the in-memory buffer (same hazard the TelemetryBuffer
+    // documents at length).
+    await this._context.globalState.update(BUFFER_KEY, this._buffer);
     try {
-      // Persist the now-shorter buffer before the network call so an
-      // extension-host crash mid-POST cannot lose records that were already
-      // moved out of the in-memory buffer (same hazard the TelemetryBuffer
-      // documents at length).
-      await this._context.globalState.update(BUFFER_KEY, this._buffer);
-      try {
-        await this._post(batch);
-        this._consecutiveFailures = 0;
-      } catch {
-        // Restore the batch at the front, dedup against any new records that
-        // were appended during the in-flight POST.
-        const seen = new Set(this._buffer.map((r) => r.id));
-        const restored = batch.filter((r) => !seen.has(r.id));
-        this._buffer = restored.concat(this._buffer);
-        if (this._buffer.length > MAX_BUFFERED_RECORDS) {
-          const dropped = this._buffer.length - MAX_BUFFERED_RECORDS;
-          this._buffer.splice(0, dropped);
-          this._channel.appendLine(
-            `[logger] buffer cap reached (${MAX_BUFFERED_RECORDS}); dropped ${dropped} oldest record(s)`
-          );
-        }
-        await this._context.globalState.update(BUFFER_KEY, this._buffer);
-        this._consecutiveFailures += 1;
-        if (this._consecutiveFailures === CONSECUTIVE_FAIL_WARN_THRESHOLD) {
-          // Surface a single warning in the channel rather than nagging the
-          // candidate with a toast — logs failing is rarely user-actionable
-          // and the telemetry buffer already shows a network warning toast.
-          this._channel.appendLine(
-            `[logger] failed to flush ${this._consecutiveFailures} times in a row — check the server`
-          );
-        }
+      await this._post(batch);
+      this._consecutiveFailures = 0;
+    } catch {
+      // Restore the batch at the front, dedup against any new records that
+      // were appended during the in-flight POST.
+      const seen = new Set(this._buffer.map((r) => r.id));
+      const restored = batch.filter((r) => !seen.has(r.id));
+      this._buffer = restored.concat(this._buffer);
+      if (this._buffer.length > MAX_BUFFERED_RECORDS) {
+        const dropped = this._buffer.length - MAX_BUFFERED_RECORDS;
+        this._buffer.splice(0, dropped);
+        this._channel.appendLine(
+          `[logger] buffer cap reached (${MAX_BUFFERED_RECORDS}); dropped ${dropped} oldest record(s)`
+        );
       }
-    } finally {
-      this._flushInFlight = false;
+      await this._context.globalState.update(BUFFER_KEY, this._buffer);
+      this._consecutiveFailures += 1;
+      if (this._consecutiveFailures === CONSECUTIVE_FAIL_WARN_THRESHOLD) {
+        // Surface a single warning in the channel rather than nagging the
+        // candidate with a toast — logs failing is rarely user-actionable
+        // and the telemetry buffer already shows a network warning toast.
+        this._channel.appendLine(
+          `[logger] failed to flush ${this._consecutiveFailures} times in a row — check the server`
+        );
+      }
     }
   }
 
@@ -215,7 +227,25 @@ export class Logger implements vscode.Disposable {
       const snapshot = this._buffer.slice();
       void Promise.resolve(this._context.globalState.update(BUFFER_KEY, snapshot)).catch(() => {});
     } catch { /* swallow */ }
-    void this._flush().catch(() => {});
+    void this.flush().catch(() => {});
     this._channel.dispose();
+    if (_shared === this) _shared = undefined;
   }
+}
+
+// ── Shared-instance accessor ──────────────────────────────────────────────
+//
+// Other modules grab the Logger via `getLogger()` rather than receiving it
+// through every constructor — keeps wiring contained to extension.ts and
+// makes it safe to no-op when the logger hasn't been constructed yet (e.g.
+// in unit tests that import a single helper module without booting activate).
+
+let _shared: Logger | undefined;
+
+export function setSharedLogger(logger: Logger): void {
+  _shared = logger;
+}
+
+export function getLogger(): Logger | undefined {
+  return _shared;
 }

@@ -111,9 +111,37 @@ with log_context(session_id=sid, job_id=jid):
 
 ## Configuration
 
-| Env var            | Default  | Purpose                                  |
-|--------------------|----------|------------------------------------------|
-| `VIBE_LOG_DIR`     | `logs`   | Directory for rotating log files.        |
-| `VIBE_LOG_LEVEL`   | `INFO`   | Root level; bump to `DEBUG` for verbose. |
+| Env var                    | Default  | Purpose                                                                    |
+|----------------------------|----------|----------------------------------------------------------------------------|
+| `VIBE_LOG_DIR`             | `logs`   | Directory for rotating log files.                                          |
+| `VIBE_LOG_LEVEL`           | `INFO`   | Root level; bump to `DEBUG` for verbose.                                   |
+| `VIBE_LOG_RETENTION_DAYS`  | `30`     | Worker sweep deletes `app_logs` rows older than this every 6 hours.        |
 
 `urllib3`, `httpx`, `httpcore`, and `apscheduler` are pinned to `WARNING` so the dev console isn't drowned in noise. Lift their levels individually in code if you need wire-level traces.
+
+## Disk-bloat protection
+
+Two layers, both bounded:
+
+1. **Files** — `RotatingFileHandler` caps each log at **10 MB × 5 backups = 50 MB** per service. Older backups are deleted automatically. Total worst case: ~100 MB for server + worker combined.
+2. **`app_logs` table** — the worker runs `app_logs_retention()` every 6 hours and deletes rows older than `VIBE_LOG_RETENTION_DAYS` (default 30). Bound the table by lowering the retention if the SQLite file grows faster than expected.
+
+If you want to keep historical logs longer-term, ship them to a log aggregator before the file rotates / the retention sweep runs — both are destructive.
+
+## What's logged today
+
+Server / worker / grader — structured INFO at boundaries, WARNING for expected failures (rate limit hits, budget exhaustion, wrong session status), ERROR with traceback for the unexpected:
+
+- HTTP access record per request (`vibe.http`)
+- `session_created` / `session_activated` / `submit_received` (`vibe.sessions`, `vibe.submit`)
+- `rate_limit_hit` / `invalid_session_key` (`vibe.auth`)
+- `budget_exhausted` / `budget_exhausted_midstream` (`vibe.llm_proxy`)
+- `grading_started` / `grading_completed` / `grading_stage_failed` with stack (`vibe.grader`)
+- `app_logs_retention deleted N record(s) older than D days` (`vibe.worker`)
+
+Extension — the Logger is created in `activate()` and shared via `getLogger()`:
+
+- `extension_activated` / `no_saved_session` / `session_restored`
+- `auto_commit_failed` with stack + `consecutiveFailures` counter
+- `submit_started` / `submit_succeeded` / `submit_failed` with stack
+- `validate_session_failed` with stack

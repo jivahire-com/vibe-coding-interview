@@ -18,6 +18,7 @@ to 1.0; deviations indicate a config drift and should be caught immediately.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import time
 import traceback as tb_module
@@ -41,6 +42,8 @@ from vibe.grader import (
     verification_discipline,
 )
 from vibe.grader.git_ops import clone_branch
+
+log = logging.getLogger("vibe.grader")
 
 _STAGE_MESSAGES = {
     "clone": "We could not access your submission repository. Please contact support.",
@@ -97,6 +100,11 @@ def run(session_id: str) -> None:
     if not rows:
         raise ValueError(f"Session {session_id} not found")
     session = rows[0]
+    started = time.time()
+    log.info(
+        "grading_started",
+        extra={"context": {"session_id": session_id, "challenge_id": session["challenge_id"]}},
+    )
 
     clone_dir = Path(f"/tmp/grade-{session_id}")
     if clone_dir.exists():
@@ -232,6 +240,16 @@ def run(session_id: str) -> None:
             ),
         )
         execute("UPDATE sessions SET status='graded' WHERE id=?", (session_id,))
+        log.info(
+            "grading_completed",
+            extra={"context": {
+                "session_id": session_id,
+                "duration_s": round(time.time() - started, 2),
+                "total_score": round(total_score, 2),
+                "tests_passed": tags_passed,
+                "tests_total": tests_total,
+            }},
+        )
     finally:
         if clone_dir.exists():
             shutil.rmtree(clone_dir)
@@ -267,6 +285,14 @@ def _llm_fallback() -> dict[str, Any]:
 
 
 def _record_error(session_id: str, stage: str) -> None:
+    # log.exception() captures the active exception via sys.exc_info(), so
+    # the traceback lands in the JSON log stream automatically — alongside
+    # the structured grading_errors row, which is what the recruiter
+    # dashboard renders.
+    log.exception(
+        "grading_stage_failed",
+        extra={"context": {"session_id": session_id, "stage": stage}},
+    )
     execute(
         "INSERT INTO grading_errors (session_id, ts, user_message, stage, error_class, traceback) "
         "VALUES (?, ?, ?, ?, ?, ?)",

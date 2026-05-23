@@ -385,7 +385,15 @@ describe('vibe.submit command (Review-Bug 14)', () => {
     await activate(ctx);
 
     // Capture the auto-commit interval handles set up during activate().
-    const intervalHandles = setIntervalSpy.mock.results.map((r) => r.value);
+    // Other long-lived intervals (e.g. the Logger's 10s log-flush timer) are
+    // explicitly NOT in scope here — they outlive a session and are torn
+    // down via context.subscriptions on deactivate, not on submit. Filter to
+    // the 180s auto-commit cadence so this assertion stays meaningful as
+    // more background timers get added.
+    const AUTO_COMMIT_INTERVAL_MS = 180_000;
+    const intervalHandles = setIntervalSpy.mock.results
+      .filter((_r, i) => setIntervalSpy.mock.calls[i][1] === AUTO_COMMIT_INTERVAL_MS)
+      .map((r) => r.value);
     expect(intervalHandles.length).toBeGreaterThanOrEqual(1);
 
     // Find the registered vibe.submit command handler and invoke it

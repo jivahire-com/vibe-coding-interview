@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import time
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,7 @@ from vibe.db import execute, query
 from vibe.models import ChatRequest
 
 router = APIRouter(prefix="/api/v1/llm")
+log = logging.getLogger("vibe.llm_proxy")
 
 
 def _get_client() -> AsyncOpenAI:
@@ -155,6 +157,10 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
     challenge_id = rows[0]["challenge_id"]
 
     if spent >= budget:
+        log.warning(
+            "budget_exhausted",
+            extra={"context": {"spent": spent, "budget": budget, "challenge_id": challenge_id}},
+        )
         raise HTTPException(402, {"error": "budget_exhausted", "spent": spent, "budget": budget})
 
     remaining = budget - spent
@@ -229,6 +235,14 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
                         output_rate = pricing_for(model_to_use)["output"]
                         running_cost = running_completion / 1_000_000 * output_rate * 1.5
                         if running_cost > remaining:
+                            log.warning(
+                                "budget_exhausted_midstream",
+                                extra={"context": {
+                                    "running_cost": round(running_cost, 4),
+                                    "remaining": round(remaining, 4),
+                                    "model": model_to_use,
+                                }},
+                            )
                             yield f"data: {json.dumps({'error': 'budget_exhausted_midstream', 'code': 402})}\n\n"
                             yield "data: [DONE]\n\n"
                             aborted = True

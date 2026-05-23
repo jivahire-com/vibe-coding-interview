@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -10,6 +11,7 @@ from vibe.budget import pricing_for
 from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
 from vibe.email import send_invite, send_panelist_invite
+from vibe.logging_config import bind_session
 from vibe.models import (
     CreateSessionRequest,
     ValidateSessionRequest,
@@ -17,6 +19,7 @@ from vibe.models import (
 )
 
 router = APIRouter(prefix="/api/v1")
+log = logging.getLogger("vibe.sessions")
 
 
 @router.get("/sessions")
@@ -152,6 +155,17 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
                 )
             except Exception:
                 pass
+    log.info(
+        "session_created",
+        extra={"context": {
+            "session_id": session_id,
+            "challenge_id": req.challenge_id,
+            "candidate_email": req.candidate_email,
+            "max_minutes": req.max_minutes,
+            "llm_budget_usd": req.llm_budget_usd,
+            "panelists": len(req.panelist_emails or []),
+        }},
+    )
     return {
         "session_id": session_id,
         "branch": branch,
@@ -169,14 +183,21 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
 
     rows = query("SELECT * FROM sessions WHERE session_key = ?", (req.session_key,))
     if not rows:
+        log.warning("validate_session_not_found", extra={"context": {"ip": ip}})
         raise HTTPException(404, "Session not found")
 
     session = rows[0]
+    bind_session(session["id"])
     if session["status"] not in ("pending", "active"):
+        log.warning(
+            "validate_session_wrong_status",
+            extra={"context": {"status": session["status"]}},
+        )
         raise HTTPException(409, f"Session is {session['status']}")
 
     repo = repo_for_challenge(session["challenge_id"])
     if not repo:
+        log.error("validate_session_misconfigured", extra={"context": {"challenge_id": session["challenge_id"]}})
         raise HTTPException(500, "Server misconfigured: no challenge repo configured")
 
     if session["status"] == "pending":
@@ -185,6 +206,7 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
             "UPDATE sessions SET status='active', started_at=? WHERE id=?",
             (int(time.time()), session["id"]),
         )
+        log.info("session_activated", extra={"context": {"challenge_id": session["challenge_id"]}})
 
     repo_url = f"https://github.com/{repo}"
     allowed_models = [m.strip() for m in settings.candidate_chat_models.split(",")]
