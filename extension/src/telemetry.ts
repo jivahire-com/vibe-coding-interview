@@ -1,24 +1,21 @@
 import * as vscode from "vscode";
-import * as http from "http";
-import * as https from "https";
+import * as fs from "fs";
 import * as path from "path";
 import { SessionConfig } from "./api";
+import { getLogger } from "./logger";
 
 interface TelemetryEvent {
   ts: number;
   event_type: string;
   payload: Record<string, unknown>;
-  // Bug #12: a per-event identity so an unshift-on-failure cannot duplicate
-  // an event that was already accepted by the server in a concurrent flush.
   id: string;
 }
 
-const BUFFER_KEY = "vibe.telemetry.buffer";
-const FLUSH_INTERVAL_MS = 10_000;
-const FLUSH_THRESHOLD = 500;
-export const MAX_BUFFERED_EVENTS = 5000;
-export const TELEMETRY_POST_TIMEOUT_MS = 15_000;
-const CONSECUTIVE_FAIL_WARN_THRESHOLD = 3;
+// Kept for one-time migration of events stranded in globalState from the old
+// HTTP-POST extension. Delete this key and the constructor migration block in
+// a follow-up release once all active sessions have upgraded.
+const _LEGACY_BUFFER_KEY = "vibe.telemetry.buffer";
+
 // Rubric Verification-Discipline window: edits a candidate makes to a file
 // within 90s of an AI apply count as "review" of that apply. Carrying the
 // originating block_id on each follow-up edit lets the grader compute the
@@ -49,34 +46,46 @@ const PASTE_IMMINENT_WINDOW_MS = 500;
 const PASTE_SIZE_THRESHOLD = 10;
 
 export class TelemetryTracker implements vscode.Disposable {
-  private _buffer: TelemetryEvent[] = [];
-  private _flushTimer: ReturnType<typeof setInterval> | undefined;
+  /** Absolute path to .jivahire/telemetry.jsonl in the workspace, or null if
+   *  no workspace folder is open (events are dropped silently). */
+  private _jsonlPath: string | null;
+  /** Lazy-created on first write so we don't mkdir if nothing is emitted. */
+  private _jsonlDirCreated = false;
   private _disposables: vscode.Disposable[] = [];
-  private _config: SessionConfig;
   private _context: vscode.ExtensionContext;
   private _lastUnfocusedAt: number | null = null;
   private _justRefocusedUntil: number = 0;
   private _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
-  /** Bug #12: prevents overlapping flushes from double-sending the same batch. */
-  private _flushInFlight = false;
   /** Dedup file_open events: emit once per file path per session. */
   private _openedFiles: Set<string> = new Set();
-  private _consecutiveFailures = 0;
-  private _networkWarningShown = false;
+  /** Dedup protected_file_edit events: one tamper signal per .jivahire/ file. */
+  private _tamperedFiles: Set<string> = new Set();
+  /** Running expected character length of telemetry.jsonl based on our own
+   *  writes. Lazy-initialised from disk on first append. Used to decide whether
+   *  a non-dirty doc-change is our echo (length matches) or external tamper
+   *  (length differs). UTF-16 code units, to match document.getText().length. */
+  private _expectedJsonlChars: number = 0;
+  private _expectedJsonlInitialized: boolean = false;
   // file → { block_id, until } for the most recent AI apply per file. Drives
   // post_apply_of attachment on subsequent typed/pasted edits within the 90s
   // verification window. Cleared on emit when the entry expires.
   private _recentApplies: Map<string, { blockId: string; until: number }> = new Map();
 
   constructor(config: SessionConfig, context: vscode.ExtensionContext) {
-    this._config = config;
     this._context = context;
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    this._jsonlPath = ws ? path.join(ws, ".jivahire", "telemetry.jsonl") : null;
 
-    // Restore any buffered events from previous session
-    const saved = context.globalState.get<TelemetryEvent[]>(BUFFER_KEY, []);
-    // Migration: older buffers may not have `id`. Assign synthetic ids so the
-    // dedup logic still works for old events.
-    this._buffer = saved.map((e) => (e.id ? e : { ...e, id: _nextId() }));
+    // One-time migration: flush any events stranded in globalState from an old
+    // extension version that used the HTTP-POST buffer. Append them to the new
+    // JSONL file then clear the key so they aren't re-migrated on next activate.
+    const stranded = context.globalState.get<TelemetryEvent[]>(_LEGACY_BUFFER_KEY, []);
+    if (stranded.length > 0) {
+      for (const evt of stranded) {
+        this._appendToJsonl(evt);
+      }
+      void context.globalState.update(_LEGACY_BUFFER_KEY, []);
+    }
 
     this._disposables.push(
       vscode.workspace.onDidChangeTextDocument((e) => this._onDocChange(e)),
@@ -116,8 +125,33 @@ export class TelemetryTracker implements vscode.Disposable {
         );
       } catch { /* command may already be registered in test harness */ }
     }
+  }
 
-    this._flushTimer = setInterval(() => { void this._flush(); }, FLUSH_INTERVAL_MS);
+  private _appendToJsonl(evt: TelemetryEvent): void {
+    if (!this._jsonlPath) return;
+    try {
+      if (!this._jsonlDirCreated) {
+        fs.mkdirSync(path.dirname(this._jsonlPath), { recursive: true });
+        this._jsonlDirCreated = true;
+      }
+      // Lazy-init the expected-length tracker from whatever's already on disk
+      // (could be a resumed session). Read the file as utf8 text so the count
+      // matches document.getText().length, which is also UTF-16 code units —
+      // byte length from statSync would mismatch on non-ASCII content.
+      if (!this._expectedJsonlInitialized) {
+        try {
+          this._expectedJsonlChars = fs.readFileSync(this._jsonlPath, "utf8").length;
+        } catch {
+          this._expectedJsonlChars = 0; // file doesn't exist yet
+        }
+        this._expectedJsonlInitialized = true;
+      }
+      const line = JSON.stringify(evt) + "\n";
+      fs.appendFileSync(this._jsonlPath, line);
+      this._expectedJsonlChars += line.length;
+    } catch (err) {
+      getLogger()?.warn("telemetry_write_failed", { error: String(err) });
+    }
   }
 
   emit(event_type: string, payload: Record<string, unknown>): void {
@@ -130,10 +164,7 @@ export class TelemetryTracker implements vscode.Disposable {
         this._recentApplies.set(file, { blockId, until: Date.now() + POST_APPLY_WINDOW_MS });
       }
     }
-    this._buffer.push({ ts: Date.now(), event_type, payload, id: _nextId() });
-    if (this._buffer.length >= FLUSH_THRESHOLD) {
-      void this._flush();
-    }
+    this._appendToJsonl({ ts: Date.now(), event_type, payload, id: _nextId() });
   }
 
   /**
@@ -183,18 +214,59 @@ export class TelemetryTracker implements vscode.Disposable {
 
   private _onDocChange(e: vscode.TextDocumentChangeEvent): void {
     if (e.document.uri.scheme !== "file") return;
+
+    // AI applies are flagged by apply.ts. We consume the flag and skip the
+    // WHOLE event — apply.ts emits the canonical `edit_ai_applied` at
+    // lifecycle end with the correct chars/block_id. Per-change suppression
+    // is unsafe: VS Code optimizes a single WorkspaceEdit.replace covering
+    // the whole document into multiple smaller contentChanges via minimal-
+    // diff computation, so the apply lands as N contentChanges in one event
+    // and only the first would be skipped — the rest would leak through as
+    // spurious paste/typed events totalling the size of the diff regions.
+    if (_suppressNextApply) {
+      _suppressNextApply = false;
+      return;
+    }
+
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
     const rel = path.relative(ws, e.document.uri.fsPath);
     if (rel.startsWith("..")) return; // outside workspace
 
-    for (const change of e.contentChanges) {
-      // AI applies are flagged by apply.ts and take priority over paste/type.
-      if (_suppressNextApply) {
-        _suppressNextApply = false;
-        this.emit("edit_ai_applied", { file: rel, chars: change.text.length });
-        continue;
+    // .jivahire/ holds grader-owned artifacts (rubric.json, traps.json,
+    // metadata.json, telemetry.jsonl). Doc changes there come from three
+    // distinct sources, distinguished deterministically — no timing heuristic:
+    //   (a) editor edit: the candidate typed/pasted in VS Code → document
+    //       buffer diverges from disk → e.document.isDirty === true.
+    //   (b) our own write echoing back via VS Code's disk-reload of an open
+    //       telemetry.jsonl → buffer matches disk → isDirty === false AND
+    //       document.getText().length matches our running _expectedJsonlChars.
+    //   (c) external write (e.g. `echo … >> file` from a shell) → buffer
+    //       matches disk → isDirty === false BUT length diverges from what
+    //       we know we wrote.
+    // (a) and (c) are tamper; (b) is suppressed. Normalize separators so the
+    // prefix check holds on Windows.
+    const normRel = rel.replace(/[/\\]/g, "/");
+    if (normRel.startsWith(".jivahire/")) {
+      const isTelemetryFile = normRel === ".jivahire/telemetry.jsonl";
+      const dirty = (e.document as { isDirty?: boolean }).isDirty === true;
+      if (!dirty) {
+        // Disk-loaded. For telemetry.jsonl, we own writes, so a length match
+        // means it's our echo. For other .jivahire/ files we never write, so
+        // any disk-loaded change is necessarily external.
+        if (isTelemetryFile && e.document.getText().length === this._expectedJsonlChars) {
+          return; // (b) our own echo
+        }
       }
+      if (this._tamperedFiles.has(normRel)) return; // dedup like file_open
+      this._tamperedFiles.add(normRel);
+      this.emit("protected_file_edit", {
+        file: normRel,
+        source: dirty ? "editor" : "external",
+      });
+      return;
+    }
 
+    for (const change of e.contentChanges) {
       if (change.text.length === 0 && change.rangeLength === 0) continue;
 
       // Paste classification, in order of confidence:
@@ -207,7 +279,14 @@ export class TelemetryTracker implements vscode.Disposable {
       //      AND pastes that replaced a selection (rangeLength > 0).
       const pasteImminent = Date.now() < _pasteImminentUntil;
       if (pasteImminent) _pasteImminentUntil = 0;
-      const multiLineInsert = change.text.length > 0 && /\r?\n/.test(change.text);
+      // Exclude pure-whitespace newlines (Enter keystroke = "\n" or "\r\n",
+      // auto-indent on newline = "\n    ") — those are typing, not paste.
+      // A real paste / snippet / multi-line insert always contains at least
+      // one non-whitespace char alongside the newline.
+      const multiLineInsert =
+        change.text.length > 0 &&
+        /\r?\n/.test(change.text) &&
+        /\S/.test(change.text);
       const isPaste =
         change.text.length > 0 &&
         (pasteImminent || multiLineInsert || change.text.length >= PASTE_SIZE_THRESHOLD);
@@ -246,107 +325,7 @@ export class TelemetryTracker implements vscode.Disposable {
     }
   }
 
-  private async _flush(): Promise<void> {
-    if (this._flushInFlight) return;
-    if (this._buffer.length === 0) return;
-    this._flushInFlight = true;
-    const batch = this._buffer.splice(0, this._buffer.length);
-    try {
-      // Bug fix: AWAIT globalState.update so an extension-host crash mid-post
-      // doesn't lose events that we'd already removed from in-memory state.
-      await this._context.globalState.update(BUFFER_KEY, this._buffer);
-      try {
-        await this._post(batch);
-        this._consecutiveFailures = 0;
-        this._networkWarningShown = false;
-      } catch {
-        // Put failed events back at the front, but dedup against anything that
-        // came in during the in-flight POST so we don't double-count.
-        const seen = new Set(this._buffer.map((e) => e.id));
-        const restored = batch.filter((e) => !seen.has(e.id));
-        this._buffer = restored.concat(this._buffer);
-        if (this._buffer.length > MAX_BUFFERED_EVENTS) {
-          const dropped = this._buffer.length - MAX_BUFFERED_EVENTS;
-          this._buffer.splice(0, dropped);
-          console.warn(
-            `[telemetry] buffer cap reached (${MAX_BUFFERED_EVENTS}); dropped ${dropped} oldest event(s)`
-          );
-        }
-        await this._context.globalState.update(BUFFER_KEY, this._buffer);
-        this._consecutiveFailures += 1;
-        if (
-          this._consecutiveFailures >= CONSECUTIVE_FAIL_WARN_THRESHOLD &&
-          !this._networkWarningShown
-        ) {
-          this._networkWarningShown = true;
-          void vscode.window.showWarningMessage(
-            "JivaHire: your telemetry isn't reaching the server — check your network. Your work is still saved locally."
-          );
-        }
-      }
-    } finally {
-      this._flushInFlight = false;
-    }
-  }
-
-  private _post(events: TelemetryEvent[]): Promise<void> {
-    const config = this._config;
-    return new Promise((resolve, reject) => {
-      const body = JSON.stringify({ events });
-      const url = new URL(`${config.llmProxyUrl}/api/v1/telemetry`);
-      const lib = url.protocol === "https:" ? https : http;
-      const req = lib.request(
-        {
-          hostname: url.hostname,
-          port: url.port,
-          path: url.pathname + url.search,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-            Authorization: `Bearer ${config.sessionKey}`,
-          },
-        },
-        (res) => {
-          res.on("data", () => {});
-          res.on("end", () => {
-            if (res.statusCode && res.statusCode < 300) {
-              resolve();
-            } else {
-              reject(new Error(`Telemetry HTTP ${res.statusCode}`));
-            }
-          });
-        }
-      );
-      req.on("error", reject);
-      req.setTimeout(TELEMETRY_POST_TIMEOUT_MS, () => {
-        try { req.destroy(); } catch { /* swallow */ }
-        reject(new Error(`Telemetry POST timed out after ${TELEMETRY_POST_TIMEOUT_MS}ms`));
-      });
-      req.write(body);
-      req.end();
-    });
-  }
-
   dispose(): void {
-    if (this._flushTimer) clearInterval(this._flushTimer);
-    // Bug fix: dispose() is synchronous so we cannot await the network flush.
-    // Persist the un-posted buffer to globalState first so the next activate()
-    // restore (telemetry.ts:50) picks it up — without this, events removed
-    // from in-memory state during a final flush were lost when the host
-    // exited mid-POST.
-    //
-    // Critical: we must snapshot the buffer before passing it to update(),
-    // because the subsequent _flush() splices the in-memory buffer to zero.
-    // Passing the live reference would defeat the persistence — the value
-    // observed by the next activate() (or a test spy) would be the empty
-    // post-splice array.
-    try {
-      const snapshot = this._buffer.slice();
-      const result = this._context.globalState.update(BUFFER_KEY, snapshot);
-      void Promise.resolve(result).catch(() => { /* swallow */ });
-    } catch { /* swallow — best effort on shutdown */ }
-    void this._flush().catch(() => { /* swallow */ });
     for (const d of this._disposables) d.dispose();
     for (const agg of this._typedAgg.values()) clearTimeout(agg.timer);
     this._typedAgg.clear();

@@ -2,7 +2,7 @@
   "name": "jivahire-vibe-coding-interview",
   "displayName": "JivaHire Vibe Coding Interview",
   "description": "AI-aware coding interview platform by JivaHire",
-  "version": "0.1.43",
+  "version": "0.1.48",
   "publisher": "jivahire",
   "engines": {
     "vscode": "^1.85.0"
@@ -118,7 +118,14 @@
         }
       ]
     },
-    "keybindings": [],
+    "keybindings": [
+      {
+        "command": "vibe.interceptPaste",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ],
     "viewsContainers": {
       "secondarySidebar": [
         {
