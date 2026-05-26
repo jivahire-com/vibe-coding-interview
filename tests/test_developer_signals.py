@@ -98,22 +98,22 @@ def test_reasoning_uses_llm_helper():
 # ── Worked examples (spec §7.6) ───────────────────────────────────────────────
 
 def test_example_a_senior_no_debugger_uses_goto_only():
-    """8 files, 80% post-AI edits, 90% specific prompts, 5 test runs, no debugger.
+    """8 files, ~80% of AI chars reworked, 90% specific prompts, 5 test runs.
 
-    Without goto/refs bonus this caps at 73 in the spec; we drop those to 0 in
-    this iteration, so the score is the spec's Base 68 + Bonus 0 = 68
-    (still 'developer').
+    Char-weighted now (RAH-144): the metric is the share of AI-applied chars
+    the candidate reworked within 60s, not the share of applies that had any
+    keystroke after. To hit the spec's ~80% we type 64 chars per 80-char apply.
     """
     sid = "ex-a"
     _seed_session(sid)
     # 8 file_opens
     for i, f in enumerate(["a.cpp", "b.cpp", "c.cpp", "d.cpp", "e.cpp", "f.cpp", "g.cpp", "h.cpp"]):
         _inject_event(sid, 100 + i, "file_open", {"file": f})
-    # 10 AI inserts, 8 followed by a typed edit within 60s
+    # 10 AI inserts (800 chars total), 80% reworked => 640 typed chars within 60s
     for i in range(10):
         _inject_event(sid, 1000 + i * 100, "edit_ai_applied", {"file": "a.cpp", "chars": 80})
-    for i in range(8):
-        _inject_event(sid, 1000 + i * 100 + 50, "edit_typed", {"file": "a.cpp", "chars": 10})
+    for i in range(10):
+        _inject_event(sid, 1000 + i * 100 + 50, "edit_typed", {"file": "a.cpp", "chars": 64})
     # 5 test runs
     for i in range(5):
         _inject_event(sid, 5000 + i, "test_run", {"profile": "default"})
@@ -136,8 +136,9 @@ def test_example_b_mid_developer_who_debugs():
         _inject_event(sid, 100, "file_open", {"file": f})
     for i in range(10):
         _inject_event(sid, 1000 + i * 100, "edit_ai_applied", {"file": "a.cpp", "chars": 80})
-    for i in range(5):  # 50%
-        _inject_event(sid, 1000 + i * 100 + 50, "edit_typed", {"file": "a.cpp", "chars": 10})
+    # 800 ai chars total, target ~50% rework => 400 typed chars
+    for i in range(10):
+        _inject_event(sid, 1000 + i * 100 + 50, "edit_typed", {"file": "a.cpp", "chars": 40})
     for i in range(3):
         _inject_event(sid, 5000 + i, "test_run", {"profile": "default"})
     for i in range(6):
@@ -160,7 +161,8 @@ def test_example_c_pm_pretending():
         _inject_event(sid, 100, "file_open", {"file": f})
     for i in range(10):
         _inject_event(sid, 1000 + i * 100, "edit_ai_applied", {"file": "a.cpp", "chars": 80})
-    _inject_event(sid, 1000 + 50, "edit_typed", {"file": "a.cpp", "chars": 5})  # 1/10 = 10%
+    # 800 ai chars, one tiny edit => ~0.6% rework (PM rubber-stamping)
+    _inject_event(sid, 1000 + 50, "edit_typed", {"file": "a.cpp", "chars": 5})
     _inject_event(sid, 5000, "test_run", {"profile": "default"})
     _inject_chat(sid, "fix this error in the function", ts=1)  # 1/5 = 20% specificity
     for i in range(4):
@@ -205,14 +207,69 @@ def test_file_open_dedupes_by_distinct_paths():
     assert out["signals"]["files_explored"] == 2
 
 
-def test_post_ai_edit_window_respects_60s():
-    sid = "win"
+def test_files_explored_detail_sums_focus_ms_and_sorts_desc():
+    sid = "time"
+    _seed_session(sid)
+    _inject_event(sid, 100, "file_open", {"file": "a.cpp"})
+    _inject_event(sid, 200, "file_open", {"file": "b.cpp"})
+    _inject_event(sid, 300, "file_open", {"file": "c.cpp"})
+    _inject_event(sid, 1_000, "file_focus", {"file": "a.cpp", "ms": 4_000})
+    _inject_event(sid, 1_100, "file_focus", {"file": "a.cpp", "ms": 2_000})
+    _inject_event(sid, 1_200, "file_focus", {"file": "b.cpp", "ms": 9_000})
+    # c.cpp has an open but no focus event — should still appear with ms=0.
+    out = compute_developer_confidence(sid, _mock_client())
+    detail = out["signals"]["files_explored_detail"]
+    assert detail == [
+        {"file": "b.cpp", "ms": 9_000},
+        {"file": "a.cpp", "ms": 6_000},
+        {"file": "c.cpp", "ms": 0},
+    ]
+
+
+def test_files_explored_detail_ignores_invalid_focus_payloads():
+    sid = "bad-focus"
+    _seed_session(sid)
+    _inject_event(sid, 100, "file_open", {"file": "a.cpp"})
+    _inject_event(sid, 200, "file_focus", {"file": "a.cpp", "ms": -5})       # invalid
+    _inject_event(sid, 300, "file_focus", {"file": "a.cpp", "ms": "abc"})    # invalid
+    _inject_event(sid, 400, "file_focus", {"file": "", "ms": 1_000})         # empty file
+    _inject_event(sid, 500, "file_focus", {"file": "a.cpp", "ms": 1_500})    # ok
+    out = compute_developer_confidence(sid, _mock_client())
+    assert out["signals"]["files_explored_detail"] == [{"file": "a.cpp", "ms": 1_500}]
+
+
+def test_post_ai_edit_window_outside_90s_does_not_count():
+    """Bug 7: window is 90s (was 60s, mismatched with extension's POST_APPLY_WINDOW_MS)."""
+    sid = "win-outside"
     _seed_session(sid)
     _inject_event(sid, 1_000, "edit_ai_applied", {"file": "a.cpp", "chars": 80})
-    # Typed 90 seconds later → outside the 60s window, should NOT count.
+    # Typed AT the 90s boundary — strict `<` means it does NOT count.
     _inject_event(sid, 1_000 + 90_000, "edit_typed", {"file": "a.cpp", "chars": 10})
     out = compute_developer_confidence(sid, _mock_client())
     assert out["signals"]["ai_output_modified_ratio"] == 0
+
+
+def test_post_ai_edit_window_inside_90s_counts_after_60s_boundary():
+    """Bug 7 regression: edit at 75s used to be DROPPED (old 60s window).
+    Now it must count toward ai_output_modified_ratio."""
+    sid = "win-inside"
+    _seed_session(sid)
+    _inject_event(sid, 1_000, "edit_ai_applied", {"file": "a.cpp", "chars": 100})
+    # 75s after apply — inside the new 90s window, but outside the old 60s one.
+    _inject_event(sid, 1_000 + 75_000, "edit_typed", {"file": "a.cpp", "chars": 30})
+    out = compute_developer_confidence(sid, _mock_client())
+    # 30 typed chars / 100 ai-applied chars = 0.30
+    assert out["signals"]["ai_output_modified_ratio"] == 0.30
+
+
+def test_post_ai_edit_window_just_inside_boundary_counts():
+    """Edit at 89.9s after apply still counts (window is strict `< 90_000`)."""
+    sid = "win-edge"
+    _seed_session(sid)
+    _inject_event(sid, 1_000, "edit_ai_applied", {"file": "a.cpp", "chars": 200})
+    _inject_event(sid, 1_000 + 89_999, "edit_typed", {"file": "a.cpp", "chars": 50})
+    out = compute_developer_confidence(sid, _mock_client())
+    assert out["signals"]["ai_output_modified_ratio"] == 0.25
 
 
 def test_prompt_specificity_none_when_no_chat():

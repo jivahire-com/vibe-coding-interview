@@ -30,8 +30,12 @@ def submit(session=Depends(get_session)):
     resp: dict = {"status": "submitted", "message": "Grading queued."}
     # Skip the post-submit explainer when the session is a live panel interview
     # (meet_link is set). The panelists have already verified identity in real
-    # time, so the extra recording is redundant.
-    if video_feature_enabled() and not session.get("meet_link"):
+    # time, so the extra recording is redundant — unless the recruiter has
+    # explicitly toggled `require_end_video` on for this panel session.
+    require_end_video_override = bool(session.get("require_end_video") or 0)
+    if video_feature_enabled() and (
+        not session.get("meet_link") or require_end_video_override
+    ):
         resp["video_upload"] = {
             "deadline_unix": submitted_at + UPLOAD_WINDOW_SECONDS,
             "min_duration_seconds": MIN_DURATION_SECONDS,

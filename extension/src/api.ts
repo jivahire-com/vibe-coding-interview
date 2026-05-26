@@ -13,6 +13,14 @@ export interface SessionConfig {
   repoUrl: string;
   branch: string;
   githubToken: string;
+  /**
+   * Epoch milliseconds at which `githubToken` stops being accepted by GitHub.
+   * The server mints ~1hr installation tokens, but sessions may run longer,
+   * so the extension refreshes the token before this deadline. 0 means
+   * "unknown" — older servers that don't ship this field still work, but
+   * sessions over ~50min may see a push fail when the token quietly expires.
+   */
+  githubTokenExpiresAt: number;
   llmProxyUrl: string;
   maxMinutes: number;
   llmBudgetUsd: number;
@@ -36,6 +44,13 @@ export interface SessionConfig {
   /** Scheduled start time (epoch SECONDS, UTC). Drives the "starts in X min"
    *  countdown on the brief panel when in the future. */
   scheduledAt?: number;
+  /**
+   * True iff the candidate will be asked to record a short solution-explainer
+   * video after clicking Submit. Surfaced in the dashboard as an upfront
+   * notice so candidates know to have a webcam + mic ready before the timer
+   * runs out — the recorder only opens post-submit.
+   */
+  requireEndVideo?: boolean;
 }
 
 /** Default pricing fallback when the server omits the pricing table.
@@ -106,6 +121,7 @@ export async function validateSession(
   const scheduledAt = typeof res.scheduled_at === "number" && res.scheduled_at > 0
     ? res.scheduled_at
     : undefined;
+  const requireEndVideo = res.require_end_video === true;
 
   return {
     sessionId: res.session_id,
@@ -113,6 +129,10 @@ export async function validateSession(
     repoUrl: res.repo_url,
     branch: res.branch,
     githubToken: res.github_clone_token,
+    githubTokenExpiresAt:
+      typeof res.github_clone_token_expires_at === "number"
+        ? res.github_clone_token_expires_at * 1000
+        : 0,
     llmProxyUrl: rawProxyUrl,
     maxMinutes: res.max_minutes,
     llmBudgetUsd: res.llm_budget_usd,
@@ -125,6 +145,7 @@ export async function validateSession(
     meetLink,
     videoPlatform,
     scheduledAt,
+    requireEndVideo,
   };
 }
 
@@ -150,6 +171,34 @@ function _normalisePricing(raw: unknown): Record<string, ModelPricing> {
   // a plausible price if the table is incomplete. Server entries win on
   // overlap.
   return { ...DEFAULT_MODEL_PRICING, ...out };
+}
+
+/**
+ * Mint a fresh repo-scoped installation token for an active session. Called
+ * by the auto-refresh timer in extension.ts shortly before the previous
+ * token expires; without this, a 90-minute session would see auto-commit
+ * pushes fail mid-interview when the original token quietly expires after
+ * ~1hr.
+ */
+export async function refreshGithubToken(
+  serverUrl: string,
+  sessionKey: string
+): Promise<{ token: string; expiresAt: number }> {
+  const base = serverUrl.replace(/\/+$/, "");
+  const res = (await post(`${base}/api/v1/refresh-github-token`, "{}", sessionKey)) as {
+    github_clone_token?: unknown;
+    github_clone_token_expires_at?: unknown;
+  };
+  if (typeof res.github_clone_token !== "string" || !res.github_clone_token) {
+    throw new Error("refresh-github-token: missing token in response");
+  }
+  if (typeof res.github_clone_token_expires_at !== "number") {
+    throw new Error("refresh-github-token: missing expires_at in response");
+  }
+  return {
+    token: res.github_clone_token,
+    expiresAt: res.github_clone_token_expires_at * 1000,
+  };
 }
 
 export interface VideoUploadInfo {
@@ -245,7 +294,26 @@ function post(url: string, body: string, bearerToken?: string): Promise<any> {
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
           if (res.statusCode && res.statusCode >= 400) {
-            settle(new Error(`HTTP ${res.statusCode}: ${data}`));
+            // FastAPI returns `{"detail": ...}` for HTTPExceptions. Extract a
+            // human-readable message so the candidate sees "This panel
+            // interview is scheduled for …" instead of the raw JSON body.
+            // `detail` may be a string or an object with a `.message` field
+            // (used by the scheduled-too-early gate, which also ships
+            // `scheduled_at` for client-side local-time formatting).
+            let message = data;
+            try {
+              const parsed = JSON.parse(data) as { detail?: unknown };
+              const detail = parsed?.detail;
+              if (typeof detail === "string") {
+                message = detail;
+              } else if (
+                detail && typeof detail === "object" &&
+                typeof (detail as { message?: unknown }).message === "string"
+              ) {
+                message = (detail as { message: string }).message;
+              }
+            } catch { /* not JSON — leave raw body in message */ }
+            settle(new Error(`HTTP ${res.statusCode}: ${message}`));
           } else {
             try { settle(undefined, JSON.parse(data)); } catch { settle(undefined, {}); }
           }

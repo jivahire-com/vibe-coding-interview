@@ -19,6 +19,12 @@ class CreateSessionRequest(BaseModel):
     # Optional panel-interviewer emails. Each receives a separate invite that
     # contains the meeting link + scheduled time, but NOT the session key.
     panelist_emails: list[str] = []
+    # Override the panel-session default of "skip post-submit explainer video".
+    # Async sessions always require the end-video when the feature is enabled;
+    # this flag only matters for panel sessions, where panelists normally
+    # verify identity live. When True, the candidate is asked to record an
+    # explainer after submitting even if a meet link is set.
+    require_end_video: bool = False
 
     @field_validator("meet_link")
     @classmethod
@@ -91,6 +97,11 @@ class ValidateSessionResponse(BaseModel):
     repo_url: str
     branch: str
     github_clone_token: str
+    # Unix epoch seconds (UTC) at which github_clone_token stops being accepted
+    # by GitHub. The extension uses this to schedule a refresh before expiry;
+    # without it, sessions longer than ~1 hour would silently break on the
+    # next auto-commit push.
+    github_clone_token_expires_at: int
     llm_proxy_url: str
     max_minutes: int
     llm_budget_usd: float
@@ -105,16 +116,10 @@ class ValidateSessionResponse(BaseModel):
     meet_link: str | None = None
     video_platform: str | None = None
     scheduled_at: int | None = None
-
-
-class TelemetryEvent(BaseModel):
-    ts: int
-    event_type: str
-    payload: dict[str, Any]
-
-
-class TelemetryRequest(BaseModel):
-    events: list[TelemetryEvent]
+    # True iff the candidate must record a short solution-explainer video after
+    # submitting. Resolved server-side from the feature flag + per-session
+    # override so the extension can surface an upfront notice in the dashboard.
+    require_end_video: bool = False
 
 
 class ChatMessage(BaseModel):

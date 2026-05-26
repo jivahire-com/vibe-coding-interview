@@ -5,6 +5,9 @@ export const StatusBarAlignment = { Left: 1, Right: 2 };
 export const ProgressLocation = { Notification: 15, Window: 10, SourceControl: 1 };
 export const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };
 export const TextEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 };
+// Values match the stable vscode.TextDocumentChangeReason enum used by
+// telemetry.ts to skip undo/redo events.
+export const TextDocumentChangeReason = { Undo: 1, Redo: 2 };
 
 export class ThemeColor {
   constructor(public readonly id: string) {}

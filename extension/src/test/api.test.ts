@@ -350,3 +350,65 @@ describe('isAllowedProxyHost', () => {
     expect(isAllowedProxyHost('http://srv', 'not a url')).toBe(false);
   });
 });
+
+describe('GitHub installation token plumbing', () => {
+  beforeEach(() => jest.resetModules());
+
+  test('validateSession parses github_clone_token_expires_at (epoch s → ms)', async () => {
+    const expiresAtSeconds = 1_900_000_000;
+    const responsePayload = {
+      session_id: 'a', repo_url: 'https://x', branch: 'b',
+      github_clone_token: 'ghs_first', github_clone_token_expires_at: expiresAtSeconds,
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(responsePayload) });
+    const { validateSession: validate } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.githubToken).toBe('ghs_first');
+    expect(config.githubTokenExpiresAt).toBe(expiresAtSeconds * 1000);
+  });
+
+  test('validateSession tolerates servers that omit expires_at (defaults to 0)', async () => {
+    const responsePayload = {
+      session_id: 'a', repo_url: 'https://x', branch: 'b',
+      github_clone_token: 'ghs_first',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(responsePayload) });
+    const { validateSession: validate } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.githubTokenExpiresAt).toBe(0);
+  });
+
+  test('refreshGithubToken parses { token, expiresAt } and converts to ms', async () => {
+    mockHttpResponse({
+      statusCode: 200,
+      body: JSON.stringify({
+        github_clone_token: 'ghs_fresh',
+        github_clone_token_expires_at: 1_950_000_000,
+      }),
+    });
+    const { refreshGithubToken } = await import('../api');
+    const out = await refreshGithubToken('http://server:8080/', 'KEY');
+    expect(out.token).toBe('ghs_fresh');
+    expect(out.expiresAt).toBe(1_950_000_000 * 1000);
+  });
+
+  test('refreshGithubToken throws on malformed responses (defensive)', async () => {
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify({}) });
+    const { refreshGithubToken } = await import('../api');
+    await expect(refreshGithubToken('http://server:8080', 'KEY')).rejects.toThrow(
+      /missing token/i,
+    );
+  });
+
+  test('refreshGithubToken surfaces HTTP error responses (e.g. 409 submitted)', async () => {
+    mockHttpResponse({ statusCode: 409, body: 'Session is submitted' });
+    const { refreshGithubToken } = await import('../api');
+    await expect(refreshGithubToken('http://server:8080', 'KEY')).rejects.toThrow(
+      /HTTP 409/,
+    );
+  });
+});

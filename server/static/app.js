@@ -23,7 +23,7 @@ document.addEventListener('alpine:init', () => {
 
     // ── invite drawer
     showInvitePanel: false,
-    inviteForm: { email: '', challengeId: '', maxMinutes: 60, budgetUsd: 2.00, sessionKey: '', meetLink: '', scheduledLocal: '', panelistEmails: '', panelExpanded: false },
+    inviteForm: { email: '', challengeId: '', maxMinutes: 60, budgetUsd: 2.00, sessionKey: '', meetLink: '', scheduledLocal: '', panelistEmails: '', panelExpanded: false, requireEndVideo: false },
     inviteLoading: false,
     inviteError: '',
     inviteResult: null,  // { sessionKey }
@@ -189,6 +189,7 @@ document.addEventListener('alpine:init', () => {
       this.inviteForm.scheduledLocal = '';
       this.inviteForm.panelistEmails = '';
       this.inviteForm.panelExpanded = false;
+      this.inviteForm.requireEndVideo = false;
       if (this.challenges.length) this.inviteForm.challengeId = this.challenges[0];
       this.showInvitePanel = true;
     },
@@ -275,6 +276,11 @@ document.addEventListener('alpine:init', () => {
         if (meetLink) body.meet_link = meetLink;
         if (scheduledAt !== null) body.scheduled_at = scheduledAt;
         if (panelistEmails.length > 0) body.panelist_emails = panelistEmails;
+        // Override is panel-only — for async sessions the server already
+        // requires the end video unconditionally. Sending the flag without
+        // a meet_link would have no effect server-side but we omit it to
+        // keep the request shape honest.
+        if (panelOn && this.inviteForm.requireEndVideo) body.require_end_video = true;
         const r = await this._post('/api/v1/sessions', body);
         this.inviteResult = { sessionKey: this.inviteForm.sessionKey.trim(), sessionId: r.session_id };
         await this.loadSessions();
@@ -330,9 +336,117 @@ document.addEventListener('alpine:init', () => {
     },
 
     parseSummaryLine(line) {
-      const m = (line || '').match(/^(.+?)\s*\((\d+\/10)\)\s*:\s*(.*)$/s);
+      const m = (line || '').match(/^(.+?)\s*\(([\d.]+\/10)\)\s*:\s*(.*)$/s);
       if (!m) return { label: '', score: '', body: line || '', matched: false };
       return { label: m[1], score: m[2], body: m[3], matched: true };
+    },
+
+    // Plain-English glossary for criterion/signal names that surface in
+    // grader_summary reasons like `weakest criterion 'sync_primitive' ...`.
+    // Hover-tooltip lookup — keep blurbs short (≤ ~120 chars).
+    criterionGlossary: {
+      // code_quality
+      correctness:        "Code runs and passes the hidden tests.",
+      idiomatic:          "Uses the language's standard conventions and libraries.",
+      clarity:            "Readable structure, well-named identifiers.",
+      edge_cases:         "Handles empty inputs, limits, and unusual values.",
+      no_ai_defects:      "No new races, security holes, hallucinated APIs, or unnecessary AI-suggested abstractions.",
+      // llm_communication
+      context_framing:    "Pasted relevant code, errors, and constraints into the prompt instead of relying on the model to guess.",
+      constraint_spec:    "Stated requirements explicitly (e.g. O(1), thread-safe, no allocations).",
+      decomposition:      "Broke big tasks into 2–3 focused prompts instead of one giant ask.",
+      iterative_refinement: "Gave specific feedback when the AI's output was wrong (e.g. 'line 12 has a race because…').",
+      debug_loop:         "After a test failed, included the failing assertion and the relevant snippet in the next prompt.",
+      token_discipline:   "Prompt length is roughly proportional to the problem (no massive dumps, no underspecified one-liners).",
+      // architectural_reasoning
+      why_before_how:     "Asked about tradeoffs (X vs Y) before asking for an implementation.",
+      algorithm_choice:   "Credit only if the candidate (not the AI) picked the algorithm.",
+      data_structure_choice: "Credit only if the candidate (not the AI) picked the data structure.",
+      concurrency_design: "Lock placement, primitive choice, deadlock avoidance.",
+      edge_case_awareness:"Considered boundary conditions, capacity limits, and unexpected inputs in the design.",
+      constraint_driven:  "The solution respects stated constraints because the candidate raised them.",
+      not_over_engineered:"Didn't add AI-suggested abstractions the problem doesn't need.",
+      // challenge_specific (per-challenge bonus)
+      sync_primitive:     "Picked the right concurrency primitive (e.g. plain mutex vs shared_mutex, Lock vs RLock).",
+      time_source:        "Used a monotonic clock (time.monotonic) instead of wall-clock time for TTLs.",
+      ttl_strategy:       "Expired entries are checked on read (lazy expiry) instead of being returned stale.",
+      const_correctness:  "Inspection methods are `const` and the mutex is `mutable` (C++).",
+      // verification_discipline signals
+      test_after_apply_ratio:    "How often the candidate ran tests after applying AI-suggested code.",
+      apply_then_edit_rate:      "How often the candidate edited AI code after applying it (vs accepting blindly).",
+      self_authored_ratio:       "Share of code the candidate typed themselves vs pasted from the AI.",
+      incremental_apply_pattern: "Applied AI code in small chunks rather than huge unreviewable dumps.",
+      pre_submit_test_run:       "Ran the test suite shortly before submitting.",
+      // ai_judgment signals
+      explicit_rejections: "Times the candidate explicitly told the AI its suggestion was wrong.",
+      modify_after_apply:  "Times the candidate edited AI suggestions after applying them.",
+      hand_fixed_traps:    "Planted bugs the candidate caught and fixed without AI help.",
+      recovery_events:     "Times the candidate recovered from a bad AI suggestion (reverts, do-overs).",
+    },
+
+    // Split a grader_summary reason into (prefix, term, suffix) so the
+    // criterion/signal name can be rendered with a glossary tooltip. If no
+    // known term is present, returns the whole text as `prefix` with empty
+    // `term`/`suffix` so the same template still renders cleanly.
+    parseReasonParts(text) {
+      const empty = { prefix: text || '', term: '', glossary: '', suffix: '' };
+      if (!text) return empty;
+      const m = text.match(/^(.*?weakest (?:criterion|signal) ')([a-z_][a-z0-9_]*)('.*)$/s);
+      if (!m) return empty;
+      const glossary = this.criterionGlossary[m[2]] || `Sub-criterion '${m[2]}' — no glossary entry yet.`;
+      return { prefix: m[1], term: m[2], glossary, suffix: m[3] };
+    },
+
+    // Canonical dimension order — mirrors COMPOSITE_WEIGHTS in
+    // server/vibe/grader/runner.py. The grader builds grader_summary in this
+    // same order, so rendering both from this list keeps the breakdown rows
+    // and summary reasoning in lock-step.
+    scoreDimensions: [
+      { label: 'Tests',                   key: 'tests',                   weight: 20, kind: 'fraction', num: 'tests_passed',    denom: 'tests_total',
+        tip: 'Hidden quality checks the candidate\'s code passed.' },
+      { label: 'Traps',                   key: 'traps',                   weight: 12, kind: 'fraction', num: 'traps_detected',  denom: 'traps_total',
+        tip: 'Intentional bugs hidden in the starter code; counts how many the candidate caught and fixed.' },
+      { label: 'Verification discipline', key: 'verification_discipline', weight: 13, kind: 'score',    field: 'verification_discipline_score',
+        tip: 'How rigorously the candidate verified their own work (tests run, edge cases probed).' },
+      { label: 'AI judgment',             key: 'ai_judgment',             weight:  8, kind: 'score',    field: 'ai_judgment_score',
+        tip: 'Quality of decisions about when (and when not) to accept AI suggestions.' },
+      { label: 'LLM communication',       key: 'llm_communication',       weight: 17, kind: 'score',    field: 'llm_communication_score',
+        tip: 'How precisely and professionally the candidate prompted the AI.' },
+      { label: 'Code quality',            key: 'code_quality',            weight: 15, kind: 'score',    field: 'code_quality_score',
+        tip: 'Readability, structure, and idiomatic use of the language.' },
+      { label: 'Architectural reasoning', key: 'architectural_reasoning', weight: 10, kind: 'score',    field: 'architectural_reasoning_score',
+        tip: 'Soundness of the broader design choices the candidate made.' },
+      { label: 'Challenge-specific',      key: 'challenge_specific',      weight:  5, kind: 'score',    field: 'challenge_specific_score',
+        tip: 'Bonus criteria unique to this challenge\'s rubric.' },
+    ],
+
+    dimensionScore(grade, dim) {
+      if (!grade) return null;
+      if (dim.kind === 'fraction') {
+        const denom = grade[dim.denom];
+        if (!denom) return null;
+        return (grade[dim.num] / denom) * 10;
+      }
+      const v = grade[dim.field];
+      return (v == null) ? null : v;
+    },
+
+    dimensionDisplay(grade, dim) {
+      if (!grade) return '—';
+      if (dim.kind === 'fraction') return `${grade[dim.num] ?? 0}/${grade[dim.denom] ?? 0}`;
+      return grade[dim.field] ?? '—';
+    },
+
+    // Map grader_summary lines (one per dimension, in canonical order) back to
+    // each dimension's reasoning text, keyed by the human label.
+    summaryReasonByLabel(grade) {
+      const out = {};
+      if (!grade?.grader_summary) return out;
+      for (const line of grade.grader_summary.split(' | ')) {
+        const p = this.parseSummaryLine(line);
+        if (p.matched) out[p.label] = p.body;
+      }
+      return out;
     },
 
     formatDate(ts) {
@@ -340,6 +454,20 @@ document.addEventListener('alpine:init', () => {
       return new Date(ts * 1000).toLocaleString(undefined, {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
       });
+    },
+
+    hasPanel(s) {
+      if (!s) return false;
+      return !!(s.meet_link || s.scheduled_at || (s.panelist_emails && String(s.panelist_emails).trim().length > 0));
+    },
+
+    panelTooltip(s) {
+      if (!s) return '';
+      const parts = [];
+      if (s.scheduled_at) parts.push(`Scheduled: ${this.formatDate(s.scheduled_at)}`);
+      if (s.panelist_emails) parts.push(`Panelists: ${s.panelist_emails}`);
+      if (s.meet_link) parts.push('Has video call link');
+      return parts.join('\n');
     },
 
     elapsed(startedAt, submittedAt) {
@@ -352,6 +480,18 @@ document.addEventListener('alpine:init', () => {
     fmtNum(n) {
       if (n == null || n === 0) return '0';
       return n.toLocaleString();
+    },
+
+    fmtDuration(ms) {
+      if (ms == null || ms <= 0) return '—';
+      const sec = Math.round(ms / 1000);
+      if (sec < 60) return `${sec}s`;
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+      const h = Math.floor(m / 60);
+      const mm = m % 60;
+      return mm ? `${h}h ${mm}m` : `${h}h`;
     },
 
     totalTokens(detail) {

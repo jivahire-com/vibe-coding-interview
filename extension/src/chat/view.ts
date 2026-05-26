@@ -810,7 +810,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <div id="budget-warn" style="${this.budgetExhausted ? "display:block;" : ""}">AI budget reached — finish the challenge on your own.</div>
 <div id="attachments">${this.pendingAttachments.map((p) => `
   <span class="att-chip" data-attach-path="${escAttr(p)}">&#128206; ${escHtml(p)}<button class="att-chip-remove" data-remove-attach="${escAttr(p)}" title="Remove attachment">&times;</button></span>`).join("")}</div>
-<div class="attach-help">Attach files by right-clicking &rarr; "Add to JivaHire chat" or by typing @ to pick a workspace file. <strong>No file content is sent to the AI unless you attach it here.</strong></div>
+<div class="attach-help">Attach files by right-clicking &rarr; "Add to JivaHire chat" or by typing @ to pick a workspace file.</div>
 <div id="suggest-box" role="listbox" aria-label="Workspace file suggestions"></div>
 <div id="input-row">
   <vscode-button id="attach-btn" appearance="icon" title="Attach a workspace file">&#128206;</vscode-button>

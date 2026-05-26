@@ -10,6 +10,9 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     "apscheduler>=3.10.0",
     "boto3>=1.34.0",
+    # GitHub App auth for minting short-lived, repo-scoped installation tokens.
+    # The [crypto] extra pulls in `cryptography` for RS256 signing.
+    "pyjwt[crypto]>=2.8.0",
 ]
 
 [project.optional-dependencies]

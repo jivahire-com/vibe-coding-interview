@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
-os.environ.setdefault("GITHUB_BOT_PAT", "ghp-test")
 os.environ["GITHUB_CHALLENGES_OWNER"] = ""
 os.environ.setdefault("GITHUB_CHALLENGES_REPO", "test-org/test-repo")
 os.environ.setdefault("ADMIN_TOKEN", "admin-secret")

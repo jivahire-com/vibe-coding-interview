@@ -67,6 +67,7 @@ function makeConfig(): SessionConfig {
     repoUrl: "https://github.com/test/repo",
     branch: "interview/sid-1",
     githubToken: "ghtok",
+    githubTokenExpiresAt: Date.now() + 60 * 60_000,
     llmProxyUrl: "http://server.test:1234",
     maxMinutes: 90,
     llmBudgetUsd: 2,

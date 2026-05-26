@@ -340,69 +340,325 @@ def _render_record_page(token: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Record solution explainer</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  * {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-         background: #f7f7f8; color: #222; margin: 0; padding: 16px;
-         max-width: 720px; margin-left: auto; margin-right: auto; }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ background: #1e1e1e; color: #eee; }}
-    .card {{ background: #2a2a2a; }}
-    .prompts {{ background: #333; border-color: #555; }}
-    .status {{ color: #ccc; }}
+  :root {{
+    color-scheme: light dark;
+    --bg: #fafaf9;
+    --surface: #ffffff;
+    --border: #ebe9e7;
+    --border-strong: #d6d3d1;
+    --text: #18181b;
+    --text-muted: #6b7280;
+    --text-subtle: #9ca3af;
+    --accent: #18181b;
+    --accent-fg: #ffffff;
+    --danger: #b91c1c;
+    --danger-bg: #fef2f2;
+    --danger-border: #fecaca;
+    --success: #15803d;
+    --rec: #ef4444;
+    --radius: 12px;
+    --radius-sm: 8px;
   }}
-  .card {{ background: #fff; padding: 20px; border-radius: 8px;
-          box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 16px; }}
-  h1 {{ font-size: 20px; margin: 0 0 4px; }}
-  .sub {{ color: #666; margin: 0 0 16px; font-size: 14px; }}
-  .prompts {{ background: #f0f4ff; border-left: 3px solid #5066ff;
-             padding: 12px 16px; border-radius: 4px; margin-bottom: 16px; }}
-  .prompts strong {{ font-size: 13px; }}
-  .prompts ol {{ margin: 4px 0 0 18px; padding: 0; }}
-  .prompts li {{ margin: 4px 0; font-size: 14px; }}
-  video {{ width: 100%; background: #000; border-radius: 6px;
-          aspect-ratio: 16 / 9; display: block; }}
-  .controls {{ display: flex; gap: 8px; align-items: center; margin: 12px 0;
-              flex-wrap: wrap; }}
-  button {{ background: #2563eb; color: #fff; border: none;
-           padding: 10px 16px; border-radius: 6px; cursor: pointer;
-           font-size: 14px; font-weight: 500; }}
-  button.secondary {{ background: #6b7280; }}
-  button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-  .timer {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-           font-size: 16px; margin-left: auto; color: #666; }}
-  .timer.armed {{ color: #dc2626; }}
-  .progress {{ width: 100%; height: 8px; background: #e5e7eb;
-              border-radius: 4px; overflow: hidden; margin: 12px 0;
-              display: none; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg: #0b0b0c;
+      --surface: #111113;
+      --border: #1f1f23;
+      --border-strong: #2a2a2f;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --text-subtle: #6b7280;
+      --accent: #f4f4f5;
+      --accent-fg: #0b0b0c;
+      --danger: #f87171;
+      --danger-bg: rgba(248, 113, 113, 0.08);
+      --danger-border: rgba(248, 113, 113, 0.25);
+      --success: #4ade80;
+    }}
+  }}
+
+  * {{ box-sizing: border-box; }}
+  html, body {{ height: 100%; }}
+  body {{
+    font-family: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 56px 24px 80px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.011em;
+  }}
+
+  .wrap {{ max-width: 600px; margin: 0 auto; }}
+
+  header {{ margin-bottom: 28px; }}
+  h1 {{
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 6px;
+    line-height: 1.3;
+  }}
+  .lede {{
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 14.5px;
+    line-height: 1.55;
+    max-width: 52ch;
+  }}
+
+  .card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+  }}
+
+  .section-label {{
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-subtle);
+    margin: 0 0 12px;
+  }}
+
+  .points {{
+    list-style: none;
+    counter-reset: pt;
+    padding: 0;
+    margin: 0 0 24px;
+  }}
+  .points li {{
+    counter-increment: pt;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 7px 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text);
+  }}
+  .points li::before {{
+    content: counter(pt);
+    flex: 0 0 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 1px;
+    font-variant-numeric: tabular-nums;
+  }}
+
+  .stage {{
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #0a0a0a;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin-bottom: 18px;
+    box-shadow: inset 0 0 0 1px var(--border);
+  }}
+  video {{
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transform: scaleX(-1);
+  }}
+  .placeholder {{
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.45);
+    font-size: 13px;
+    gap: 8px;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+  }}
+  .placeholder svg {{ width: 18px; height: 18px; }}
+  body.has-stream .placeholder {{ opacity: 0; }}
+
+  .rec-pill {{
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    display: none;
+    align-items: center;
+    gap: 7px;
+    background: rgba(10,10,10,0.6);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    color: #fff;
+    padding: 5px 10px 5px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }}
+  .rec-pill::before {{
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--rec);
+    box-shadow: 0 0 0 0 rgba(239,68,68,0.6);
+    animation: pulse 1.4s ease-in-out infinite;
+  }}
+  body.is-recording .rec-pill {{ display: inline-flex; }}
+  @keyframes pulse {{
+    0%, 100% {{ opacity: 1; transform: scale(1); }}
+    50%      {{ opacity: 0.45; transform: scale(0.8); }}
+  }}
+
+  .controls {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }}
+
+  button {{
+    appearance: none;
+    font-family: inherit;
+    border: 1px solid transparent;
+    background: var(--accent);
+    color: var(--accent-fg);
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    transition: opacity 120ms ease, transform 80ms ease, background 120ms ease;
+  }}
+  button:hover:not(:disabled)  {{ opacity: 0.88; }}
+  button:active:not(:disabled) {{ transform: translateY(1px); }}
+  button:focus-visible {{
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }}
+  button.ghost {{
+    background: transparent;
+    color: var(--text);
+    border-color: var(--border-strong);
+  }}
+  button.ghost:hover:not(:disabled) {{ background: var(--bg); opacity: 1; }}
+  body.is-recording button.ghost {{
+    color: var(--rec);
+    border-color: color-mix(in srgb, var(--rec) 50%, transparent);
+  }}
+  button:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+
+  .timer {{
+    margin-left: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+  }}
+  .timer.armed {{ color: var(--text); }}
+
+  .progress {{
+    margin-top: 18px;
+    height: 3px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+    display: none;
+  }}
   .progress.show {{ display: block; }}
-  .progress > div {{ height: 100%; background: #2563eb; width: 0%;
-                    transition: width 0.2s ease; }}
-  .status {{ font-size: 13px; margin: 12px 0; min-height: 18px; color: #444; }}
-  .error {{ color: #dc2626; }}
-  .ok {{ color: #16a34a; }}
+  .progress > div {{
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width 220ms ease;
+  }}
+
+  .status {{
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    margin-top: 14px;
+    min-height: 18px;
+  }}
+  .status.error {{
+    color: var(--danger);
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+  }}
+  .status.error::before {{
+    content: "";
+    flex: 0 0 14px;
+    height: 14px;
+    margin-top: 2px;
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 2 1 21h22L12 2zm0 6 7.53 13H4.47L12 8zm-1 4v4h2v-4h-2zm0 6v2h2v-2h-2z'/></svg>") no-repeat center / contain;
+            mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 2 1 21h22L12 2zm0 6 7.53 13H4.47L12 8zm-1 4v4h2v-4h-2zm0 6v2h2v-2h-2z'/></svg>") no-repeat center / contain;
+  }}
+  .status.ok {{ color: var(--success); }}
+
+  footer {{
+    margin: 20px 0 0;
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-subtle);
+  }}
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>Record a short solution explainer</h1>
-  <p class="sub">This brief video helps us verify identity and gives you a chance to walk through your thinking.</p>
+<div class="wrap">
+  <header>
+    <h1>Record a short solution explainer</h1>
+    <p class="lede">A brief video helps us verify your identity and gives you a chance to walk us through your thinking.</p>
+  </header>
 
-  <div class="prompts">
-    <strong>What to cover</strong>
-    <ol id="prompt-list"><li>Loading prompts…</li></ol>
-  </div>
+  <main class="card">
+    <p class="section-label">What to cover</p>
+    <ol class="points" id="prompt-list">
+      <li>Loading prompts…</li>
+    </ol>
 
-  <video id="preview" autoplay muted playsinline></video>
+    <div class="stage">
+      <div class="placeholder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 7l-7 5 7 5V7z"/>
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+        </svg>
+        <span>Waiting for camera</span>
+      </div>
+      <video id="preview" autoplay muted playsinline></video>
+      <span class="rec-pill">Rec</span>
+    </div>
 
-  <div class="controls">
-    <button id="start" disabled>Start recording</button>
-    <button id="stop" class="secondary" disabled>Stop</button>
-    <span class="timer" id="timer">0:00</span>
-  </div>
+    <div class="controls">
+      <button id="enable">Allow camera &amp; microphone</button>
+      <button id="start" disabled hidden>Start recording</button>
+      <button id="stop" class="ghost" disabled hidden>Stop</button>
+      <span class="timer" id="timer" hidden>0:00</span>
+    </div>
 
-  <div class="progress" id="progress"><div></div></div>
-  <div class="status" id="status">Requesting camera access…</div>
+    <div class="progress" id="progress"><div></div></div>
+    <div class="status" id="status">Click "Allow camera &amp; microphone" — your browser will ask for permission.</div>
+    <div id="help" class="status" hidden></div>
+  </main>
+
+  <footer>Uploaded directly and securely. Only the interview team can view this recording.</footer>
 </div>
 
 <script>
@@ -418,6 +674,9 @@ def _render_record_page(token: str) -> str:
   const progressBar = progressEl.firstElementChild;
   const statusEl = $('status');
 
+  const enableBtn = $('enable');
+  const helpEl = $('help');
+
   let initData = null;
   let mediaStream = null;
   let recorder = null;
@@ -430,6 +689,90 @@ def _render_record_page(token: str) -> str:
   function setStatus(msg, cls) {{
     statusEl.textContent = msg;
     statusEl.className = 'status ' + (cls || '');
+  }}
+
+  function setHelp(html) {{
+    if (!html) {{ helpEl.hidden = true; helpEl.innerHTML = ''; return; }}
+    helpEl.hidden = false;
+    helpEl.innerHTML = html;
+    helpEl.className = 'status';
+  }}
+
+  // Distinguish DOMException names so we can hand the candidate something
+  // they can act on. NotAllowedError is the most common — the browser has
+  // either remembered a previous "Block" choice, the OS has revoked
+  // permission, or an enterprise policy is in the way.
+  function explainCameraError(err) {{
+    const name = (err && err.name) ? err.name : String(err);
+    const ua = navigator.userAgent;
+    const isMac = /Mac OS X/i.test(ua);
+    const isChrome = /Chrome|Edg/.test(ua) && !/Firefox/.test(ua);
+    const isFirefox = /Firefox/.test(ua);
+    const isSafari = /Safari/.test(ua) && !/Chrome|Edg/.test(ua);
+
+    if (name === 'NotAllowedError' || name === 'SecurityError') {{
+      const steps = [];
+      if (isChrome) {{
+        steps.push('Click the <strong>lock icon</strong> next to the URL bar, choose <strong>Site settings</strong>, set <strong>Camera</strong> and <strong>Microphone</strong> to <strong>Allow</strong>, then reload this page.');
+      }} else if (isFirefox) {{
+        steps.push('Click the <strong>lock icon</strong> next to the URL bar, click the <strong>×</strong> next to any "Blocked" camera/microphone entry, then reload this page.');
+      }} else if (isSafari) {{
+        steps.push('Open <strong>Safari → Settings → Websites → Camera / Microphone</strong>, set this site to <strong>Allow</strong>, then reload.');
+      }} else {{
+        steps.push('Open your browser\\'s site settings for this page and set Camera and Microphone to <strong>Allow</strong>, then reload.');
+      }}
+      if (isMac) {{
+        steps.push('On macOS also check <strong>System Settings → Privacy &amp; Security → Camera / Microphone</strong> and make sure your browser is checked.');
+      }}
+      steps.push('Or open this link on a phone or another device with a camera.');
+      return {{
+        title: 'Camera and microphone are blocked',
+        body: 'Your browser is blocking access — most often because permission was denied earlier and the choice was remembered.',
+        steps: steps,
+      }};
+    }}
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') {{
+      return {{
+        title: 'No camera or microphone detected',
+        body: 'This device does not seem to have a working camera or microphone.',
+        steps: ['Open this link on a phone or another device that has a camera.'],
+      }};
+    }}
+    if (name === 'NotReadableError' || name === 'TrackStartError') {{
+      return {{
+        title: 'Camera or microphone is in use',
+        body: 'Another app is currently using your camera or microphone.',
+        steps: ['Close any video-call, screen-recording or meeting apps, then click "Try again".'],
+      }};
+    }}
+    return {{
+      title: 'Could not start the camera',
+      body: 'Error: ' + name,
+      steps: ['Reload the page and try again, or open this link on another device.'],
+    }};
+  }}
+
+  function renderHelp(info) {{
+    const lis = info.steps.map((s) => '<li>' + s + '</li>').join('');
+    // Wrap in a single <div> so the .status.error flex layout treats the
+    // whole block (heading + body + steps + button) as one flex child
+    // beside the warning ::before icon — otherwise each tag becomes its
+    // own flex item and they lay out side-by-side.
+    setHelp(
+      '<div>' +
+        '<strong>' + info.title + '</strong><br>' +
+        info.body +
+        '<ol style="margin: 8px 0 0; padding-left: 20px;">' + lis + '</ol>' +
+        '<button id="retry" style="margin-top: 10px;">Try again</button>' +
+      '</div>'
+    );
+    helpEl.classList.add('error');
+    const retry = document.getElementById('retry');
+    if (retry) retry.addEventListener('click', () => {{
+      setHelp('');
+      setStatus('Requesting camera access…');
+      requestCamera();
+    }});
   }}
 
   function fmt(seconds) {{
@@ -463,22 +806,55 @@ def _render_record_page(token: str) -> str:
         li.textContent = p;
         promptList.appendChild(li);
       }});
-      requestCamera();
     }} catch (e) {{
       setStatus(e.message || String(e), 'error');
       promptList.innerHTML = '<li>Video upload unavailable.</li>';
+      enableBtn.disabled = true;
     }}
   }}
 
+  // Trigger getUserMedia from a real user gesture (button click). Some
+  // browsers (notably Safari/iOS) only show the permission prompt when the
+  // call originates inside a user gesture; calling on page load can
+  // silently reject as NotAllowedError without ever asking the user.
+  enableBtn.addEventListener('click', () => {{
+    if (!initData) {{
+      setStatus('Still loading — try again in a moment.', 'error');
+      return;
+    }}
+    enableBtn.disabled = true;
+    setStatus('Requesting camera access…');
+    requestCamera();
+  }});
+
   async function requestCamera() {{
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+      setStatus('This browser does not support recording.', 'error');
+      renderHelp({{
+        title: 'Recording not supported in this browser',
+        body: 'navigator.mediaDevices.getUserMedia is unavailable.',
+        steps: ['Open this link in an up-to-date Chrome, Edge, Firefox or Safari.'],
+      }});
+      enableBtn.disabled = false;
+      return;
+    }}
     try {{
       mediaStream = await navigator.mediaDevices.getUserMedia({{ video: true, audio: true }});
       preview.srcObject = mediaStream;
+      document.body.classList.add('has-stream');
+      enableBtn.hidden = true;
+      startBtn.hidden = false;
+      stopBtn.hidden = false;
+      timerEl.hidden = false;
       startBtn.disabled = false;
       setStatus('Camera ready. Press "Start recording" when you are ready (min ' + minDur + 's, max ' + maxDur + 's).');
+      setHelp('');
     }} catch (err) {{
-      const name = (err && err.name) ? err.name : String(err);
-      setStatus('Camera or microphone unavailable: ' + name + '. Make sure you granted permission and that a device is connected.', 'error');
+      const info = explainCameraError(err);
+      setStatus(info.title, 'error');
+      renderHelp(info);
+      enableBtn.disabled = false;
+      enableBtn.textContent = 'Try permission prompt again';
     }}
   }}
 
@@ -500,6 +876,7 @@ def _render_record_page(token: str) -> str:
     startedAt = Date.now();
     startBtn.disabled = true;
     stopBtn.disabled = true;
+    document.body.classList.add('is-recording');
     setStatus('Recording… you can stop after ' + minDur + 's.');
     timerInterval = setInterval(updateTimer, 200);
   }});
@@ -536,6 +913,7 @@ def _render_record_page(token: str) -> str:
     clearInterval(timerInterval);
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+    document.body.classList.remove('is-recording');
     stopBtn.disabled = true;
     startBtn.disabled = true;
 

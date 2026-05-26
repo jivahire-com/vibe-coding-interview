@@ -436,6 +436,115 @@ describe('inline session lifecycle', () => {
     // Reset for other tests.
     setTelemetryCallback(() => {});
   });
+
+  // ── Bug 1 regression: edit_ai_applied chars must reflect what landed ─────
+  // Original bug: `chars: newText.length` reported the AI's FULL proposal
+  // even when the candidate rejected every hunk. That single misreport
+  // skewed three rubric dimensions against thoughtful candidates:
+  //  - verification_discipline.self_authored_ratio
+  //  - developer_signals.ai_output_modified_ratio
+  //  - llm_eval.ai_applied_pct (shown in the grading prompt)
+  // Fix: sum the GREEN chars of ACCEPTED hunks only.
+
+  test('full-rejection emits edit_ai_applied with chars=0 (Bug 1)', async () => {
+    const { applyCodeBlock, setTelemetryCallback } = await import('../chat/apply');
+    const calls: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    setTelemetryCallback((event, payload) => calls.push({ event, payload: payload as Record<string, unknown> }));
+
+    const proposal = 'int main() { return 99; }\n'; // 26 chars — used to be reported
+    const p = applyCodeBlock('foo.cpp', proposal, 'blk-bug1-reject-all');
+    await new Promise((r) => setImmediate(r));
+    rejectAiChanges('blk-bug1-reject-all');
+    await p;
+
+    const applied = calls.filter((c) => c.event === 'edit_ai_applied');
+    expect(applied).toHaveLength(1);
+    expect(applied[0].payload.chars).toBe(0);
+    expect(applied[0].payload.block_id).toBe('blk-bug1-reject-all');
+
+    setTelemetryCallback(() => {});
+  });
+
+  test('full-accept emits edit_ai_applied with chars matching the accepted text length (Bug 1)', async () => {
+    const { applyCodeBlock, setTelemetryCallback } = await import('../chat/apply');
+    const calls: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    setTelemetryCallback((event, payload) => calls.push({ event, payload: payload as Record<string, unknown> }));
+
+    const proposal = 'int main() { return 99; }';
+    const p = applyCodeBlock('foo.cpp', proposal, 'blk-bug1-accept-all');
+    await new Promise((r) => setImmediate(r));
+    acceptAiChanges('blk-bug1-accept-all');
+    await p;
+
+    const applied = calls.filter((c) => c.event === 'edit_ai_applied');
+    expect(applied).toHaveLength(1);
+    // After accept the file holds `int main() { return 99; }` — 25 green chars.
+    expect(applied[0].payload.chars).toBe(proposal.length);
+
+    setTelemetryCallback(() => {});
+  });
+});
+
+describe('applyCodeBlock chars accounting under mixed accept/reject (Bug 1)', () => {
+  // Build a multi-hunk diff so we can independently accept some hunks and
+  // reject others, then verify the reported chars reflects ONLY accepted ones.
+  let tmpDir: string;
+  let target: string;
+  let acceptHunk: typeof import('../chat/apply').acceptHunk;
+  let rejectHunk: typeof import('../chat/apply').rejectHunk;
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mixed-apply-'));
+    target = path.join(tmpDir, 'multi.cpp');
+    // Three changeable lines separated by stable lines → three distinct hunks.
+    fs.writeFileSync(
+      target,
+      ['line1', 'STABLE_A', 'line2', 'STABLE_B', 'line3', ''].join('\n'),
+      'utf8',
+    );
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: tmpDir } } as { uri: { fsPath: string } },
+    ];
+    jest.clearAllMocks();
+    const mod = await import('../chat/apply');
+    acceptHunk = mod.acceptHunk;
+    rejectHunk = mod.rejectHunk;
+  });
+
+  afterEach(() => {
+    _disposeApplyForTests();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+  });
+
+  test('mixed accept/reject reports chars from accepted green lines only', async () => {
+    const { applyCodeBlock, setTelemetryCallback, _buildHunks } = await import('../chat/apply');
+    const calls: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    setTelemetryCallback((event, payload) => calls.push({ event, payload: payload as Record<string, unknown> }));
+
+    const proposal = ['LINE1_NEW', 'STABLE_A', 'LINE2_NEW', 'STABLE_B', 'LINE3_NEW', ''].join('\n');
+    const original = fs.readFileSync(target, 'utf8');
+    const hunks = _buildHunks(original, proposal);
+    // Sanity: three independent change hunks.
+    expect(hunks.length).toBe(3);
+
+    const p = applyCodeBlock('multi.cpp', proposal, 'blk-bug1-mixed');
+    await new Promise((r) => setImmediate(r));
+
+    // Accept hunk 0 (LINE1_NEW, 9 chars), reject hunks 1 and 2.
+    acceptHunk('blk-bug1-mixed', 0);
+    rejectHunk('blk-bug1-mixed', 1);
+    rejectHunk('blk-bug1-mixed', 2);
+    await p;
+
+    const applied = calls.filter((c) => c.event === 'edit_ai_applied');
+    expect(applied).toHaveLength(1);
+    // Accepted hunk's green is "LINE1_NEW" → 9 chars. NOT the full proposal.
+    expect(applied[0].payload.chars).toBe('LINE1_NEW'.length);
+    expect(applied[0].payload.chars).toBeLessThan(proposal.length);
+
+    setTelemetryCallback(() => {});
+  });
 });
 
 describe('applyCodeBlock surgical multi-block merge (Bug: Apply wipes file)', () => {

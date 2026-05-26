@@ -102,6 +102,7 @@ async def send_invite(
     meet_link: str | None = None,
     scheduled_at: int | None = None,
     session_id: str | None = None,
+    require_end_video: bool = False,
 ) -> None:
     if not settings.sendgrid_api_key:
         log.info("SendGrid key not set — skipping invite email to %s", to_email)
@@ -126,6 +127,38 @@ Scheduled:    {human_time}
           <span style="font-size:0.85em;color:#6b7280">Open the attached
           <code>interview.ics</code> to add this to your calendar in your
           local timezone.</span></td></tr>"""
+
+    # End-video notice: gives candidates a heads-up that after clicking
+    # "Submit" they will be asked to record a short solution-explainer video.
+    # Rendered for every async session (always required) and for panel
+    # sessions where the recruiter ticked "Require end video".
+    end_video_text_block = ""
+    end_video_html_block = ""
+    if require_end_video:
+        end_video_text_block = """
+────────────────────────────────────────
+END-OF-INTERVIEW VIDEO (REQUIRED)
+────────────────────────────────────────
+After you click "Submit" inside VS Code, you'll be asked to record
+a short solution-explainer video (30s–5min) — a brief intro, the
+key decision in your solution, and one tradeoff you made.
+
+The link opens in any browser (or on your phone). Please have a
+working webcam + microphone ready before you submit. You'll have
+10 minutes after submission to record.
+
+"""
+        end_video_html_block = """
+<h3 style="margin-top:28px;color:#111827">End-of-interview video <span style="color:#b91c1c">(required)</span></h3>
+<p>After you click <strong>Submit</strong> inside VS Code, you'll be
+asked to record a <strong>short solution-explainer video</strong>
+(30 seconds&ndash;5 minutes) covering a brief intro, the key
+decision in your solution, and one tradeoff you made.</p>
+<p>The link opens in <strong>any browser</strong> (or on your phone).
+Please have a working <strong>webcam and microphone</strong> ready
+before you submit &mdash; you'll have <strong>10 minutes</strong>
+after submission to record.</p>
+"""
 
     # Panel interview: when a video meeting link is attached, the candidate
     # joins live and shares their screen. The block is appended to the existing
@@ -162,7 +195,7 @@ Session Key:  {session_key}
 Challenge:    {challenge_id}
 Time Limit:   {max_minutes} minutes
 AI Budget:    ${budget_usd:.2f}
-{scheduled_text_block}{meet_text_block}
+{scheduled_text_block}{meet_text_block}{end_video_text_block}
 ────────────────────────────────────────
 STEP 1 — Install VS Code (skip if you already have it)
 ────────────────────────────────────────
@@ -232,6 +265,7 @@ Save this email &mdash; you'll need the session key below to start.</p>
   <tr><td style="padding:4px 12px 4px 0;color:#6b7280">AI Budget</td><td>${budget_usd:.2f}</td></tr>{scheduled_html_block}
 </table>
 {meet_html_block}
+{end_video_html_block}
 <h3 style="margin-top:28px;color:#111827">Step 1 &mdash; Install VS Code</h3>
 <p>Skip this step if you already have it. Otherwise, download and install
 from <a href="https://code.visualstudio.com">code.visualstudio.com</a>

@@ -254,6 +254,56 @@ tbody td { padding: 12px 16px; vertical-align: middle; }
 
 .arrow-btn { color: var(--text-xmuted); font-size: 18px; line-height: 1; }
 
+/* ─── Panel indicator (sessions with a scheduled video panel) ─── */
+.panel-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  background: var(--accent-light);
+  color: var(--accent);
+  cursor: help;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.panel-indicator svg { display: block; }
+.panel-indicator-lg {
+  font-size: 11px;
+  padding: 2px 9px;
+  vertical-align: middle;
+  margin-left: 8px;
+}
+
+/* ─── Hero timing grid (detail view: scheduled / started / ended) ─── */
+.hero-timing {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 10px;
+}
+.hero-timing-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.hero-timing-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  color: var(--text-xmuted);
+}
+.hero-timing-value {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.hero-panelists { margin-top: 8px; }
+
 /* ─── Empty / Loading ─── */
 .empty-state {
   text-align: center;
@@ -341,36 +391,71 @@ tbody td { padding: 12px 16px; vertical-align: middle; }
   margin-bottom: 12px;
 }
 .score-row:last-child { margin-bottom: 0; }
-.score-label { font-size: 13px; color: var(--text); width: 160px; flex-shrink: 0; }
+.score-label { font-size: 13px; color: var(--text); width: 200px; flex-shrink: 0; display: flex; align-items: baseline; gap: 6px; }
 .score-row .info-icon { flex-shrink: 0; }
 .score-bar-wrap { flex: 1; background: var(--surface-alt); border-radius: 99px; height: 6px; overflow: hidden; }
 .score-bar { height: 100%; border-radius: 99px; background: var(--accent); transition: width 0.5s ease; }
 .score-bar.good { background: var(--success); }
 .score-bar.warn { background: var(--warn); }
 .score-bar.poor { background: var(--danger); }
-.score-val { font-size: 13px; font-weight: 700; width: 24px; text-align: right; flex-shrink: 0; }
+.score-val { font-size: 13px; font-weight: 700; width: 32px; text-align: right; flex-shrink: 0; }
+.score-weight {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-xmuted);
+  background: var(--surface-alt);
+  padding: 1px 6px;
+  border-radius: 99px;
+  letter-spacing: .2px;
+}
+
+.breakdown-card { margin-bottom: 16px; }
+.breakdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.breakdown-header h3 { margin: 0; }
+.breakdown-total {
+  font-size: 18px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 99px;
+  background: var(--surface-alt);
+}
+.breakdown-total.score-good { color: var(--success); }
+.breakdown-total.score-warn { color: var(--warn); }
+.breakdown-total.score-poor { color: var(--danger); }
+.breakdown-total-denom { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-left: 2px; }
+
+.score-dim {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.score-dim:first-child { padding-top: 0; }
+.score-dim:last-child { padding-bottom: 0; border-bottom: none; }
+.score-dim .score-row { margin-bottom: 0; }
+.score-reason {
+  margin: 6px 0 0 210px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.score-reason .criterion-term {
+  border-bottom: 1px dotted var(--text-muted);
+  cursor: help;
+}
+@media (max-width: 680px) {
+  .score-label { width: 140px; }
+  .score-reason { margin-left: 0; margin-top: 8px; }
+}
 
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .stat-item {}
 .stat-item .stat-label { font-size: 11px; color: var(--text-xmuted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px; }
 .stat-item .stat-val { font-size: 18px; font-weight: 700; }
 .stat-item .stat-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
-
-.summary-card { margin-bottom: 16px; }
-.summary-line {
-  font-size: 13.5px;
-  line-height: 1.6;
-  color: var(--text);
-  word-break: break-word;
-  padding: 10px 14px;
-  border-left: 3px solid var(--accent);
-  margin-bottom: 8px;
-  background: var(--bg);
-  border-radius: 0 6px 6px 0;
-}
-.summary-line:last-child { margin-bottom: 0; }
-.summary-prefix { font-weight: 700; color: var(--text); }
-.summary-body { color: var(--text-muted); }
 
 .prompts-card { margin-bottom: 16px; }
 .prompts-card h3 { display: flex; align-items: center; gap: 8px; margin: 0; }

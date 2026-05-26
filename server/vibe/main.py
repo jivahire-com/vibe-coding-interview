@@ -6,7 +6,6 @@ from fastapi.staticfiles import StaticFiles
 from vibe.db import bootstrap
 from vibe.logging_config import configure_logging, request_id_middleware
 from vibe.sessions import router as sessions_router
-from vibe.telemetry import router as telemetry_router
 from vibe.submit import router as submit_router
 from vibe.llm_proxy import router as llm_router, backfill_candidate_tokens
 from vibe.challenges_page import router as challenges_page_router
@@ -27,7 +26,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Vibe Interview Server", lifespan=lifespan)
 app.middleware("http")(request_id_middleware)
 app.include_router(sessions_router)
-app.include_router(telemetry_router)
 app.include_router(submit_router)
 app.include_router(llm_router)
 app.include_router(challenges_page_router)
@@ -54,8 +52,16 @@ def _find_vsix() -> str:
     matches.sort(key=_key)
     return os.path.abspath(matches[-1]) if matches else ""
 
-@app.get("/jivahire-vibe-coding-interview.vsix", include_in_schema=False)
+@app.api_route(
+    "/jivahire-vibe-coding-interview.vsix",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
 def download_vsix():
+    # HEAD must hit the same dynamic resolver as GET; otherwise it falls
+    # through to the StaticFiles mount at "/" below, which has historically
+    # served a stale .vsix copy with text/plain headers and the wrong
+    # Content-Length. Pinning both methods on this route closes that gap.
     vsix = _find_vsix()
     if not vsix:
         from fastapi import HTTPException

@@ -29,7 +29,11 @@ _CODE_KEYWORDS = (
     "object", "class", "method", "callback", "promise",
 )
 
-_POST_AI_EDIT_WINDOW_MS = 60_000
+# Aligned to the extension's POST_APPLY_WINDOW_MS (telemetry.ts) so the grader
+# considers exactly the same edits the extension tagged with `post_apply_of`.
+# Previously this was 60s while the extension carried tags for 90s; the 30s
+# gap silently dropped legitimate post-apply edits from the modified-ratio.
+_POST_AI_EDIT_WINDOW_MS = 90_000
 
 
 def compute_developer_confidence(session_id: str, client: OpenAI) -> dict[str, Any]:
@@ -44,23 +48,61 @@ def compute_developer_confidence(session_id: str, client: OpenAI) -> dict[str, A
         if e["event_type"] == "file_open" and e["payload"].get("file")
     }
     signals["files_explored"] = len(files_opened)
+    signals["files_explored_list"] = sorted(files_opened)
+
+    # Time-spent per file from file_focus events emitted by the extension on
+    # editor switch / window unfocus / dispose. A file with an open event but
+    # no focus events (e.g. flipped past too fast for the listener to fire) is
+    # still surfaced with 0 ms so the recruiter sees the full set.
+    file_time_ms: dict[str, int] = {f: 0 for f in files_opened if f}
+    for e in events:
+        if e["event_type"] != "file_focus":
+            continue
+        f = e["payload"].get("file")
+        ms = e["payload"].get("ms")
+        if not f or not isinstance(ms, (int, float)) or ms <= 0:
+            continue
+        file_time_ms[f] = file_time_ms.get(f, 0) + int(ms)
+    signals["files_explored_detail"] = [
+        {"file": f, "ms": ms}
+        for f, ms in sorted(file_time_ms.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
     ai_inserts = [e for e in events if e["event_type"] == "edit_ai_applied"]
     typed = [e for e in events if e["event_type"] == "edit_typed"]
-    post_ai_edits = 0
+    # Char-weighted so the ratio reflects the FRACTION of AI output that the
+    # candidate reworked, not whether *any* keystroke followed an apply. The
+    # prior count-of-events formula reported 100% when a candidate typed a
+    # single comment after a 1,600-char AI apply — flagged in production by
+    # RAH-144. Each typed event counts at most once across all eligible
+    # applies on the same file.
+    ai_chars_total = sum(
+        int(ai["payload"].get("chars") or 0) for ai in ai_inserts
+    )
+    apply_ts_by_file: dict[str, list[int]] = {}
     for ai_e in ai_inserts:
-        ai_file = ai_e["payload"].get("file")
-        ai_ts = ai_e["ts"]
-        for t_e in typed:
-            if t_e["payload"].get("file") != ai_file:
-                continue
+        f = ai_e["payload"].get("file")
+        if f is None:
+            continue
+        apply_ts_by_file.setdefault(f, []).append(ai_e["ts"])
+
+    post_typed_chars = 0
+    for t_e in typed:
+        chars = int(t_e["payload"].get("chars") or 0)
+        if chars <= 0:
+            continue
+        for ai_ts in apply_ts_by_file.get(t_e["payload"].get("file"), ()):
             dt = t_e["ts"] - ai_ts
             if 0 < dt < _POST_AI_EDIT_WINDOW_MS:
-                post_ai_edits += 1
+                post_typed_chars += chars
                 break
-    signals["ai_output_modified_ratio"] = round(
-        post_ai_edits / max(len(ai_inserts), 1), 2
-    )
+
+    if ai_chars_total > 0:
+        signals["ai_output_modified_ratio"] = round(
+            min(post_typed_chars / ai_chars_total, 1.0), 2
+        )
+    else:
+        signals["ai_output_modified_ratio"] = 0
 
     if chat_prompts:
         with_terms = sum(
@@ -146,7 +188,7 @@ def _build_reasoning(client: OpenAI, score: int, verdict: str,
         "facts; only describe what the signals show. Do not output a score.\n\n"
         f"Verdict: {verdict} (score {score}/100)\n"
         f"Files explored: {signals['files_explored']}\n"
-        f"Fraction of AI inserts followed by a typed edit: {signals['ai_output_modified_ratio']}\n"
+        f"Fraction of AI-applied chars reworked by typing within 90s: {signals['ai_output_modified_ratio']}\n"
         f"Fraction of chat prompts using code-specific terms: {signals['prompt_specificity']}\n"
         f"Test runs: {signals['test_runs']}\n"
         f"Used debugger: {signals['used_debugger']}\n"

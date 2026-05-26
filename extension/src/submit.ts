@@ -1,9 +1,8 @@
 import * as vscode from "vscode";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
-import { SessionConfig, submitSession } from "./api";
+import { SessionConfig, submitSession, videoBrowserLink } from "./api";
 import { getLogger } from "./logger";
-import { openVideoRecorder } from "./video/recorder";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,12 +16,38 @@ const GIT_EXEC_OPTS = (cwd: string) => ({
 });
 
 /**
+ * Strip `user:token@host` credentials from any string. Applied to all git
+ * error output before it reaches dialogs, logs, or telemetry — git embeds the
+ * authenticated remote URL in its stderr on clone/push failure and the token
+ * would otherwise leak to the candidate (who can screenshot it) and to any
+ * downstream error sink.
+ */
+export function redactGitAuth(s: string): string {
+  return s.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1***:***@");
+}
+
+function _redactedExecError(args: string[], err: unknown): Error {
+  const raw = err instanceof Error ? (err.message ?? String(err)) : String(err);
+  const stderr = (err as { stderr?: Buffer | string } | null)?.stderr;
+  const stderrStr = stderr instanceof Buffer ? stderr.toString() : (stderr ?? "");
+  const cleaned = redactGitAuth(`${raw}${stderrStr ? `\n${stderrStr}` : ""}`);
+  // Rebuild Error so callers can't accidentally re-leak via err.stderr or err.cmd.
+  const out = new Error(cleaned);
+  (out as Error & { gitArgs?: string[] }).gitArgs = args;
+  return out;
+}
+
+/**
  * Stub-able execFile so tests can mock it via jest.mock('child_process'). We
  * keep this separate from execFileAsync so synchronous flows (post-success
  * cleanup) and the existing test surface both work.
  */
 function git(args: string[], cwd: string): Buffer {
-  return execFileSync("git", args, GIT_EXEC_OPTS(cwd));
+  try {
+    return execFileSync("git", args, GIT_EXEC_OPTS(cwd));
+  } catch (err) {
+    throw _redactedExecError(args, err);
+  }
 }
 
 /** Build an authenticated clone URL without shell interpolation. */
@@ -45,6 +70,12 @@ export interface SubmitDeps {
   onSubmitted?: () => Promise<void> | void;
   /** Tells the dashboard to swap to read-only "Submitted" state. */
   onMarkSubmitted?: () => void;
+  /**
+   * Surface a browser-recording link in the dashboard. VS Code webviews can
+   * not access camera/mic, so the only working recording path is for the
+   * candidate to open the link in a real browser (or on a phone).
+   */
+  onShowVideoLink?: (url: string, expiresUnix: number) => void;
 }
 
 export async function runSubmit(
@@ -92,8 +123,16 @@ export async function runSubmit(
         // Post-submit identity-verification video. Server gates this behind a
         // config check and returns `video_upload` only when S3/CloudFront are
         // configured. Recording is optional and runs in parallel with grading.
-        if (resp.video_upload) {
-          try { openVideoRecorder(config); } catch { /* never block submit */ }
+        // We mint a browser-recording link and surface it in the dashboard —
+        // the candidate opens it in a real browser (camera/mic do not work
+        // inside VS Code webviews). Errors are swallowed: never block submit.
+        if (resp.video_upload && deps.onShowVideoLink) {
+          try {
+            const link = await videoBrowserLink(config);
+            deps.onShowVideoLink(link.url, link.expires_unix);
+          } catch (e) {
+            log?.errorFromException("video_link_mint_failed", e);
+          }
         }
       } catch (err: unknown) {
         log?.errorFromException("submit_failed", err);
@@ -203,7 +242,13 @@ export async function gitCommitAndPushAsync(
   message: string,
   allowEmpty: boolean
 ): Promise<void> {
-  const run = (args: string[]) => execFileAsync("git", args, GIT_EXEC_OPTS(ws));
+  const run = async (args: string[]) => {
+    try {
+      return await execFileAsync("git", args, GIT_EXEC_OPTS(ws));
+    } catch (err) {
+      throw _redactedExecError(args, err);
+    }
+  };
 
   await run(["config", "user.email", "candidate@vibe-interview.local"]);
   await run(["config", "user.name", "Candidate"]);

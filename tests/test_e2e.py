@@ -10,13 +10,13 @@ from httpx import ASGITransport, AsyncClient, Response
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.environ.update({
     "OPENAI_API_KEY": "sk-test",
-    "GITHUB_BOT_PAT": "ghp-test",
     "GITHUB_CHALLENGES_REPO": "test-org/test-repo",
     "GITHUB_CHALLENGES_OWNER": "",
     "ADMIN_TOKEN": "admin-secret",
     "DB_PATH": _db_path,
     "LLM_BASE_URL": "https://openrouter.ai/api/v1",
 })
+# GitHub App env + mint stub are set in tests/conftest.py.
 
 from vibe.main import app  # noqa: E402
 from vibe.db import bootstrap, execute, query  # noqa: E402
@@ -83,18 +83,6 @@ async def test_rate_limit_validate_session(client):
     assert r.status_code == 429
 
 
-async def test_telemetry_bulk_insert(client, active_session):
-    key, _ = active_session
-    events = [{"ts": 1_000_000 + i, "event_type": "edit_batch", "payload": {"chars": i}} for i in range(5)]
-    r = await client.post(
-        "/api/v1/telemetry",
-        json={"events": events},
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    assert r.status_code == 204
-    assert query("SELECT COUNT(*) as n FROM telemetry")[0]["n"] == 5
-
-
 async def test_budget_exhausted_gate(client, active_session):
     """Budget gate returns 402 when llm_spent_usd >= llm_budget_usd."""
     key, sid = active_session
@@ -127,27 +115,6 @@ async def test_admin_invites_alias(client):
     assert r.status_code == 201
     assert "session_id" in r.json()
     assert "branch" in r.json()
-
-
-async def test_telemetry_window_events(client, active_session):
-    """app_focused with time_away_seconds and edit_pasted with suspicious_paste are stored."""
-    key, _ = active_session
-    events = [
-        {"ts": 2_000_000, "event_type": "app_unfocused", "payload": {"ts": 2_000_000}},
-        {"ts": 2_005_000, "event_type": "app_focused", "payload": {"time_away_seconds": 5.0}},
-        {"ts": 2_005_500, "event_type": "edit_pasted", "payload": {"chars": 50, "suspicious_paste": True}},
-    ]
-    r = await client.post(
-        "/api/v1/telemetry",
-        json={"events": events},
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    assert r.status_code == 204
-    rows = query("SELECT event_type FROM telemetry ORDER BY ts")
-    types = [row["event_type"] for row in rows]
-    assert "app_unfocused" in types
-    assert "app_focused" in types
-    assert "edit_pasted" in types
 
 
 async def test_create_session_with_meet_link_round_trip(client):
@@ -227,7 +194,11 @@ async def test_panel_session_round_trip_with_schedule_and_panelists(client, monk
 
     with respx.mock:
         _mock_github()
-        scheduled = 1_800_000_000  # 2027-01-15
+        # Past timestamp on purpose — this test is about the panel-config
+        # round-trip (DB write, validate-session response shape, panel invites),
+        # NOT the early-start gate. A future schedule would be intercepted by
+        # the gate and return 403 before we can verify the round-trip.
+        scheduled = 1_700_000_000  # 2023-11-14
         r = await client.post(
             "/api/v1/sessions",
             json={
@@ -295,6 +266,158 @@ async def test_panel_session_rejects_scheduled_at_in_millis(client):
         headers=_ADMIN,
     )
     assert r.status_code == 422
+
+
+# ── Early-start gate for scheduled panel interviews ──────────────────────────
+#
+# A scheduled panel session must not let the candidate clone/start before the
+# scheduled time — interviewers won't be on the call yet, and starting early
+# would burn the candidate's countdown before they're supposed to begin.
+# These tests pin the gate's edges: panel vs. async, future vs. past schedule,
+# panelists-only (no meet link) — only future-scheduled PANEL sessions are
+# blocked; everything else still validates and the session goes ACTIVE.
+
+
+async def test_validate_session_rejects_future_scheduled_panel(client):
+    """A panel session whose scheduled_at is in the future returns 403 with a
+    structured detail carrying scheduled_at and a candidate-friendly message.
+    The session must stay PENDING (no branch was created, timer not started)."""
+    import time as _time
+
+    future = int(_time.time()) + 3600  # 1 hour from now
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "EARLY-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+                "scheduled_at": future,
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post(
+            "/api/v1/validate-session", json={"session_key": "EARLY-001"}
+        )
+
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert detail["code"] == "session_not_yet_open"
+    assert detail["scheduled_at"] == future
+    assert "scheduled for" in detail["message"]
+
+    # The branch-creation path must not have run — session is still pending.
+    rows = query("SELECT status FROM sessions WHERE session_key = ?", ("EARLY-001",))
+    assert rows[0]["status"] == "pending"
+
+
+async def test_validate_session_allows_past_scheduled_panel(client):
+    """A panel session whose scheduled_at is in the past validates normally —
+    the gate is only for early-starters, not late-starters."""
+    import time as _time
+
+    past = int(_time.time()) - 600  # 10 min ago
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "ONTIME-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+                "scheduled_at": past,
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post(
+            "/api/v1/validate-session", json={"session_key": "ONTIME-001"}
+        )
+
+    assert r.status_code == 200
+    assert r.json()["scheduled_at"] == past
+
+
+async def test_validate_session_allows_future_scheduled_async(client):
+    """An async session (no meet_link, no panelists) is never gated, even when
+    scheduled_at is in the future — only panel interviews need the gate."""
+    import time as _time
+
+    future = int(_time.time()) + 3600
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "ASYNC-FUT-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "scheduled_at": future,
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post(
+            "/api/v1/validate-session", json={"session_key": "ASYNC-FUT-001"}
+        )
+
+    assert r.status_code == 200
+
+
+async def test_validate_session_allows_panel_without_schedule(client):
+    """A panel session with no scheduled_at has no gate — start anytime."""
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "PANEL-NOSCHED-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post(
+            "/api/v1/validate-session", json={"session_key": "PANEL-NOSCHED-001"}
+        )
+
+    assert r.status_code == 200
+
+
+async def test_validate_session_blocks_panelists_only_future_schedule(client, monkeypatch):
+    """The panel signal is meet_link OR panelist_emails — a future-scheduled
+    session with panelists but no meet_link is still gated."""
+    import time as _time
+
+    # Stub the panel-invite path so the test doesn't try to send real emails.
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr("vibe.sessions.send_invite", _noop)
+    monkeypatch.setattr("vibe.sessions.send_panelist_invite", _noop)
+
+    future = int(_time.time()) + 3600
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "PANELISTS-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "panelist_emails": ["lead@x.com"],
+                "scheduled_at": future,
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post(
+            "/api/v1/validate-session", json={"session_key": "PANELISTS-001"}
+        )
+
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "session_not_yet_open"
 
 
 def test_build_ics_generates_valid_vevent():
@@ -369,3 +492,216 @@ async def test_job_claim_atomicity():
     t1.start(); t2.start()
     t1.join(); t2.join()
     assert len([r for r in results if r is not None]) == 1
+
+
+# ── GitHub App token integration ─────────────────────────────────────────────
+
+
+async def test_validate_session_returns_scoped_installation_token(client):
+    """validate-session must return a `ghs_` installation token (NOT a `ghp_*`
+    PAT) plus an expiration timestamp the extension can use to schedule
+    refreshes. This pins the security contract: a candidate-facing token is
+    short-lived and scoped to one repo."""
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "GHA-001")
+        r = await client.post("/api/v1/validate-session", json={"session_key": "GHA-001"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["github_clone_token"].startswith("ghs_"), \
+        "candidate must receive an installation token, never a PAT"
+    # Stub returns the repo name embedded in the token — pins that the mint
+    # call was scoped to the candidate's repo, not minted globally.
+    assert "test-org/test-repo" in body["github_clone_token"]
+    assert isinstance(body["github_clone_token_expires_at"], int)
+    assert body["github_clone_token_expires_at"] > 0
+
+
+async def test_refresh_github_token_active_session(client, active_session):
+    """An active session can mint fresh tokens via the refresh endpoint."""
+    key, _ = active_session
+    r = await client.post(
+        "/api/v1/refresh-github-token",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["github_clone_token"].startswith("ghs_")
+    assert isinstance(body["github_clone_token_expires_at"], int)
+
+
+async def test_refresh_github_token_rejects_submitted_session(client, active_session):
+    """A submitted session must NOT be able to keep cycling clone tokens —
+    that would let a candidate push to their branch after the cutoff."""
+    key, sid = active_session
+    execute("UPDATE sessions SET status='submitted' WHERE id = ?", (sid,))
+    r = await client.post(
+        "/api/v1/refresh-github-token",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert r.status_code == 409
+
+
+async def test_refresh_github_token_requires_bearer(client):
+    r = await client.post("/api/v1/refresh-github-token")
+    assert r.status_code == 401
+
+
+# ── End-of-interview video gating ────────────────────────────────────────────
+# The post-submit explainer video defaults to "required for async, skipped for
+# panel". A per-session `require_end_video` flag overrides the panel skip so
+# recruiters can force a recording even when a meet link is attached.
+
+
+def _enable_video_feature(monkeypatch):
+    """Force the S3/CloudFront feature flag on for tests — we monkeypatch the
+    bound names in each module rather than the env so we don't have to spin
+    up boto3 to satisfy the upload code paths."""
+    monkeypatch.setattr("vibe.sessions.video_feature_enabled", lambda: True)
+    monkeypatch.setattr("vibe.submit.video_feature_enabled", lambda: True)
+
+
+async def test_validate_session_require_end_video_true_for_async(client, monkeypatch):
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "VID-ASYNC-001")
+        r = await client.post("/api/v1/validate-session", json={"session_key": "VID-ASYNC-001"})
+    assert r.status_code == 200
+    assert r.json()["require_end_video"] is True
+
+
+async def test_validate_session_require_end_video_false_for_panel_default(client, monkeypatch):
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "VID-PANEL-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+            headers=_ADMIN,
+        )
+        r = await client.post("/api/v1/validate-session", json={"session_key": "VID-PANEL-001"})
+    assert r.status_code == 200
+    assert r.json()["require_end_video"] is False
+
+
+async def test_validate_session_require_end_video_true_for_panel_override(client, monkeypatch):
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "VID-PANEL-002",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+                "require_end_video": True,
+            },
+            headers=_ADMIN,
+        )
+        # Persisted on the row so other code paths (submit gating) can read it.
+        rows = query(
+            "SELECT require_end_video FROM sessions WHERE session_key='VID-PANEL-002'"
+        )
+        assert rows[0]["require_end_video"] == 1
+        r = await client.post("/api/v1/validate-session", json={"session_key": "VID-PANEL-002"})
+    assert r.status_code == 200
+    assert r.json()["require_end_video"] is True
+
+
+async def test_validate_session_require_end_video_false_when_feature_disabled(client, monkeypatch):
+    """Server is mis-configured (no S3 / CloudFront) — never ask the candidate
+    to record a video they can't actually upload, even on an async session."""
+    monkeypatch.setattr("vibe.sessions.video_feature_enabled", lambda: False)
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "VID-NOFEAT-001")
+        r = await client.post("/api/v1/validate-session", json={"session_key": "VID-NOFEAT-001"})
+    assert r.status_code == 200
+    assert r.json()["require_end_video"] is False
+
+
+async def test_submit_skips_video_upload_for_panel_default(client, monkeypatch):
+    """Panel session, no override → submit response omits `video_upload`."""
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "SUB-PANEL-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+            headers=_ADMIN,
+        )
+        await client.post("/api/v1/validate-session", json={"session_key": "SUB-PANEL-001"})
+        r = await client.post(
+            "/api/v1/submit",
+            headers={"Authorization": "Bearer SUB-PANEL-001"},
+        )
+    assert r.status_code == 202
+    assert "video_upload" not in r.json()
+
+
+async def test_submit_includes_video_upload_for_panel_when_override(client, monkeypatch):
+    """Panel session with require_end_video=True → submit response carries the
+    `video_upload` block so the extension mints a browser recording link."""
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "SUB-PANEL-002",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+                "require_end_video": True,
+            },
+            headers=_ADMIN,
+        )
+        await client.post("/api/v1/validate-session", json={"session_key": "SUB-PANEL-002"})
+        r = await client.post(
+            "/api/v1/submit",
+            headers={"Authorization": "Bearer SUB-PANEL-002"},
+        )
+    assert r.status_code == 202
+    body = r.json()
+    assert "video_upload" in body
+    assert body["video_upload"]["min_duration_seconds"] >= 1
+
+
+async def test_invite_email_mentions_end_video_when_required(client, monkeypatch):
+    """Async session (always requires end video when the feature is enabled)
+    — the invite email carries the heads-up section. Panel session without
+    the override does not."""
+    _enable_video_feature(monkeypatch)
+    captured: list[dict] = []
+
+    async def fake_send_invite(*args, **kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr("vibe.sessions.send_invite", fake_send_invite)
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "MAIL-ASYNC-001")
+        await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "MAIL-PANEL-001",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-lru-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+            headers=_ADMIN,
+        )
+    assert captured[0]["require_end_video"] is True
+    assert captured[1]["require_end_video"] is False

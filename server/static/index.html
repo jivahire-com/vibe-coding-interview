@@ -127,7 +127,15 @@
           <template x-for="s in filteredSessions" :key="s.id">
             <tr @click="openDetail(s.id)">
               <td>
-                <div x-text="s.candidate_email" class="truncate" style="max-width:200px"></div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <div x-text="s.candidate_email" class="truncate" style="max-width:200px"></div>
+                  <template x-if="hasPanel(s)">
+                    <span class="panel-indicator" :title="panelTooltip(s)" @click.stop>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                      <span>Panel</span>
+                    </span>
+                  </template>
+                </div>
                 <div class="text-sm text-muted font-mono" x-text="s.session_key"></div>
               </td>
               <td x-text="s.challenge_id"></td>
@@ -199,122 +207,76 @@
             </div>
           </div>
           <div class="hero-meta">
-            <h2 x-text="selectedSession.session.candidate_email"></h2>
+            <h2>
+              <span x-text="selectedSession.session.candidate_email"></span>
+              <template x-if="hasPanel(selectedSession.session)">
+                <span class="panel-indicator panel-indicator-lg" :title="panelTooltip(selectedSession.session)">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                  <span>Panel</span>
+                </span>
+              </template>
+            </h2>
             <p>
               <span x-text="selectedSession.session.challenge_id"></span>
               &nbsp;·&nbsp;
               <span class="badge" :class="`badge-${selectedSession.session.status}`" x-text="selectedSession.session.status"></span>
-              <template x-if="selectedSession.session.meet_link">
+              <template x-if="selectedSession.session.meet_link && (selectedSession.session.status === 'pending' || selectedSession.session.status === 'active')">
                 <a class="btn btn-primary btn-sm" :href="selectedSession.session.meet_link" target="_blank" rel="noopener" style="margin-left:8px">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                   Open video call
                 </a>
               </template>
             </p>
-            <p class="text-sm text-muted" style="margin-top:6px">
-              Started: <span x-text="formatDate(selectedSession.session.started_at)"></span>
-              &nbsp;·&nbsp;
-              Submitted: <span x-text="formatDate(selectedSession.session.submitted_at)"></span>
-            </p>
-            <template x-if="selectedSession.session.scheduled_at">
-              <p class="text-sm text-muted" style="margin-top:4px">
-                Scheduled: <strong x-text="formatDate(selectedSession.session.scheduled_at)"></strong>
-              </p>
-            </template>
+            <div class="hero-timing">
+              <template x-if="selectedSession.session.scheduled_at">
+                <div class="hero-timing-item">
+                  <span class="hero-timing-label">Scheduled</span>
+                  <span class="hero-timing-value" x-text="formatDate(selectedSession.session.scheduled_at)"></span>
+                </div>
+              </template>
+              <div class="hero-timing-item">
+                <span class="hero-timing-label">Started</span>
+                <span class="hero-timing-value" x-text="formatDate(selectedSession.session.started_at)"></span>
+              </div>
+              <div class="hero-timing-item">
+                <span class="hero-timing-label">Ended</span>
+                <span class="hero-timing-value" x-text="formatDate(selectedSession.session.submitted_at)"></span>
+              </div>
+            </div>
             <template x-if="selectedSession.session.panelist_emails">
-              <p class="text-sm text-muted" style="margin-top:4px">
-                Panel: <span x-text="selectedSession.session.panelist_emails"></span>
+              <p class="text-sm text-muted hero-panelists">
+                <strong>Panelists:</strong> <span x-text="selectedSession.session.panelist_emails"></span>
               </p>
             </template>
           </div>
         </div>
 
-        <!-- Solution explainer video (post-submit identity verification) -->
-        <template x-if="selectedSession.session.video_s3_key">
-          <div class="card" style="margin-bottom:16px">
-            <h3>Solution Explainer Video</h3>
-            <template x-if="selectedSession.videoUrl">
-              <div>
-                <video controls preload="metadata" style="width:100%;max-width:640px;border-radius:6px"
-                       :src="selectedSession.videoUrl"></video>
-                <p class="text-sm text-muted" style="margin-top:8px">
-                  Duration: <span x-text="selectedSession.session.video_duration_seconds"></span>s ·
-                  Uploaded: <span x-text="formatDate(selectedSession.session.video_uploaded_at)"></span>
-                </p>
-              </div>
-            </template>
-            <template x-if="!selectedSession.videoUrl">
-              <p class="text-muted" style="font-size:13px">Video metadata stored, but playback URL is unavailable (CloudFront not configured).</p>
-            </template>
-          </div>
-        </template>
-        <template x-if="!selectedSession.session.video_s3_key && selectedSession.session.status !== 'active' && selectedSession.session.status !== 'pending'">
-          <div class="card" style="margin-bottom:16px">
-            <h3>Solution Explainer Video</h3>
-            <p class="text-muted" style="font-size:13px">Candidate did not upload a video.</p>
-          </div>
-        </template>
-
-        <!-- Score grids -->
+        <!-- Solution explainer video (left) + Developer Signal (right) -->
         <div class="detail-grid">
-
-          <!-- Automated -->
-          <div class="card">
-            <h3>Automated Tests</h3>
-            <template x-if="selectedSession.grade">
-              <div>
-                <div class="score-row">
-                  <span class="score-label">Tests passed</span>
-                  <div class="score-bar-wrap">
-                    <div class="score-bar" :class="scoreColor(selectedSession.grade.tests_passed / (selectedSession.grade.tests_total || 1) * 10)"
-                         :style="`width:${Math.round(selectedSession.grade.tests_passed / (selectedSession.grade.tests_total || 1) * 100)}%`"></div>
-                  </div>
-                  <span class="score-val text-muted" x-text="`${selectedSession.grade.tests_passed}/${selectedSession.grade.tests_total}`"></span>
-                  <span class="info-icon" title="How many of the hidden quality checks the candidate's code passed.">i</span>
+          <template x-if="selectedSession.session.video_s3_key">
+            <div class="card">
+              <h3>Solution Explainer Video</h3>
+              <template x-if="selectedSession.videoUrl">
+                <div>
+                  <video controls preload="metadata" style="width:100%;max-width:640px;border-radius:6px"
+                         :src="selectedSession.videoUrl"></video>
+                  <p class="text-sm text-muted" style="margin-top:8px">
+                    Duration: <span x-text="selectedSession.session.video_duration_seconds"></span>s ·
+                    Uploaded: <span x-text="formatDate(selectedSession.session.video_uploaded_at)"></span>
+                  </p>
                 </div>
-                <div class="score-row">
-                  <span class="score-label">Traps detected</span>
-                  <div class="score-bar-wrap">
-                    <div class="score-bar" :class="scoreColor(selectedSession.grade.traps_detected / (selectedSession.grade.traps_total || 1) * 10)"
-                         :style="`width:${Math.round(selectedSession.grade.traps_detected / (selectedSession.grade.traps_total || 1) * 100)}%`"></div>
-                  </div>
-                  <span class="score-val text-muted" x-text="`${selectedSession.grade.traps_detected}/${selectedSession.grade.traps_total}`"></span>
-                  <span class="info-icon" title="Intentional bugs hidden in the starter code. This shows how many the candidate caught and fixed.">i</span>
-                </div>
-              </div>
-            </template>
-            <template x-if="!selectedSession.grade">
-              <p class="text-muted" style="font-size:13px">Not yet graded.</p>
-            </template>
-          </div>
-
-          <!-- LLM Scores -->
-          <div class="card">
-            <h3>LLM Evaluation</h3>
-            <template x-if="selectedSession.grade">
-              <div>
-                <template x-for="[label, key] in [
-                  ['Code Quality', 'code_quality_score'],
-                  ['AI Orchestration', 'ai_orchestration_score'],
-                  ['Architectural', 'architectural_reasoning_score'],
-                  ['Prompt Quality', 'prompt_quality_score'],
-                ]" :key="key">
-                  <div class="score-row">
-                    <span class="score-label" x-text="label"></span>
-                    <div class="score-bar-wrap">
-                      <div class="score-bar" :class="scoreColor(selectedSession.grade[key])"
-                           :style="`width:${scoreBarWidth(selectedSession.grade[key])}`"></div>
-                    </div>
-                    <span class="score-val" :class="scoreCssClass(selectedSession.grade[key])"
-                          x-text="selectedSession.grade[key] ?? '—'"></span>
-                  </div>
-                </template>
-              </div>
-            </template>
-            <template x-if="!selectedSession.grade">
-              <p class="text-muted" style="font-size:13px">Not yet graded.</p>
-            </template>
-          </div>
+              </template>
+              <template x-if="!selectedSession.videoUrl">
+                <p class="text-muted" style="font-size:13px">Video metadata stored, but playback URL is unavailable (CloudFront not configured).</p>
+              </template>
+            </div>
+          </template>
+          <template x-if="!selectedSession.session.video_s3_key && selectedSession.session.status !== 'active' && selectedSession.session.status !== 'pending'">
+            <div class="card">
+              <h3>Solution Explainer Video</h3>
+              <p class="text-muted" style="font-size:13px">Candidate did not upload a video.</p>
+            </div>
+          </template>
 
           <!-- Developer Signal (behavioral — NOT part of the score) -->
           <div class="card">
@@ -331,9 +293,9 @@
                         x-text="selectedSession.grade.developer_confidence_verdict"></span>
                 </div>
                 <p class="text-sm" style="margin:0 0 10px" x-text="selectedSession.grade.developer_confidence_reasoning || ''"></p>
-                <details>
-                  <summary class="text-sm text-muted" style="cursor:pointer">Signal breakdown</summary>
-                  <div class="stat-grid" style="margin-top:8px" x-data="{ sigs: parseDevConfidenceSignals(selectedSession.grade.developer_confidence_signals) }">
+                <div x-data="{ sigs: parseDevConfidenceSignals(selectedSession.grade.developer_confidence_signals) }">
+                  <div class="text-sm text-muted" style="margin-top:12px;margin-bottom:6px">Signal breakdown</div>
+                  <div class="stat-grid">
                     <div class="stat-item">
                       <div class="stat-label">Files explored</div>
                       <div class="stat-val" x-text="sigs.files_explored ?? '—'"></div>
@@ -355,13 +317,50 @@
                       <div class="stat-val" x-text="sigs.used_debugger ? 'yes' : 'no'"></div>
                     </div>
                   </div>
-                </details>
+                  <template x-if="Array.isArray(sigs.files_explored_detail) && sigs.files_explored_detail.length > 0">
+                    <div style="margin-top:12px">
+                      <div class="text-sm text-muted" style="margin-bottom:6px">Files opened</div>
+                      <div style="max-height:220px;overflow-y:auto;border:1px solid var(--border, #e5e7eb);border-radius:4px">
+                        <table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:12px">
+                          <thead>
+                            <tr style="background:var(--bg-subtle, #f9fafb);position:sticky;top:0">
+                              <th style="text-align:left;padding:6px 10px;font-weight:600">File</th>
+                              <th style="text-align:right;padding:6px 10px;font-weight:600;white-space:nowrap">Time spent</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <template x-for="row in sigs.files_explored_detail" :key="row.file">
+                              <tr style="border-top:1px solid var(--border, #e5e7eb)">
+                                <td style="padding:4px 10px" x-text="row.file"></td>
+                                <td style="padding:4px 10px;text-align:right;white-space:nowrap" x-text="fmtDuration(row.ms)"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="(!sigs.files_explored_detail || sigs.files_explored_detail.length === 0) && Array.isArray(sigs.files_explored_list) && sigs.files_explored_list.length > 0">
+                    <div style="margin-top:12px">
+                      <div class="text-sm text-muted" style="margin-bottom:6px">Files opened</div>
+                      <ul style="margin:0;padding-left:18px;font-family:monospace;font-size:12px;line-height:1.5;max-height:180px;overflow-y:auto">
+                        <template x-for="f in sigs.files_explored_list" :key="f">
+                          <li x-text="f"></li>
+                        </template>
+                      </ul>
+                    </div>
+                  </template>
+                </div>
               </div>
             </template>
             <template x-if="!selectedSession.grade || selectedSession.grade.developer_confidence_score === null || selectedSession.grade.developer_confidence_score === undefined">
               <p class="text-muted" style="font-size:13px">Not yet computed.</p>
             </template>
           </div>
+        </div>
+
+        <!-- Score grids -->
+        <div class="detail-grid">
 
           <!-- Activity -->
           <div class="card">
@@ -397,7 +396,27 @@
                 <div class="stat-val" :class="selectedSession.suspicious_pastes > 0 ? 'score-poor' : ''" x-text="selectedSession.suspicious_pastes ?? 0"></div>
                 <div class="stat-sub">paste after refocus</div>
               </div>
+              <div class="stat-item"
+                   :title="(selectedSession.protected_file_edits || []).map(e => e.file + ' (' + e.source + ')').join('\n')">
+                <div class="stat-label">Protected file edits</div>
+                <div class="stat-val"
+                     :class="(selectedSession.protected_file_edits || []).length > 0 ? 'score-poor' : ''"
+                     x-text="(selectedSession.protected_file_edits || []).length"></div>
+                <div class="stat-sub">tampered .jivahire/ files</div>
+              </div>
             </div>
+            <!-- Tampered file detail (only when present) -->
+            <template x-if="(selectedSession.protected_file_edits || []).length > 0">
+              <div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: var(--bg-warn, #fff4e6); border-left: 3px solid var(--border-warn, #f59e0b); border-radius: 4px;">
+                <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem;">Grader-owned files modified:</div>
+                <template x-for="edit in selectedSession.protected_file_edits" :key="edit.file">
+                  <div style="font-family: monospace; font-size: 0.8rem;">
+                    <span x-text="edit.file"></span>
+                    <span style="color: var(--text-muted, #6b7280); margin-left: 0.5rem;" x-text="'(' + edit.source + ')'"></span>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
 
           <!-- Token usage -->
@@ -426,6 +445,50 @@
               </div>
             </div>
           </div>
+
+        </div>
+
+        <!-- Score Breakdown + Grader Summary (always rendered in canonical
+             COMPOSITE_WEIGHTS order — reasoning line sits under each row so
+             the score and its justification can never drift apart) -->
+        <div class="card breakdown-card">
+          <div class="breakdown-header">
+            <h3>Score Breakdown</h3>
+            <template x-if="selectedSession.grade">
+              <span class="breakdown-total" :class="scoreCssClass(selectedSession.grade.total_score)">
+                <span x-text="Number(selectedSession.grade.total_score).toFixed(1)"></span><span class="breakdown-total-denom">/10</span>
+              </span>
+            </template>
+          </div>
+          <template x-if="selectedSession.grade">
+            <div x-data="{ reasons: summaryReasonByLabel(selectedSession.grade) }">
+              <template x-for="dim in scoreDimensions" :key="dim.key">
+                <div class="score-dim">
+                  <div class="score-row">
+                    <span class="score-label">
+                      <span x-text="dim.label"></span>
+                      <span class="score-weight" x-text="`${dim.weight}%`"></span>
+                    </span>
+                    <div class="score-bar-wrap">
+                      <div class="score-bar"
+                           :class="scoreColor(dimensionScore(selectedSession.grade, dim))"
+                           :style="`width:${scoreBarWidth(dimensionScore(selectedSession.grade, dim))}`"></div>
+                    </div>
+                    <span class="score-val"
+                          :class="dim.kind === 'fraction' ? 'text-muted' : scoreCssClass(dimensionScore(selectedSession.grade, dim))"
+                          x-text="dimensionDisplay(selectedSession.grade, dim)"></span>
+                    <span class="info-icon" :title="dim.tip">i</span>
+                  </div>
+                  <p class="score-reason" x-show="reasons[dim.label]"
+                     x-data="{ get parts() { return parseReasonParts(reasons[dim.label] || ''); } }"
+                  ><span x-text="parts.prefix"></span><span class="criterion-term" x-show="parts.term" :title="parts.glossary" x-text="parts.term"></span><span x-text="parts.suffix"></span></p>
+                </div>
+              </template>
+            </div>
+          </template>
+          <template x-if="!selectedSession.grade">
+            <p class="text-muted" style="font-size:13px">Not yet graded.</p>
+          </template>
         </div>
 
         <!-- Candidate Prompts -->
@@ -491,23 +554,15 @@
           </template>
         </div>
 
-        <!-- Grader Summary -->
-        <template x-if="selectedSession.grade?.grader_summary">
-          <div class="card summary-card">
-            <h3>Grader Summary</h3>
-            <template x-for="line in selectedSession.grade.grader_summary.split(' | ')" :key="line">
-              <p class="summary-line" x-data="{ p: parseSummaryLine(line) }">
-                <span class="summary-prefix" x-show="p.matched" x-text="p.label + ' (' + p.score + '): '"></span><span class="summary-body" x-text="p.matched ? p.body : line"></span>
-              </p>
-            </template>
-          </div>
-        </template>
       </div>
     </template>
   </div>
 
   <!-- ═══════════════════════ INVITE DRAWER ═══════════════════════ -->
-  <div x-show="showInvitePanel" x-transition.opacity class="overlay" @click.self="closeInvite()">
+  <div x-show="showInvitePanel" x-transition.opacity class="overlay"
+       x-data="{ overlayMouseDown: false }"
+       @mousedown="overlayMouseDown = ($event.target === $el)"
+       @click.self="if (overlayMouseDown) closeInvite()">
     <div class="drawer" @click.stop>
       <div class="drawer-header">
         <h2>Send Interview Invite</h2>
@@ -613,7 +668,7 @@
             </p>
           </div>
 
-          <div class="field" style="margin-bottom:0">
+          <div class="field">
             <label>
               Panelist Emails (optional)
               <span class="info-icon" title="Other interviewers to invite. They get the meeting link, not the session key.">i</span>
@@ -622,6 +677,18 @@
                       x-model="inviteForm.panelistEmails" :disabled="!!inviteResult"></textarea>
             <p class="input-hint" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
               Leave blank if only you and the candidate will join. Comma-separated. Each panelist gets the meeting link and calendar invite.
+            </p>
+          </div>
+
+          <div class="field" style="margin-bottom:0">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:normal;">
+              <input type="checkbox" x-model="inviteForm.requireEndVideo" :disabled="!!inviteResult"
+                     style="width:auto;margin:0;" />
+              <span><strong>Also require an end-of-interview video</strong></span>
+              <span class="info-icon" title="Panel sessions normally skip the post-submit explainer video since interviewers verify identity live. Tick this to require it anyway.">i</span>
+            </label>
+            <p class="input-hint" style="margin:4px 0 0 24px;font-size:11px;color:var(--vscode-descriptionForeground);">
+              By default a panel session skips the post-submit video. Tick to ask the candidate for a 30s&ndash;5min explainer after they click Submit.
             </p>
           </div>
         </div>

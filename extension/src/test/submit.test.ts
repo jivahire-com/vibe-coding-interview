@@ -14,6 +14,7 @@ import {
   gitCommitAndPushAsync,
   buildAuthedRemoteUrl,
   buildUnauthedRemoteUrl,
+  redactGitAuth,
   runSubmit,
 } from '../submit';
 import { execFileSync, execFile } from 'child_process';
@@ -200,6 +201,52 @@ describe('gitCommitAndPush', () => {
     }
     // And the hostile token never lands in an unrelated arg position.
     expect(gitCalls().every((c) => !c.args.includes('rm -rf /tmp/foo'))).toBe(true);
+  });
+});
+
+describe('redactGitAuth (token must not leak through errors)', () => {
+  test('scrubs x-access-token:<token>@ from a clone-failure message', () => {
+    const raw =
+      "Command failed: git clone -b interview/abc " +
+      "https://x-access-token:ghp_FAKEPAT0000000000000000000000000000000@github.com/org/repo.git C:\\Users\\x\\vibe-abc\n" +
+      "fatal: early EOF";
+    const out = redactGitAuth(raw);
+    expect(out).not.toContain('ghp_FAKEPAT0000000000000000000000000000000');
+    expect(out).toContain('https://***:***@github.com/org/repo.git');
+  });
+
+  test('redacts on push errors that echo the authed remote', () => {
+    const raw = "fatal: unable to access 'https://x-access-token:ghs_abcDEF123@github.com/o/r.git/': SSL error";
+    expect(redactGitAuth(raw)).toBe(
+      "fatal: unable to access 'https://***:***@github.com/o/r.git/': SSL error",
+    );
+  });
+
+  test('leaves messages without embedded credentials untouched', () => {
+    expect(redactGitAuth('fatal: not a git repository')).toBe('fatal: not a git repository');
+  });
+
+  test('synchronous git() throw is redacted before reaching callers', () => {
+    mockExecFile.mockImplementationOnce(() => {
+      const err = new Error(
+        "Command failed: git clone https://x-access-token:ghp_LEAK@github.com/o/r.git\nfatal: early EOF",
+      );
+      (err as Error & { stderr?: string }).stderr =
+        "Cloning into 'r'...\nfatal: unable to access 'https://x-access-token:ghp_LEAK@github.com/o/r.git/': bad record mac";
+      throw err;
+    });
+    const config = makeConfig({ repoUrl: 'https://github.com/o/r', githubToken: 'ghp_LEAK' });
+    try {
+      gitCommitAndPush('/tmp/ws', config, 'msg', true);
+      throw new Error('expected throw');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).not.toContain('ghp_LEAK');
+      expect(msg).toContain('***:***@github.com/o/r');
+      // Defense-in-depth: the original .stderr field is gone, so even a careless
+      // logger that inspects err.stderr can't re-leak.
+      expect((e as { stderr?: string }).stderr).toBeUndefined();
+    }
   });
 });
 

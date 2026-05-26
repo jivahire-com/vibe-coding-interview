@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { suppressNextApplyEvent } from '../telemetry';
+import { suppressNextApplyForUri } from '../telemetry';
 
 export const AI_PROPOSED_SCHEME = "vibe-ai-proposed";
 
@@ -530,7 +530,11 @@ async function _writeSessionState(session: InlineSession): Promise<void> {
     new vscode.Position(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
   );
   wsEdit.replace(session.fileUri, fullRange, desired);
-  suppressNextApplyEvent();
+  // Suppress only the next change-event for THIS file's URI. A module-wide
+  // flag (the previous design) could eat an unrelated edit the candidate
+  // made on another file in the window between this call and applyEdit's
+  // contentChange firing.
+  suppressNextApplyForUri(session.fileUri);
   await vscode.workspace.applyEdit(wsEdit);
 }
 
@@ -642,7 +646,10 @@ export async function applyCodeBlock(
     eol,
     proposedFullText: proposedText,
     workspace: ws,
-    relativePath: path.relative(ws, resolved),
+    // Normalize to forward slashes so a Windows session emits the same `file`
+    // path as a Linux session — server-side dedup, file lookups, and the
+    // telemetry tracker's post_apply_of attribution all key on this string.
+    relativePath: path.relative(ws, resolved).replace(/\\/g, "/"),
     hunks,
     _resolve: () => {},
   };
@@ -660,8 +667,7 @@ export async function applyCodeBlock(
   _refreshStatusBarItems();
     _telemetryCallback?.("edit_ai_applied", {
       file: session.relativePath,
-      chars_added: 0,
-      chars_removed: 0,
+      chars: 0,
       block_id: blockId,
     });
     return;
@@ -685,10 +691,23 @@ export async function applyCodeBlock(
   _updateDiffActiveContext();
   _refreshStatusBarItems();
 
+  // `chars` must reflect what actually landed in the file, not the size of
+  // the AI's full proposal. The original `newText.length` counted REJECTED
+  // hunks too — a candidate who carefully rejects most AI output would have
+  // their session counters report e.g. "AI-applied 2000 chars" when they
+  // accepted ~0. That single bug skewed three rubric dimensions against
+  // independent candidates: self_authored_ratio, ai_output_modified_ratio,
+  // and the LLM evaluator's "Paste% / AI-applied%" framing.
+  //
+  // Sum only accepted hunks' green-line chars (matches the convention used
+  // by `edit_ai_rejected` so the two events can be summed apples-to-apples).
+  const appliedChars = session.hunks
+    .filter((h) => h.status === 'accepted')
+    .reduce((sum, h) => sum + h.newLines.join('\n').length, 0);
+
   _telemetryCallback?.("edit_ai_applied", {
     file: session.relativePath,
-    chars_added: newText.length,
-    chars_removed: originalText.length,
+    chars: appliedChars,
     block_id: blockId,
   });
 }

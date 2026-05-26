@@ -3,11 +3,11 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
-import { validateSession, SessionConfig } from "./api";
+import { validateSession, refreshGithubToken, SessionConfig } from "./api";
 import { Timer } from "./timer";
 import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
-import { runSubmit, gitCommitAndPushAsync } from "./submit";
+import { runSubmit, gitCommitAndPushAsync, redactGitAuth } from "./submit";
 import { TelemetryTracker } from "./telemetry";
 import { Logger, setSharedLogger, getLogger } from "./logger";
 import { AiProposedContentProvider, AiApplyCodeLensProvider, AI_PROPOSED_SCHEME, registerCodeLensProvider, setTelemetryCallback, acceptAiChanges, rejectAiChanges, acceptHunk, rejectHunk, _getSessionForActiveEditor } from "./chat/apply";
@@ -29,6 +29,17 @@ const AUTO_COMMIT_INTERVAL_MS = 180_000; // 3 minutes
 // timers. Kept below the interval so each tick has a chance to finish before
 // the next one fires.
 const AUTO_COMMIT_TIMEOUT_MS = 120_000;
+// Refresh the GitHub installation token this many ms BEFORE it expires.
+// GitHub mints tokens with a 1hr TTL; refreshing at T-5min leaves headroom
+// for one retry on a flaky network without ever letting the in-use token
+// expire in the middle of a push.
+const TOKEN_REFRESH_LEAD_MS = 300_000;
+// Fallback cadence when the server didn't ship an expires_at (older
+// server, or 0 sentinel). Conservative: well under GitHub's 1hr ceiling.
+const TOKEN_REFRESH_FALLBACK_MS = 45 * 60_000;
+// Floor so a near-expired token (or a clock-skew anomaly that puts expiry
+// "in the past") doesn't get us stuck in a tight refresh loop.
+const TOKEN_REFRESH_MIN_DELAY_MS = 30_000;
 
 /**
  * Hooks for stopping the per-session services (auto-commit interval) without
@@ -37,6 +48,7 @@ const AUTO_COMMIT_TIMEOUT_MS = 120_000;
  * cleared session with an expired GitHub token.
  */
 let _stopAutoCommit: (() => void) | undefined;
+let _stopTokenRefresh: (() => void) | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const logger = new Logger(context);
@@ -126,8 +138,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           // so leaving the interval running keeps pushing with a token that
           // will silently expire ~1h later. Stop it cleanly on submit.
           _stopAutoCommit?.();
+          // And the token-refresh timer for the same reason — keeping it
+          // armed past submit would burn a GitHub API call every ~55 min
+          // for a session that has already DONE.
+          _stopTokenRefresh?.();
         },
         onMarkSubmitted: () => dashboardProvider.markSubmitted(),
+        onShowVideoLink: (url, expiresUnix) =>
+          dashboardProvider.setVideoLink(url, expiresUnix),
       });
     }),
     vscode.commands.registerCommand("vibe.joinMeet", () => {
@@ -380,11 +398,22 @@ function _gitClone(session: SessionConfig, cloneDir: string): void {
   const baseUrl = session.repoUrl.replace(/\.git$/, "");
   const authedUrl =
     baseUrl.replace("https://", `https://x-access-token:${session.githubToken}@`) + ".git";
-  execFileSync(
-    "git",
-    ["clone", "-b", session.branch, authedUrl, cloneDir],
-    { stdio: "pipe", shell: false }
-  );
+  try {
+    execFileSync(
+      "git",
+      ["clone", "-b", session.branch, authedUrl, cloneDir],
+      { stdio: "pipe", shell: false }
+    );
+  } catch (err) {
+    // git's stderr echoes the authenticated remote URL on failure ("Cloning
+    // into 'https://x-access-token:<token>@github.com/...'"), so any error
+    // surface — dialog, telemetry, support paste — would leak the token.
+    // Rebuild the Error with the auth segment scrubbed before re-throwing.
+    const raw = err instanceof Error ? (err.message ?? String(err)) : String(err);
+    const stderr = (err as { stderr?: Buffer | string } | null)?.stderr;
+    const stderrStr = stderr instanceof Buffer ? stderr.toString() : (stderr ?? "");
+    throw new Error(redactGitAuth(`${raw}${stderrStr ? `\n${stderrStr}` : ""}`));
+  }
 }
 
 /**
@@ -549,6 +578,75 @@ function _startSessionServices(
   };
   _stopAutoCommit = stop;
   context.subscriptions.push({ dispose: stop });
+
+  _scheduleTokenRefresh(config, context);
+}
+
+/**
+ * Arm a self-rescheduling timer that swaps `config.githubToken` for a fresh
+ * installation token shortly before expiry. The auto-commit closure and the
+ * submit handler both read `config.githubToken` at call time, so mutating
+ * the in-memory config object is sufficient — no need to rebuild them.
+ *
+ * Why a single setTimeout rather than setInterval: every refresh returns a
+ * new `expiresAt`, and we want the next refresh anchored to THAT, not to a
+ * fixed 50-minute drum that drifts away from GitHub's actual TTL over a
+ * long session.
+ */
+function _scheduleTokenRefresh(
+  config: SessionConfig,
+  context: vscode.ExtensionContext,
+): void {
+  // Tear down any prior timer (e.g. window reload while a refresh was queued).
+  _stopTokenRefresh?.();
+  let stopped = false;
+  let handle: NodeJS.Timeout | undefined;
+
+  const computeDelay = (): number => {
+    if (!config.githubTokenExpiresAt) return TOKEN_REFRESH_FALLBACK_MS;
+    const ms = config.githubTokenExpiresAt - Date.now() - TOKEN_REFRESH_LEAD_MS;
+    return Math.max(ms, TOKEN_REFRESH_MIN_DELAY_MS);
+  };
+
+  const tick = async () => {
+    if (stopped) return;
+    const serverUrl =
+      context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL;
+    try {
+      const fresh = await refreshGithubToken(serverUrl, config.sessionKey);
+      // Mutate in place — auto-commit / submit read this value fresh on every
+      // git invocation, so they pick up the new token without any wiring.
+      config.githubToken = fresh.token;
+      config.githubTokenExpiresAt = fresh.expiresAt;
+      // Persist so a window reload restores the fresh token, not the stale
+      // one from the original validate-session response.
+      await context.globalState.update(SESSION_KEY, config);
+      getLogger()?.info("github_token_refreshed", {
+        expiresAtUnix: Math.floor(fresh.expiresAt / 1000),
+      });
+    } catch (err) {
+      // Don't block the session — the previous token is still valid for a
+      // few more minutes (TOKEN_REFRESH_LEAD_MS), so an auto-commit can still
+      // succeed. Try again sooner. Telemetry only; no candidate-facing dialog
+      // (which would just confuse them — there's nothing for them to do).
+      getLogger()?.errorFromException("github_token_refresh_failed", err);
+    } finally {
+      if (!stopped) {
+        handle = setTimeout(tick, computeDelay());
+      }
+    }
+  };
+
+  handle = setTimeout(tick, computeDelay());
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (handle) clearTimeout(handle);
+    if (_stopTokenRefresh === stop) _stopTokenRefresh = undefined;
+  };
+  _stopTokenRefresh = stop;
+  context.subscriptions.push({ dispose: stop });
 }
 
 async function promptForSession(
@@ -598,8 +696,9 @@ async function promptForSession(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     getLogger()?.errorFromException("validate_session_failed", err);
-    vscode.window.showErrorMessage(`Could not start session: ${message}`);
-    dashboardProvider.reportSessionError(message);
+    const display = message.replace(/^HTTP \d+:\s*/, "");
+    vscode.window.showErrorMessage(`Could not start session: ${display}`);
+    dashboardProvider.reportSessionError(display);
   }
 }
 

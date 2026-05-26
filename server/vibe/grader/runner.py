@@ -42,6 +42,7 @@ from vibe.grader import (
     verification_discipline,
 )
 from vibe.grader.git_ops import clone_branch
+from vibe.grader import telemetry_ingest as _telemetry_ingest
 
 log = logging.getLogger("vibe.grader")
 
@@ -55,6 +56,7 @@ _STAGE_MESSAGES = {
     "ai_judgment": "AI-judgment scoring failed; grade unaffected.",
     "challenge_specific": "Challenge-specific bonus failed; grade unaffected.",
     "developer_confidence": "Developer-signal computation failed; grade is unaffected.",
+    "telemetry_ingest": "Could not read telemetry from your submission; some scoring may use partial data.",
 }
 
 _GRADER_BACKENDS = {
@@ -118,6 +120,13 @@ def run(session_id: str) -> None:
             _record_error(session_id, "clone")
             execute("UPDATE sessions SET status='grading_failed' WHERE id=?", (session_id,))
             return
+
+        # ── 1.5. Ingest telemetry JSONL ───────────────────────────────────
+        try:
+            _telemetry_ingest.ingest(session_id, clone_dir)
+        except Exception:
+            _record_error(session_id, "telemetry_ingest")
+            # Non-fatal: downstream stages fall back to whatever rows are in the DB
 
         challenge_dir = Path(settings.challenges_dir) / session["challenge_id"]
 
@@ -194,6 +203,12 @@ def run(session_id: str) -> None:
             "challenge_specific": cs["score"],
         }
         total_score, composite_breakdown = _composite(dim_scores)
+        grader_summary = _build_summary(
+            dim_scores,
+            tests_passed=tags_passed, tests_total=tests_total,
+            traps_detected=traps_detected, traps_total=traps_total,
+            llm_dims=llm_dims, vd=vd, aj=aj, cs=cs,
+        )
 
         # Developer-confidence signal — independent of grading, recruiter-only.
         try:
@@ -232,7 +247,7 @@ def run(session_id: str) -> None:
                 json.dumps(attribution),
                 json.dumps(composite_breakdown),
                 round(total_score, 2),
-                llm_dims.get("summary", ""),
+                grader_summary,
                 raw_output[:50_000],
                 dev_conf["score"], dev_conf["verdict"],
                 json.dumps(dev_conf["signals"]) if dev_conf["signals"] is not None else None,
@@ -272,6 +287,134 @@ def _composite(dim_scores: dict[str, float]) -> tuple[float, dict[str, Any]]:
         total += contrib
     return total, {"dimensions": contributions, "weights": COMPOSITE_WEIGHTS,
                    "total": round(total, 2)}
+
+
+# ─── Summary builder ──────────────────────────────────────────────────────────
+
+# UI splits on ' | ' and parses each line as `Label (X/10): reasoning`
+# (server/static/app.js: parseSummaryLine). Reasonings must not contain ' | '
+# or ': ' at the start, so we sanitise.
+_SUMMARY_SEP = " | "
+
+_SUMMARY_LABELS = {
+    "tests":                   "Tests",
+    "traps":                   "Traps",
+    "verification_discipline": "Verification discipline",
+    "ai_judgment":             "AI judgment",
+    "code_quality":            "Code quality",
+    "llm_communication":       "LLM communication",
+    "architectural_reasoning": "Architectural reasoning",
+    "challenge_specific":      "Challenge-specific",
+}
+
+
+def _build_summary(
+    dim_scores: dict[str, float],
+    *,
+    tests_passed: int, tests_total: int,
+    traps_detected: int, traps_total: int,
+    llm_dims: dict[str, Any],
+    vd: dict[str, Any], aj: dict[str, Any], cs: dict[str, Any],
+) -> str:
+    reasonings = {
+        "tests": _tests_reason(tests_passed, tests_total),
+        "traps": _traps_reason(traps_detected, traps_total),
+        "verification_discipline": _signals_reason(vd.get("breakdown", {})),
+        "ai_judgment":             _signals_reason(aj.get("breakdown", {})),
+        "code_quality":            _criteria_reason(llm_dims.get("code_quality", {}).get("breakdown", {})),
+        "llm_communication":       _criteria_reason(llm_dims.get("llm_communication", {}).get("breakdown", {})),
+        "architectural_reasoning": _criteria_reason(llm_dims.get("architectural_reasoning", {}).get("breakdown", {})),
+        "challenge_specific":      _challenge_specific_reason(cs.get("breakdown", {})),
+    }
+    parts = []
+    for key in COMPOSITE_WEIGHTS:  # preserve rubric ordering
+        score = float(dim_scores.get(key, 0.0))
+        score_str = f"{score:.1f}".rstrip("0").rstrip(".") or "0"
+        label = _SUMMARY_LABELS.get(key, key)
+        reason = _sanitise(reasonings.get(key) or "no reasoning recorded")
+        parts.append(f"{label} ({score_str}/10): {reason}")
+    return _SUMMARY_SEP.join(parts)
+
+
+def _tests_reason(passed: int, total: int) -> str:
+    if not total:
+        return "no hidden tests configured (build may have failed)"
+    return f"{passed} of {total} hidden test tags passed"
+
+
+def _traps_reason(detected: int, total: int) -> str:
+    if not total:
+        return "no planted traps for this challenge"
+    return f"{detected} of {total} planted traps caught"
+
+
+def _criteria_reason(breakdown: dict[str, Any]) -> str:
+    """One-line reasoning for the LLM-graded dims.
+
+    Picks the lowest-scoring criterion (most actionable signal) and surfaces its
+    1-line reasoning. Falls back to breakdown['reason'] if no criteria block."""
+    criteria = breakdown.get("criteria") if isinstance(breakdown, dict) else None
+    if not isinstance(criteria, dict) or not criteria:
+        reason = breakdown.get("reason") if isinstance(breakdown, dict) else None
+        return reason or "no per-criterion detail available"
+    weakest_key, weakest = min(
+        criteria.items(),
+        key=lambda kv: (kv[1] or {}).get("score", 10) if isinstance(kv[1], dict) else 10,
+    )
+    if not isinstance(weakest, dict):
+        return "no per-criterion detail available"
+    reasoning = (weakest.get("reasoning") or "").strip()
+    if reasoning:
+        return f"weakest criterion '{weakest_key}' ({weakest.get('score', '?')}/10): {reasoning}"
+    return f"weakest criterion: '{weakest_key}' at {weakest.get('score', '?')}/10"
+
+
+def _signals_reason(breakdown: dict[str, Any]) -> str:
+    """One-line reasoning for vd/aj (telemetry-derived) dimensions."""
+    if not isinstance(breakdown, dict):
+        return "no signal detail available"
+    signals = breakdown.get("signals")
+    if isinstance(signals, dict) and signals:
+        scored = [(k, v) for k, v in signals.items()
+                  if isinstance(v, dict) and isinstance(v.get("score"), (int, float))]
+        if scored:
+            weakest_key, weakest = min(scored, key=lambda kv: kv[1]["score"])
+            reason = (weakest.get("reason") or "").strip()
+            extras = []
+            for fld in ("ratio", "rate", "count", "applies"):
+                if fld in weakest and weakest[fld] is not None:
+                    extras.append(f"{fld}={weakest[fld]}")
+            extras_str = f" ({', '.join(extras)})" if extras else ""
+            tail = f": {reason}" if reason else ""
+            return f"weakest signal '{weakest_key}' {weakest['score']}/10{extras_str}{tail}"
+    return breakdown.get("reason") or "no signal detail available"
+
+
+def _challenge_specific_reason(breakdown: dict[str, Any]) -> str:
+    if not isinstance(breakdown, dict):
+        return "no detail available"
+    if breakdown.get("reason"):
+        return breakdown["reason"]
+    criteria = breakdown.get("criteria")
+    if isinstance(criteria, dict) and criteria:
+        weakest_key, weakest = min(
+            criteria.items(),
+            key=lambda kv: (kv[1] or {}).get("score", 10) if isinstance(kv[1], dict) else 10,
+        )
+        if isinstance(weakest, dict):
+            reason = (weakest.get("reason") or "").strip()
+            tail = f": {reason}" if reason else ""
+            return f"weakest criterion '{weakest_key}' {weakest.get('score', '?')}/10{tail}"
+    return "no detail available"
+
+
+def _sanitise(text: str) -> str:
+    """Strip separators that would confuse the UI parser."""
+    if not isinstance(text, str):
+        return ""
+    cleaned = text.replace("\n", " ").replace("\r", " ")
+    cleaned = cleaned.replace(_SUMMARY_SEP, " / ")
+    return cleaned.strip()
 
 
 def _llm_fallback() -> dict[str, Any]:

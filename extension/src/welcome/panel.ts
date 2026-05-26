@@ -31,6 +31,11 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private refreshInterval: ReturnType<typeof setInterval> | undefined;
   private _prereqRequest: ReturnType<typeof https.request> | undefined;
   private disposed = false;
+  // Post-submit video-explainer recording link. Minted by runSubmit() once
+  // the server has accepted the submission; surfaced in the dashboard so the
+  // candidate can copy/open it in any browser (VS Code webviews can't access
+  // camera/microphone, so the browser flow is the only path that works).
+  private videoLink: { url: string; expiresUnix: number } | null = null;
   // When the candidate dismisses the "Reopen vs. Start Fresh" dialog at
   // activation, we render the welcome page and must NOT snap back to the
   // brief on subsequent resolveWebviewView calls (which happen whenever the
@@ -100,6 +105,17 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   markSubmitted(): void {
     this.submitted = true;
     this._stopRefresh();
+    this.render();
+  }
+
+  /**
+   * Surface the browser-recording link in the dashboard. Called by runSubmit()
+   * after the server returns video_upload=true. Camera/mic APIs do not work
+   * inside VS Code webviews, so the only working recording path is for the
+   * candidate to open this link in a real browser (or on their phone).
+   */
+  setVideoLink(url: string, expiresUnix: number): void {
+    this.videoLink = { url, expiresUnix };
     this.render();
   }
 
@@ -271,8 +287,14 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     // session-key prompt) silently bypassed the lock. Invert to an allowlist
     // and enumerate ONLY the commands that remain valid after submission.
     // joinMeet stays available so the candidate can rejoin the panel call
-    // during a post-submission debrief with the interviewers.
-    const POST_SUBMIT_ALLOWED = new Set<string>(["joinMeet"]);
+    // during a post-submission debrief with the interviewers. The video-link
+    // commands are post-submit by construction — the link only exists after
+    // submit — so they must also be on the allowlist.
+    const POST_SUBMIT_ALLOWED = new Set<string>([
+      "joinMeet",
+      "openVideoLink",
+      "copyVideoLink",
+    ]);
     if (this.submitted && !POST_SUBMIT_ALLOWED.has(msg.command)) {
       vscode.window.showInformationMessage("Session already submitted. Further actions are disabled.");
       return;
@@ -289,6 +311,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         break;
       case "joinMeet":
         vscode.commands.executeCommand("vibe.joinMeet");
+        break;
+      case "openVideoLink":
+        if (this.videoLink) {
+          void vscode.env.openExternal(vscode.Uri.parse(this.videoLink.url));
+        }
+        break;
+      case "copyVideoLink":
+        if (this.videoLink) {
+          void vscode.env.clipboard.writeText(this.videoLink.url).then(() => {
+            vscode.window.showInformationMessage(
+              "Recording link copied. Paste it into a browser to record.",
+            );
+          });
+        }
         break;
     }
   }
@@ -773,6 +809,55 @@ Click Apply ──▶ Diff editor opens
         </div>`
       : "";
 
+    // Upfront notice: warn the candidate before they submit that they will
+    // need a webcam + microphone to record a short explainer. Hidden once the
+    // recording link is actually live (videoLinkCard takes over) and once the
+    // session is submitted (the live link supersedes this notice).
+    const endVideoNoticeCard = (config.requireEndVideo && !this.videoLink && !this.submitted)
+      ? `<div class="card" style="border-color: #4caf50;">
+          <div class="card-header" style="color: #4caf50;">
+            &#128247; After you submit: record a short explainer video
+          </div>
+          <div style="padding: 10px 11px;">
+            <p class="desc" style="padding: 0; margin: 0;">
+              When you click <strong>Submit</strong>, you'll be asked to record
+              a brief solution-explainer video (30s&ndash;5min) in your browser
+              &mdash; intro, key decision, one tradeoff. Have a working
+              <strong>webcam &amp; microphone</strong> ready before you submit.
+              You'll have <strong>10 minutes</strong> after submission to record.
+            </p>
+          </div>
+        </div>`
+      : "";
+
+    // Browser-recording link: VS Code webviews cannot access camera/mic, so
+    // we surface the link here for the candidate to open in a real browser.
+    // The URL is server-supplied — escape before embedding.
+    const videoLinkCard = this.videoLink
+      ? `<div class="card" style="border-color: #4caf50;">
+          <div class="card-header" style="color: #4caf50;">
+            &#128247; Optional: Record a short solution explainer
+          </div>
+          <div style="padding: 10px 11px;">
+            <p class="desc" style="padding: 0; margin: 0 0 8px;">
+              Open this link in <strong>any browser</strong> (Chrome, Edge, Firefox, Safari) or on your phone to record a brief explainer.
+              The link expires soon &mdash; use it now if you can.
+            </p>
+            <input class="video-link-input" type="text" readonly value="${escapeHtml(this.videoLink.url)}" />
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <button class="action-btn primary" data-action="openVideoLink" style="margin: 0;">
+                <span>&#8599;</span>
+                <span class="btn-label">Open in browser</span>
+              </button>
+              <button class="action-btn secondary" data-action="copyVideoLink" style="margin: 0;">
+                <span>&#128203;</span>
+                <span class="btn-label">Copy link</span>
+              </button>
+            </div>
+          </div>
+        </div>`
+      : "";
+
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -883,6 +968,21 @@ Click Apply ──▶ Diff editor opens
   .action-btn.danger:hover { background: var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.08)); border-color: #f44336; color: #f44336; }
   .btn-label { flex: 1; }
   .btn-hint { font-size: 10.5px; font-weight: 400; opacity: 0.75; }
+
+  .video-link-input {
+    width: 100%; box-sizing: border-box;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    border-radius: 4px;
+    padding: 6px 9px;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11.5px;
+    outline: none;
+  }
+  .video-link-input:focus {
+    border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+  }
 </style>
 </head>
 <body>
@@ -898,6 +998,8 @@ Click Apply ──▶ Diff editor opens
   </div>
 
   ${submittedBanner}
+
+  ${videoLinkCard}
 
   ${meetCard}
 

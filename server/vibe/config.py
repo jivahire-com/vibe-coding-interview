@@ -9,7 +9,12 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    github_bot_pat: str
+    # GitHub App credentials. Replaces the previous github_bot_pat (a long-
+    # lived PAT that used to be shipped to candidates in validate-session).
+    # See server/vibe/github_app.py for how these are used.
+    github_app_id: int = 0
+    github_app_installation_id: int = 0
+    github_app_private_key: str = ""
     # Org/user under which per-challenge repos live: <owner>/<challenge_id>.
     # When set, the repo for a session is derived from its challenge_id.
     github_challenges_owner: str = ""

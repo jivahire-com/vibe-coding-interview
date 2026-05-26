@@ -60,6 +60,7 @@ def _migrate() -> None:
         ("sessions", "video_s3_key", "TEXT"),
         ("sessions", "video_uploaded_at", "INTEGER"),
         ("sessions", "video_duration_seconds", "INTEGER"),
+        ("sessions", "require_end_video", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "prompt_text", "TEXT"),

@@ -28,11 +28,15 @@ function _nextId(): string {
   return `${Date.now()}.${process.pid}.${_idCounter}`;
 }
 
-// Flag set by apply.ts before WorkspaceEdit so the change-listener skips it
-let _suppressNextApply = false;
+// Set of URI fsPaths whose NEXT contentChange event should be skipped because
+// apply.ts is about to write its own preview/accept/reject edit. Per-URI scope
+// (was a single module boolean) so a flag set for file A can't silently eat an
+// unrelated user edit in file B during the brief window between
+// suppressNextApplyForUri() and applyEdit's contentChange firing.
+const _suppressForUriPaths: Set<string> = new Set();
 
-export function suppressNextApplyEvent(): void {
-  _suppressNextApply = true;
+export function suppressNextApplyForUri(uri: vscode.Uri | { fsPath: string }): void {
+  _suppressForUriPaths.add(uri.fsPath);
 }
 
 // Set when the user invokes the paste command, consumed by the next doc change.
@@ -42,8 +46,11 @@ let _pasteImminentUntil = 0;
 const PASTE_IMMINENT_WINDOW_MS = 500;
 // Minimum insert size, after dropping the rangeLength===0 requirement, that we
 // still treat as a paste based purely on size (covers pastes that bypass the
-// command hook — e.g. middle-click paste on Linux).
-const PASTE_SIZE_THRESHOLD = 10;
+// command hook — e.g. middle-click paste on Linux). Bumped from 10 → 20 so
+// IntelliSense completions like `console.log` (11), `addEventListener` (16)
+// aren't misclassified as paste. Genuine candidate pastes are virtually always
+// multi-line, command-hook-flagged, or > 20 chars.
+const PASTE_SIZE_THRESHOLD = 20;
 
 export class TelemetryTracker implements vscode.Disposable {
   /** Absolute path to .jivahire/telemetry.jsonl in the workspace, or null if
@@ -58,6 +65,10 @@ export class TelemetryTracker implements vscode.Disposable {
   private _typedAgg: Map<string, { chars: number; timer: ReturnType<typeof setTimeout> }> = new Map();
   /** Dedup file_open events: emit once per file path per session. */
   private _openedFiles: Set<string> = new Set();
+  /** Currently-focused workspace file and when focus started. Drives
+   *  file_focus events emitted on editor switch, window unfocus, and dispose
+   *  so the grader can compute time-spent per file. */
+  private _activeFocus: { file: string; since: number } | null = null;
   /** Dedup protected_file_edit events: one tamper signal per .jivahire/ file. */
   private _tamperedFiles: Set<string> = new Set();
   /** Running expected character length of telemetry.jsonl based on our own
@@ -99,6 +110,13 @@ export class TelemetryTracker implements vscode.Disposable {
       this._disposables.push(
         vscode.window.onDidChangeActiveTextEditor((editor) => this._onActiveEditor(editor))
       );
+      // onDidChangeActiveTextEditor only fires when the active editor CHANGES,
+      // never for the editor already focused when we subscribe. Without this
+      // bootstrap call, the candidate's first/only file (typically the one
+      // the dashboard directed them to) never appears in `files_explored` and
+      // contributes 0 ms of focus time — a systematic ~1-file undercount on
+      // every session.
+      try { this._onActiveEditor(vscode.window.activeTextEditor); } catch { /* tests may not stub it */ }
     }
     if (vscode.debug?.onDidStartDebugSession) {
       this._disposables.push(
@@ -120,7 +138,7 @@ export class TelemetryTracker implements vscode.Disposable {
         this._disposables.push(
           vscode.commands.registerCommand("vibe.interceptPaste", async () => {
             _pasteImminentUntil = Date.now() + PASTE_IMMINENT_WINDOW_MS;
-            await vscode.commands.executeCommand("default:paste");
+            await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
           })
         );
       } catch { /* command may already be registered in test harness */ }
@@ -182,14 +200,37 @@ export class TelemetryTracker implements vscode.Disposable {
   }
 
   private _onActiveEditor(editor: vscode.TextEditor | undefined): void {
-    if (!editor) return;
-    if (editor.document.uri.scheme !== "file") return;
+    // Switching to a non-file editor (output panel, settings) or no editor at
+    // all still ends the focus on whatever file was previously active.
+    if (!editor || editor.document.uri.scheme !== "file") {
+      this._flushFocus();
+      return;
+    }
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-    const rel = path.relative(ws, editor.document.uri.fsPath);
-    if (rel.startsWith("..")) return; // outside workspace
-    if (this._openedFiles.has(rel)) return;
-    this._openedFiles.add(rel);
-    this.emit("file_open", { file: rel });
+    // Normalize separators so Windows sessions don't emit `src\main.cpp` while
+    // Linux sessions emit `src/main.cpp` — server-side intersections, grader
+    // file lookups, and dedup keys all depend on a single canonical form.
+    const rel = path.relative(ws, editor.document.uri.fsPath).replace(/\\/g, "/");
+    if (rel.startsWith("..")) {
+      this._flushFocus();
+      return;
+    }
+    if (this._activeFocus?.file === rel) return; // same editor refocus, no-op
+    this._flushFocus();
+    if (!this._openedFiles.has(rel)) {
+      this._openedFiles.add(rel);
+      this.emit("file_open", { file: rel });
+    }
+    this._activeFocus = { file: rel, since: Date.now() };
+  }
+
+  /** Emit and clear the in-flight file_focus duration, if any. */
+  private _flushFocus(): void {
+    if (!this._activeFocus) return;
+    const ms = Date.now() - this._activeFocus.since;
+    const file = this._activeFocus.file;
+    this._activeFocus = null;
+    if (ms > 0) this.emit("file_focus", { file, ms });
   }
 
   private _onDebugSession(session: vscode.DebugSession): void {
@@ -203,11 +244,24 @@ export class TelemetryTracker implements vscode.Disposable {
   private _onWindowState(state: vscode.WindowState): void {
     if (!state.focused) {
       this._lastUnfocusedAt = Date.now();
+      // Stop counting file-focus time while the IDE is in the background — the
+      // candidate isn't reading the file, they're in another app.
+      this._flushFocus();
       this.emit("app_unfocused", { ts: this._lastUnfocusedAt });
     } else if (this._lastUnfocusedAt !== null) {
       const time_away_seconds = (Date.now() - this._lastUnfocusedAt) / 1000;
       this._justRefocusedUntil = Date.now() + 3000;
       this._lastUnfocusedAt = null;
+      // Resume timing the editor that's now visible. Normalize to forward
+      // slashes so this matches the `file` field used everywhere else.
+      const active = vscode.window.activeTextEditor;
+      if (active && active.document.uri.scheme === "file") {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+        const rel = path.relative(ws, active.document.uri.fsPath).replace(/\\/g, "/");
+        if (!rel.startsWith("..")) {
+          this._activeFocus = { file: rel, since: Date.now() };
+        }
+      }
       this.emit("app_focused", { time_away_seconds });
     }
   }
@@ -215,21 +269,38 @@ export class TelemetryTracker implements vscode.Disposable {
   private _onDocChange(e: vscode.TextDocumentChangeEvent): void {
     if (e.document.uri.scheme !== "file") return;
 
-    // AI applies are flagged by apply.ts. We consume the flag and skip the
-    // WHOLE event — apply.ts emits the canonical `edit_ai_applied` at
-    // lifecycle end with the correct chars/block_id. Per-change suppression
-    // is unsafe: VS Code optimizes a single WorkspaceEdit.replace covering
-    // the whole document into multiple smaller contentChanges via minimal-
-    // diff computation, so the apply lands as N contentChanges in one event
-    // and only the first would be skipped — the rest would leak through as
-    // spurious paste/typed events totalling the size of the diff regions.
-    if (_suppressNextApply) {
-      _suppressNextApply = false;
+    // Undo / redo just shuffle existing text back into the buffer. Counting
+    // them as typed (rare — text="" for undo) or pasted (common — a redo of a
+    // previously-typed insert ≥ PASTE_SIZE_THRESHOLD looks identical to a
+    // fresh paste) would double-credit the same characters. The candidate's
+    // original action was already recorded; let undo/redo pass through silent.
+    // Numeric literals match the stable vscode.TextDocumentChangeReason enum
+    // (1=Undo, 2=Redo) and stay correct even in test mocks that don't expose
+    // the enum object.
+    const reason = (e as { reason?: number }).reason;
+    if (reason === 1 || reason === 2) {
+      return;
+    }
+
+    // AI applies are flagged by apply.ts with the specific URI being written.
+    // We consume the flag and skip the WHOLE event — apply.ts emits the
+    // canonical `edit_ai_applied` at lifecycle end with the correct
+    // chars/block_id. Per-change suppression is unsafe: VS Code optimizes a
+    // single WorkspaceEdit.replace covering the whole document into multiple
+    // smaller contentChanges via minimal-diff computation, so the apply
+    // lands as N contentChanges in one event and only the first would be
+    // skipped — the rest would leak through as spurious paste/typed events
+    // totalling the size of the diff regions.
+    if (_suppressForUriPaths.has(e.document.uri.fsPath)) {
+      _suppressForUriPaths.delete(e.document.uri.fsPath);
       return;
     }
 
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-    const rel = path.relative(ws, e.document.uri.fsPath);
+    // Forward-slash normalize for cross-platform consistency — see
+    // _onActiveEditor for rationale. The .jivahire/ prefix check below also
+    // depends on consistent separators.
+    const rel = path.relative(ws, e.document.uri.fsPath).replace(/\\/g, "/");
     if (rel.startsWith("..")) return; // outside workspace
 
     // .jivahire/ holds grader-owned artifacts (rubric.json, traps.json,
@@ -326,8 +397,29 @@ export class TelemetryTracker implements vscode.Disposable {
   }
 
   dispose(): void {
+    this._flushFocus();
     for (const d of this._disposables) d.dispose();
-    for (const agg of this._typedAgg.values()) clearTimeout(agg.timer);
+    // Flush any in-progress typed-char aggregations BEFORE clearing timers.
+    // The aggregator only flushes on a 1-second timer tick, so a candidate
+    // who types right before VS Code shuts down (window reload, post-submit
+    // cleanup, OS kill) would otherwise lose up to a second of typing per
+    // file — which silently lowers their `typed_chars` and skews
+    // self_authored_ratio against them.
+    for (const [file, agg] of this._typedAgg.entries()) {
+      clearTimeout(agg.timer);
+      if (agg.chars > 0) {
+        const payload: Record<string, unknown> = { file, chars: agg.chars };
+        const postApplyOf = this._recentApplyFor(file);
+        if (postApplyOf) payload.post_apply_of = postApplyOf;
+        this.emit("edit_typed", payload);
+      }
+    }
     this._typedAgg.clear();
+    // Clear any URI-suppression flags that this tracker armed but apply.ts
+    // never consumed (rare — happens if a WorkspaceEdit produced no
+    // contentChange because the proposed text equalled current buffer). The
+    // set is module-level so a leftover flag would leak across the next
+    // session reload and silently eat an unrelated user edit.
+    _suppressForUriPaths.clear();
   }
 }

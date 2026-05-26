@@ -220,9 +220,10 @@ Respond with JSON only, in this exact shape:
 
     result = _eval_structured(client, prompt, cfg, "llm_eval.llm_communication", session_id)
 
-    # Side effect: classify each prompt on the 1-5 ladder and persist to
-    # chat_exchanges.prompt_level. Best-effort — failure here does not affect
-    # the dimension score.
+    # Side effect: classify each prompt (vague/specific/professional + 1-10
+    # score + 1-line reasoning) and persist to chat_exchanges so the recruiter
+    # "Candidate Prompts" card can render badges and reasoning. Best-effort —
+    # failure here does not affect the dimension score.
     try:
         _classify_prompts_and_persist(client, chat_log, ladder, session_id)
     except Exception:
@@ -382,55 +383,108 @@ def _single_structured_call(client: OpenAI, prompt: str, stage: str,
 # ─── Prompt-classification side effect ───────────────────────────────────────
 
 
+_CLASSIFICATION_VALUES = ("vague", "specific", "professional")
+
+# Map the 1-5 ladder level → recruiter-facing classification bucket. The UI
+# (server/static/app.js: promptClassBadge) recognises three buckets.
+_LEVEL_TO_CLASSIFICATION = {5: "professional", 4: "professional",
+                            3: "specific",     2: "vague", 1: "vague"}
+
+
 def _classify_prompts_and_persist(client: OpenAI, chat_log: list[dict[str, Any]],
                                   ladder: dict[str, str], session_id: str) -> None:
-    """Classify each prompt 1-5 on the ladder and write back to
-    chat_exchanges.prompt_level. Single LLM call (not self-consistent — this
-    is for display, not scoring).
+    """Score and classify each candidate prompt; persist to chat_exchanges.
+
+    Writes three columns the recruiter UI reads:
+      - prompt_classification: 'vague' | 'specific' | 'professional'
+      - prompt_score:          integer 1-10 (UI tooltip: 0=vague, 10=professional)
+      - prompt_reasoning:      1-sentence justification
+
+    Also writes the 1-5 ladder level (prompt_level) for back-compat. Single LLM
+    call (not self-consistent — this is for display, not scoring).
     """
-    if not chat_log or not ladder:
+    if not chat_log:
         return
     prompts = [(i, e.get("prompt_text", "")) for i, e in enumerate(chat_log)
                if e.get("prompt_text")]
     if not prompts:
         return
 
-    ladder_block = "\n".join(f"  {level} - {desc}" for level, desc in ladder.items())
+    ladder_block = "\n".join(f"  {level} - {desc}" for level, desc in ladder.items()) \
+        if ladder else "  (no ladder configured)"
     numbered = "\n".join(f"[{i+1}] {p[:400]}" for i, p in prompts)
-    prompt = f"""Classify each candidate prompt 1-5 per this ladder. Return JSON only.
+    prompt = f"""Rate each candidate prompt below. Return JSON only.
 
-LADDER:
+CLASSIFICATION BUCKETS (recruiter-facing badge):
+  professional — cites exact errors, types, line numbers, constraints, or runtime behaviour
+  specific     — names the problem/symptom but lacks technical precision
+  vague        — generic requests, "fix this", no context
+
+1-5 LADDER (for context; informs the 1-10 score):
 {ladder_block}
 
 PROMPTS:
 {numbered}
 
-Respond with: {{"classifications": [{{"index": 1, "level": <1-5>}}, ...]}}"""
+For each prompt return:
+  - "index":          the prompt number above
+  - "classification": one of "vague" | "specific" | "professional"
+  - "level":          1-5 on the ladder
+  - "score":          integer 1-10 (1 = counterproductive, 10 = model-native)
+  - "reasoning":      one short sentence citing what makes the prompt vague/specific/professional
+
+Respond with: {{"classifications": [
+  {{"index": 1, "classification": "...", "level": 1-5, "score": 1-10, "reasoning": "..."}},
+  ...
+]}}"""
     try:
         resp = client.chat.completions.create(
             model=CONFIG["model"].get("name") or settings.grader_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=400,
+            max_tokens=900,
             response_format={"type": "json_object"},
         )
         data = json.loads((resp.choices[0].message.content or "").strip())
-        rows = query(
-            "SELECT id, ts FROM chat_exchanges WHERE session_id=? ORDER BY ts ASC",
-            (session_id,),
-        )
-        for c in data.get("classifications") or []:
-            idx = c.get("index")
-            level = c.get("level")
-            if not isinstance(idx, int) or not isinstance(level, int):
-                continue
-            if 0 < idx <= len(rows) and 1 <= level <= 5:
-                execute(
-                    "UPDATE chat_exchanges SET prompt_level=? WHERE id=?",
-                    (level, rows[idx - 1]["id"]),
-                )
     except Exception:
-        pass  # display-only metadata; never block scoring
+        return  # display-only metadata; never block scoring
+
+    rows = query(
+        "SELECT id, ts FROM chat_exchanges WHERE session_id=? ORDER BY ts ASC",
+        (session_id,),
+    )
+    for c in data.get("classifications") or []:
+        if not isinstance(c, dict):
+            continue
+        idx = c.get("index")
+        if not isinstance(idx, int) or not (0 < idx <= len(rows)):
+            continue
+
+        level = c.get("level") if isinstance(c.get("level"), int) else None
+        if level is not None and not (1 <= level <= 5):
+            level = None
+
+        score = c.get("score")
+        if isinstance(score, (int, float)):
+            score = max(1, min(10, int(round(score))))
+        else:
+            score = None
+
+        classification = c.get("classification")
+        if classification not in _CLASSIFICATION_VALUES:
+            classification = _LEVEL_TO_CLASSIFICATION.get(level) if level else None
+
+        reasoning = c.get("reasoning")
+        if isinstance(reasoning, str):
+            reasoning = reasoning.strip() or None
+        else:
+            reasoning = None
+
+        execute(
+            "UPDATE chat_exchanges SET prompt_classification=?, prompt_score=?, "
+            "prompt_reasoning=?, prompt_level=? WHERE id=?",
+            (classification, score, reasoning, level, rows[idx - 1]["id"]),
+        )
 
 
 # ─── Prompt-shaping helpers ──────────────────────────────────────────────────

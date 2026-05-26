@@ -14,11 +14,14 @@
  */
 import {
   TelemetryTracker,
-  suppressNextApplyEvent,
+  suppressNextApplyForUri,
 } from '../telemetry';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { makeConfig, makeMockContext } from './helpers';
+
+const TARGET_URI = { fsPath: '/ws/src/main.cpp' };
+const OTHER_URI = { fsPath: '/ws/src/other.cpp' };
 
 // Prevent real filesystem writes
 jest.mock('fs', () => ({
@@ -140,11 +143,46 @@ describe('TelemetryTracker', () => {
     return mockAppendFileSync.mock.calls.map((c) => JSON.parse((c[1] as string).trimEnd()).event_type);
   }
 
-  test('large insertion (≥10 chars, rangeLength=0) classified as edit_pasted', () => {
+  test('large insertion (≥20 chars, rangeLength=0) classified as edit_pasted', () => {
     fireDocChange([{ text: 'a'.repeat(30), rangeLength: 0 }]);
     const ev = lastEmittedEvent()!;
     expect(ev.event_type).toBe('edit_pasted');
     expect(ev.payload.chars).toBe(30);
+  });
+
+  // ── Bug 6 regression: IntelliSense completions are NOT pastes ─────────────
+  // `console.log` (11), `addEventListener` (16), `setTimeout` (10) are the
+  // single most common IDE inserts that crossed the OLD 10-char threshold.
+  // Bumped to 20 so they aggregate into edit_typed instead.
+  test('autocomplete-sized single-line insert (11 chars) is NOT classified as edit_pasted', () => {
+    fireDocChange([{ text: 'console.log', rangeLength: 0 }]);
+    jest.advanceTimersByTime(1001);
+    const types = emittedEventTypes();
+    expect(types).not.toContain('edit_pasted');
+    expect(types).toContain('edit_typed');
+  });
+
+  test('autocomplete-sized single-line insert (16 chars: addEventListener) is NOT classified as edit_pasted', () => {
+    fireDocChange([{ text: 'addEventListener', rangeLength: 0 }]);
+    jest.advanceTimersByTime(1001);
+    const types = emittedEventTypes();
+    expect(types).not.toContain('edit_pasted');
+    expect(types).toContain('edit_typed');
+  });
+
+  test('insert exactly at the 20-char threshold IS classified as edit_pasted', () => {
+    fireDocChange([{ text: 'a'.repeat(20), rangeLength: 0 }]);
+    const ev = lastEmittedEvent()!;
+    expect(ev.event_type).toBe('edit_pasted');
+    expect(ev.payload.chars).toBe(20);
+  });
+
+  test('insert just under threshold (19 chars) is NOT classified as edit_pasted', () => {
+    fireDocChange([{ text: 'a'.repeat(19), rangeLength: 0 }]);
+    jest.advanceTimersByTime(1001);
+    const types = emittedEventTypes();
+    expect(types).not.toContain('edit_pasted');
+    expect(types).toContain('edit_typed');
   });
 
   test('small single-line insertion classified as edit_typed (after aggregation timer)', () => {
@@ -317,16 +355,16 @@ describe('TelemetryTracker', () => {
     expect(types).not.toContain('edit_typed');
   });
 
-  test('suppressNextApplyEvent silences the change listener; apply.ts owns the edit_ai_applied emit', () => {
+  test('suppressNextApplyForUri silences the change listener; apply.ts owns the edit_ai_applied emit', () => {
     // The change listener must not emit anything for the AI-driven apply.
-    suppressNextApplyEvent();
+    suppressNextApplyForUri(TARGET_URI);
     mockAppendFileSync.mockClear();
     fireDocChange([{ text: 'a'.repeat(50), rangeLength: 0 }]);
     expect(mockAppendFileSync).not.toHaveBeenCalled();
   });
 
-  test('suppressNextApplyEvent is consumed after one event', () => {
-    suppressNextApplyEvent();
+  test('suppressNextApplyForUri is consumed after one event', () => {
+    suppressNextApplyForUri(TARGET_URI);
     fireDocChange([{ text: 'a'.repeat(50), rangeLength: 0 }]); // consumed
     mockAppendFileSync.mockClear();
     fireDocChange([{ text: 'b'.repeat(50), rangeLength: 0 }]); // normal paste
@@ -335,8 +373,8 @@ describe('TelemetryTracker', () => {
     expect(ev.payload.chars).toBe(50);
   });
 
-  test('suppressNextApplyEvent silences ALL contentChanges in the next event, not just the first', () => {
-    suppressNextApplyEvent();
+  test('suppressNextApplyForUri silences ALL contentChanges in the next event, not just the first', () => {
+    suppressNextApplyForUri(TARGET_URI);
     mockAppendFileSync.mockClear();
     fireDocChange([
       { text: 'a'.repeat(46), rangeLength: 0 },
@@ -344,6 +382,33 @@ describe('TelemetryTracker', () => {
       { text: 'c'.repeat(110), rangeLength: 0 },
       { text: 'd'.repeat(17), rangeLength: 0 },
     ]);
+    expect(mockAppendFileSync).not.toHaveBeenCalled();
+  });
+
+  // ── Bug 5 regression: cross-file suppression leak ─────────────────────────
+  test('suppress for file A does NOT eat an edit in file B (per-URI scoping)', () => {
+    suppressNextApplyForUri(TARGET_URI); // arm for src/main.cpp
+    mockAppendFileSync.mockClear();
+    // User types in a different file in the window between arm and apply
+    fireDocChange([{ text: 'q'.repeat(50), rangeLength: 0 }], 'src/other.cpp');
+    // The other-file edit MUST land as a paste — not be silently eaten.
+    const ev = lastEmittedEvent()!;
+    expect(ev.event_type).toBe('edit_pasted');
+    expect(ev.payload.file).toBe('src/other.cpp');
+    // And the original arm is still in effect for the target file:
+    mockAppendFileSync.mockClear();
+    fireDocChange([{ text: 'z'.repeat(50), rangeLength: 0 }], 'src/main.cpp');
+    expect(mockAppendFileSync).not.toHaveBeenCalled();
+  });
+
+  test('suppression for file A is unaffected by other.cpp event in between', () => {
+    suppressNextApplyForUri(OTHER_URI);
+    mockAppendFileSync.mockClear();
+    // An unrelated edit on a third file should not consume the OTHER_URI arm.
+    fireDocChange([{ text: 'a'.repeat(30), rangeLength: 0 }], 'src/third.cpp');
+    mockAppendFileSync.mockClear();
+    // Now the OTHER_URI edit lands and is properly suppressed.
+    fireDocChange([{ text: 'b'.repeat(30), rangeLength: 0 }], 'src/other.cpp');
     expect(mockAppendFileSync).not.toHaveBeenCalled();
   });
 
@@ -510,6 +575,94 @@ describe('TelemetryTracker', () => {
     expect(ev.payload.profile).toBe('default');
   });
 
+  // ── file_focus duration ──────────────────────────────────────────────────
+
+  function emittedFocusEvents(): Array<{ file: string; ms: number }> {
+    return mockAppendFileSync.mock.calls
+      .map((c) => JSON.parse((c[1] as string).trimEnd()))
+      .filter((e) => e.event_type === 'file_focus')
+      .map((e) => e.payload as { file: string; ms: number });
+  }
+
+  test('switching editors emits file_focus with elapsed ms for the previous file', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    const cb = getActiveEditorCb()!;
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(3000);
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/b.ts' } } });
+    const focuses = emittedFocusEvents();
+    expect(focuses).toHaveLength(1);
+    expect(focuses[0].file).toBe('a.ts');
+    expect(focuses[0].ms).toBeGreaterThanOrEqual(3000);
+  });
+
+  test('window unfocus flushes file_focus for the currently-active file', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    getActiveEditorCb()!({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(2500);
+    getWindowStateCb()!({ focused: false });
+    const focuses = emittedFocusEvents();
+    expect(focuses).toHaveLength(1);
+    expect(focuses[0].file).toBe('a.ts');
+    expect(focuses[0].ms).toBeGreaterThanOrEqual(2500);
+  });
+
+  test('window refocus resumes timing for the active editor', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    getActiveEditorCb()!({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(1000);
+    getWindowStateCb()!({ focused: false });
+    // While the app is in the background the active editor in VS Code is still
+    // pointing at a.ts — the refocus handler reads it and resumes timing.
+    (vscode.window as any).activeTextEditor = {
+      document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } },
+    };
+    jest.advanceTimersByTime(10_000); // time away — must NOT count
+    getWindowStateCb()!({ focused: true });
+    jest.advanceTimersByTime(2000);
+    tracker.dispose();
+    const total = emittedFocusEvents()
+      .filter((f) => f.file === 'a.ts')
+      .reduce((a, f) => a + f.ms, 0);
+    // 1000ms before unfocus + 2000ms after refocus = ~3000ms; the 10s away
+    // must not be included.
+    expect(total).toBeGreaterThanOrEqual(3000);
+    expect(total).toBeLessThan(10_000);
+  });
+
+  test('dispose flushes the in-flight file_focus duration', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    getActiveEditorCb()!({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(1500);
+    tracker.dispose();
+    const focuses = emittedFocusEvents();
+    expect(focuses).toHaveLength(1);
+    expect(focuses[0].file).toBe('a.ts');
+  });
+
+  test('switching to a non-file editor flushes file_focus and stops timing', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    const cb = getActiveEditorCb()!;
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(2000);
+    cb({ document: { uri: { scheme: 'output', fsPath: '/ws/output' } } });
+    expect(emittedFocusEvents()).toHaveLength(1);
+    jest.advanceTimersByTime(5000);
+    // No new focus events while sitting on a non-file editor.
+    expect(emittedFocusEvents()).toHaveLength(1);
+  });
+
+  test('re-firing the same active editor does not emit a duplicate file_open or zero-ms focus', () => {
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    const cb = getActiveEditorCb()!;
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    jest.advanceTimersByTime(1000);
+    cb({ document: { uri: { scheme: 'file', fsPath: '/ws/a.ts' } } });
+    const types = emittedEventTypes();
+    expect(types.filter((t) => t === 'file_open')).toHaveLength(1);
+    expect(types.filter((t) => t === 'file_focus')).toHaveLength(0);
+  });
+
   // ── dispose ───────────────────────────────────────────────────────────────
 
   test('dispose() does not throw', () => {
@@ -518,9 +671,216 @@ describe('TelemetryTracker', () => {
 
   test('no fs activity after dispose (timers cleared)', () => {
     fireDocChange([{ text: 'abc', rangeLength: 0 }]); // starts typed aggregation timer
+    // Drain the typed-agg flush BEFORE dispose so the dispose flush is a no-op
+    // (this test guards the timer-cleared invariant, not the on-dispose flush).
+    jest.advanceTimersByTime(1001);
     tracker.dispose();
     mockAppendFileSync.mockClear();
     jest.advanceTimersByTime(2000); // timer would have fired here
     expect(mockAppendFileSync).not.toHaveBeenCalled();
+  });
+
+  // ── Bug 2 regression: dispose flushes pending typed-char aggregations ─────
+  test('dispose flushes in-progress typed-char aggregator (no data loss at session end)', () => {
+    // User types 7 chars but the 1s flush timer hasn't fired yet.
+    fireDocChange([{ text: 'abcdefg', rangeLength: 0 }]);
+    // Do NOT advance timers — simulate VS Code shutting down mid-burst.
+    mockAppendFileSync.mockClear();
+    tracker.dispose();
+    const typed = mockAppendFileSync.mock.calls
+      .map((c) => JSON.parse((c[1] as string).trimEnd()))
+      .filter((e) => e.event_type === 'edit_typed');
+    expect(typed).toHaveLength(1);
+    expect(typed[0].payload.chars).toBe(7);
+    expect(typed[0].payload.file).toBe('src/main.cpp');
+  });
+
+  test('dispose flushes typed aggregation for every file with pending chars', () => {
+    fireDocChange([{ text: 'aa', rangeLength: 0 }], 'src/a.cpp');
+    fireDocChange([{ text: 'bbbb', rangeLength: 0 }], 'src/b.cpp');
+    mockAppendFileSync.mockClear();
+    tracker.dispose();
+    const typed = mockAppendFileSync.mock.calls
+      .map((c) => JSON.parse((c[1] as string).trimEnd()))
+      .filter((e) => e.event_type === 'edit_typed');
+    const byFile = Object.fromEntries(typed.map((e) => [e.payload.file, e.payload.chars]));
+    expect(byFile).toEqual({ 'src/a.cpp': 2, 'src/b.cpp': 4 });
+  });
+
+  test('dispose flush attaches post_apply_of if the file is within the apply window', () => {
+    tracker.emit('edit_ai_applied', { file: 'src/main.cpp', block_id: 'blk-dispose', chars: 50 });
+    fireDocChange([{ text: 'xyz', rangeLength: 0 }]);
+    mockAppendFileSync.mockClear();
+    tracker.dispose();
+    const typed = mockAppendFileSync.mock.calls
+      .map((c) => JSON.parse((c[1] as string).trimEnd()))
+      .find((e) => e.event_type === 'edit_typed')!;
+    expect(typed).toBeDefined();
+    expect(typed.payload.post_apply_of).toBe('blk-dispose');
+  });
+
+  // ── Bug 3 regression: undo/redo events MUST NOT inflate typed/pasted ─────
+  test('undo event (reason=Undo) is silently ignored', () => {
+    mockAppendFileSync.mockClear();
+    const cb = getDocChangeCb()!;
+    cb({
+      document: {
+        uri: { scheme: 'file', fsPath: '/ws/src/main.cpp' },
+        isDirty: true,
+        getText: () => '',
+      },
+      // Reason=1 matches vscode.TextDocumentChangeReason.Undo
+      reason: 1,
+      contentChanges: [{ text: '', rangeLength: 25 }],
+    });
+    jest.advanceTimersByTime(1001);
+    expect(mockAppendFileSync).not.toHaveBeenCalled();
+  });
+
+  test('redo of a typed insert (reason=Redo) is NOT counted as a paste', () => {
+    mockAppendFileSync.mockClear();
+    const cb = getDocChangeCb()!;
+    // Redoing a 50-char insert would otherwise cross PASTE_SIZE_THRESHOLD and
+    // get double-counted as a fresh paste. The reason guard prevents that.
+    cb({
+      document: {
+        uri: { scheme: 'file', fsPath: '/ws/src/main.cpp' },
+        isDirty: true,
+        getText: () => '',
+      },
+      reason: 2, // vscode.TextDocumentChangeReason.Redo
+      contentChanges: [{ text: 'a'.repeat(50), rangeLength: 0 }],
+    });
+    jest.advanceTimersByTime(1001);
+    expect(mockAppendFileSync).not.toHaveBeenCalled();
+  });
+
+  test('a normal user edit (no reason) is still counted', () => {
+    mockAppendFileSync.mockClear();
+    const cb = getDocChangeCb()!;
+    cb({
+      document: {
+        uri: { scheme: 'file', fsPath: '/ws/src/main.cpp' },
+        isDirty: true,
+        getText: () => '',
+      },
+      // reason omitted on real typing
+      contentChanges: [{ text: 'a'.repeat(50), rangeLength: 0 }],
+    });
+    const ev = lastEmittedEvent()!;
+    expect(ev.event_type).toBe('edit_pasted');
+    expect(ev.payload.chars).toBe(50);
+  });
+});
+
+// ── Bug 4 regression: initial active editor must emit file_open ────────────
+// Lives in its own describe so we can construct the tracker AFTER setting
+// vscode.window.activeTextEditor — the outer beforeEach has already built one
+// with no active editor.
+
+describe('TelemetryTracker initial-active-editor bootstrap (Bug 4)', () => {
+  const TARGET = '/ws/src/main.cpp';
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    (fs.appendFileSync as jest.Mock).mockClear();
+    (fs.mkdirSync as jest.Mock).mockClear();
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    (vscode.window as any).activeTextEditor = undefined;
+  });
+
+  afterEach(() => {
+    (vscode.window as any).activeTextEditor = undefined;
+    jest.useRealTimers();
+    jest.clearAllMocks();
+  });
+
+  test('emits file_open for the editor already focused when the tracker is constructed', () => {
+    (vscode.window as any).activeTextEditor = {
+      document: { uri: { scheme: 'file', fsPath: TARGET } },
+    };
+    const t = new TelemetryTracker(makeConfig(), makeMockContext());
+    try {
+      const opens = (fs.appendFileSync as jest.Mock).mock.calls
+        .map((c) => JSON.parse((c[1] as string).trimEnd()))
+        .filter((e) => e.event_type === 'file_open');
+      expect(opens).toHaveLength(1);
+      expect(opens[0].payload.file).toBe('src/main.cpp');
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('does NOT emit file_open at construct when no active editor is set', () => {
+    (vscode.window as any).activeTextEditor = undefined;
+    const t = new TelemetryTracker(makeConfig(), makeMockContext());
+    try {
+      const opens = (fs.appendFileSync as jest.Mock).mock.calls
+        .map((c) => JSON.parse((c[1] as string).trimEnd()))
+        .filter((e) => e.event_type === 'file_open');
+      expect(opens).toHaveLength(0);
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('initial-emit dedupes against subsequent same-editor change events', () => {
+    (vscode.window as any).activeTextEditor = {
+      document: { uri: { scheme: 'file', fsPath: TARGET } },
+    };
+    const t = new TelemetryTracker(makeConfig(), makeMockContext());
+    try {
+      // Now fire the same editor through the change listener — must NOT emit again.
+      const cb = (vscode.window as any)._activeEditorCallback;
+      cb({ document: { uri: { scheme: 'file', fsPath: TARGET } } });
+      const opens = (fs.appendFileSync as jest.Mock).mock.calls
+        .map((c) => JSON.parse((c[1] as string).trimEnd()))
+        .filter((e) => e.event_type === 'file_open');
+      expect(opens).toHaveLength(1);
+    } finally {
+      t.dispose();
+    }
+  });
+});
+
+// ── Bug 8 regression: emitted file paths use forward slashes ──────────────
+// We can't change `path.relative` to produce Windows separators inside the
+// Linux Jest run, so we feed in a contrived doc fsPath that exercises the
+// normalization. The production guarantee is: regardless of the OS, the
+// payload `file` field MUST use `/` so the grader and dedup keys see a
+// single canonical form.
+
+describe('TelemetryTracker path normalization (Bug 8)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    (fs.appendFileSync as jest.Mock).mockClear();
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.clearAllMocks();
+  });
+
+  test('paste event emits forward-slash file path even on a deep nested path', () => {
+    const t = new TelemetryTracker(makeConfig(), makeMockContext());
+    try {
+      const cb = (vscode.workspace as any)._docChangeCallback as (e: any) => void;
+      cb({
+        document: {
+          uri: { scheme: 'file', fsPath: '/ws/src/sub/main.cpp' },
+          isDirty: true,
+          getText: () => '',
+        },
+        contentChanges: [{ text: 'a'.repeat(50), rangeLength: 0 }],
+      });
+      const ev = JSON.parse(
+        ((fs.appendFileSync as jest.Mock).mock.calls.at(-1)![1] as string).trimEnd(),
+      );
+      expect(ev.payload.file).toBe('src/sub/main.cpp');
+      expect(ev.payload.file).not.toContain('\\');
+    } finally {
+      t.dispose();
+    }
   });
 });

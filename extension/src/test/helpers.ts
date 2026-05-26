@@ -8,6 +8,7 @@ export function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfi
     repoUrl: 'https://github.com/test/challenge-lru',
     branch: 'interview/aabbccdd',
     githubToken: 'ghs_testtoken',
+    githubTokenExpiresAt: Date.now() + 60 * 60_000,
     llmProxyUrl: 'http://localhost:9999',
     maxMinutes: 90,
     llmBudgetUsd: 2.0,
