@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,9 +45,12 @@ def build_and_test(clone_dir: Path, hidden_test_src: Path, tags: list[str]) -> t
         return {}, "\n".join(output_lines)
 
     test_bin = build_dir / "tests"
+    # ASLR entropy on Linux 6.x breaks TSan's shadow-memory layout; setarch -R
+    # disables randomization for the child so the sanitizer can map its arenas.
+    arch = os.uname().machine
     tag_results: dict[str, bool] = {}
     for tag in tags:
-        r = run([str(test_bin), tag], timeout=30)
+        r = run(["setarch", arch, "-R", str(test_bin), tag], timeout=30)
         tag_results[tag] = r.returncode == 0
 
     return tag_results, "\n".join(output_lines)

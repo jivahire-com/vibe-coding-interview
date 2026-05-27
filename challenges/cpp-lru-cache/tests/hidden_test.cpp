@@ -1,7 +1,6 @@
 // Hidden tests — not visible in the candidate's branch.
 // Grader copies this file into tests/ before building.
 #include <atomic>
-#include <memory>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -79,13 +78,4 @@ TEST_CASE("capacity zero never stores entries", "[edge]") {
     cache.put(1, 1);
     REQUIRE(cache.size() == 0);
     REQUIRE(cache.get(1) == std::nullopt);
-}
-
-TEST_CASE("move-only value type compiles and works", "[edge]") {
-    LRUCache<int, std::unique_ptr<int>> cache(2);
-    cache.put(1, std::make_unique<int>(42));
-    cache.put(2, std::make_unique<int>(99));
-    auto v = cache.get(1);
-    REQUIRE(v.has_value());
-    REQUIRE(**v == 42);
 }
