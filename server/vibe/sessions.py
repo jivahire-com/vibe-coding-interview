@@ -43,12 +43,19 @@ def _resolve_require_end_video(meet_link: str | None, override: bool) -> bool:
 _SESSION_STATUSES = {"pending", "active", "submitted", "graded", "grading_failed"}
 
 
+# Upper bound on a single page so a caller can't ask the backend to
+# materialise an unbounded result set in one request.
+_MAX_PAGE_SIZE = 200
+
+
 @router.get("/sessions")
 def list_sessions(
     x_admin_token: str = Header(None),
     org_id: str | None = None,
     search: str | None = None,
     status: list[str] | None = Query(None),
+    limit: int | None = None,
+    offset: int = 0,
 ):
     if x_admin_token != settings.admin_token:
         raise HTTPException(403, "Forbidden")
@@ -60,15 +67,18 @@ def list_sessions(
     # session key and challenge id) and `status` (one or more lifecycle states,
     # repeatable: ?status=active&status=submitted) are optional and applied at
     # the SQL level so the client never has to page through everything.
-    sql = (
-        "SELECT s.id, s.session_key, s.candidate_email, s.challenge_id, s.status, "
-        "s.llm_spent_usd, s.llm_budget_usd, s.max_minutes, "
-        "s.typed_chars, s.pasted_chars, s.ai_applied_chars, "
-        "s.meet_link, s.video_platform, s.scheduled_at, s.panelist_emails, "
-        "s.created_at, s.started_at, s.submitted_at, s.org_id, "
-        "g.total_score "
-        "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
-    )
+    #
+    # `limit`/`offset` paginate the (already filtered) set. `limit` omitted ⇒
+    # unbounded (legacy behaviour); when given it is clamped to [1, 200]. The
+    # response always carries `total` — the count of rows matching the filters
+    # *before* pagination — so the client can render page controls.
+    if limit is not None and limit < 1:
+        raise HTTPException(400, "limit must be >= 1")
+    if offset < 0:
+        raise HTTPException(400, "offset must be >= 0")
+    if limit is not None:
+        limit = min(limit, _MAX_PAGE_SIZE)
+
     clauses: list[str] = []
     params: list = []
     if org_id is not None:
@@ -97,11 +107,37 @@ def list_sessions(
             placeholders = ",".join("?" for _ in statuses)
             clauses.append(f"s.status IN ({placeholders})")
             params.extend(statuses)
-    if clauses:
-        sql += "WHERE " + " AND ".join(clauses) + " "
-    sql += "ORDER BY s.created_at DESC"
-    rows = query(sql, tuple(params))
-    return {"sessions": [dict(r) for r in rows]}
+    where = ("WHERE " + " AND ".join(clauses) + " ") if clauses else ""
+
+    # Total of the filtered set (sessions are 1:1 with the optional grade join,
+    # so counting the base table is the logical row count and avoids the join).
+    total = query(f"SELECT COUNT(*) AS n FROM sessions s {where}", tuple(params))[0]["n"]
+
+    sql = (
+        "SELECT s.id, s.session_key, s.candidate_email, s.challenge_id, s.status, "
+        "s.llm_spent_usd, s.llm_budget_usd, s.max_minutes, "
+        "s.typed_chars, s.pasted_chars, s.ai_applied_chars, "
+        "s.meet_link, s.video_platform, s.scheduled_at, s.panelist_emails, "
+        "s.created_at, s.started_at, s.submitted_at, s.org_id, "
+        "g.total_score "
+        "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
+        f"{where}ORDER BY s.created_at DESC "
+    )
+    page_params = list(params)
+    if limit is not None:
+        sql += "LIMIT ? OFFSET ?"
+        page_params.extend([limit, offset])
+    elif offset:
+        # SQLite needs a LIMIT to honour OFFSET; -1 means "no upper bound".
+        sql += "LIMIT -1 OFFSET ?"
+        page_params.append(offset)
+    rows = query(sql, tuple(page_params))
+    return {
+        "sessions": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/challenges")

@@ -800,3 +800,54 @@ async def test_list_sessions_invalid_status_rejected(client):
     """An unknown status yields 400, not a silent empty result."""
     r = await client.get("/api/v1/sessions", params={"status": "bogus"}, headers=_ADMIN)
     assert r.status_code == 400
+
+
+async def test_list_sessions_pagination(client):
+    """limit/offset page the filtered set; total reports the full filtered count."""
+    with respx.mock:
+        _mock_github()
+        for i in range(5):
+            await _create_session(client, f"PAGE-{i}")
+
+    page1 = await client.get("/api/v1/sessions", params={"limit": 2, "offset": 0}, headers=_ADMIN)
+    assert page1.status_code == 200
+    body1 = page1.json()
+    assert body1["total"] == 5
+    assert body1["limit"] == 2 and body1["offset"] == 0
+    assert len(body1["sessions"]) == 2
+
+    last = await client.get("/api/v1/sessions", params={"limit": 2, "offset": 4}, headers=_ADMIN)
+    body_last = last.json()
+    assert len(body_last["sessions"]) == 1  # only one row left on the last page
+    assert body_last["total"] == 5
+
+    # Walking every page yields each row exactly once (no gaps, no overlap).
+    seen: list[str] = []
+    for off in (0, 2, 4):
+        page = await client.get(
+            "/api/v1/sessions", params={"limit": 2, "offset": off}, headers=_ADMIN
+        )
+        seen.extend(s["session_key"] for s in page.json()["sessions"])
+    assert sorted(seen) == [f"PAGE-{i}" for i in range(5)]
+
+
+async def test_list_sessions_total_reflects_filter(client):
+    """`total` counts the filtered set, not the whole table."""
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "KEEP-1")
+        await _create_session(client, "KEEP-2")
+        await _create_session(client, "OTHER-1")
+
+    r = await client.get(
+        "/api/v1/sessions", params={"search": "keep", "limit": 1}, headers=_ADMIN
+    )
+    body = r.json()
+    assert body["total"] == 2  # two KEEP rows match the filter
+    assert len(body["sessions"]) == 1  # but only one returned this page
+
+
+async def test_list_sessions_invalid_pagination_rejected(client):
+    """Negative offset / zero-or-negative limit are rejected with 400."""
+    assert (await client.get("/api/v1/sessions", params={"limit": 0}, headers=_ADMIN)).status_code == 400
+    assert (await client.get("/api/v1/sessions", params={"offset": -1}, headers=_ADMIN)).status_code == 400
