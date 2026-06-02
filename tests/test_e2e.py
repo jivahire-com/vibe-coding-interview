@@ -748,3 +748,55 @@ async def test_session_detail_scoped_by_org(client):
     own = await client.get(f"/api/v1/sessions/{sid_b}", params={"org_id": "org-B"}, headers=_ADMIN)
     assert own.status_code == 200
     assert own.json()["session"]["org_id"] == "org-B"
+
+
+# ── list search / status filtering (backend-level) ────────────────────────────
+
+async def test_list_sessions_search_filter(client):
+    """`search` matches a substring of candidate email / session key / challenge id."""
+    with respx.mock:
+        _mock_github()
+        await client.post(
+            "/api/v1/sessions",
+            json={"session_key": "ALPHA-1", "candidate_email": "alice@acme.com", "challenge_id": "cpp-lru-cache"},
+            headers=_ADMIN,
+        )
+        await client.post(
+            "/api/v1/sessions",
+            json={"session_key": "BETA-1", "candidate_email": "bob@globex.com", "challenge_id": "cpp-lru-cache"},
+            headers=_ADMIN,
+        )
+
+    by_email = await client.get("/api/v1/sessions", params={"search": "globex"}, headers=_ADMIN)
+    assert by_email.status_code == 200
+    assert {s["session_key"] for s in by_email.json()["sessions"]} == {"BETA-1"}
+
+    by_key = await client.get("/api/v1/sessions", params={"search": "alpha"}, headers=_ADMIN)
+    assert {s["session_key"] for s in by_key.json()["sessions"]} == {"ALPHA-1"}
+
+
+async def test_list_sessions_status_filter(client):
+    """`status` (repeatable) restricts the result to the given lifecycle states."""
+    with respx.mock:
+        _mock_github()
+        await _create_session(client, "PEND-1")
+        await _create_session(client, "PEND-2")
+    # Flip one row to 'submitted' so the filter has two distinct states to split.
+    execute("UPDATE sessions SET status='submitted' WHERE session_key='PEND-1'")
+
+    submitted = await client.get("/api/v1/sessions", params={"status": "submitted"}, headers=_ADMIN)
+    assert submitted.status_code == 200
+    keys = {s["session_key"] for s in submitted.json()["sessions"]}
+    assert keys == {"PEND-1"}
+
+    # Repeated status params union the states.
+    both = await client.get(
+        "/api/v1/sessions?status=submitted&status=pending", headers=_ADMIN
+    )
+    assert {s["session_key"] for s in both.json()["sessions"]} == {"PEND-1", "PEND-2"}
+
+
+async def test_list_sessions_invalid_status_rejected(client):
+    """An unknown status yields 400, not a silent empty result."""
+    r = await client.get("/api/v1/sessions", params={"status": "bogus"}, headers=_ADMIN)
+    assert r.status_code == 400

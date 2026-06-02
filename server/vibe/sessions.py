@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from vibe.auth import check_rate_limit, get_session
 from vibe.budget import pricing_for
 from vibe.config import repo_for_challenge, settings
@@ -37,13 +37,29 @@ def _resolve_require_end_video(meet_link: str | None, override: bool) -> bool:
     return not meet_link or bool(override)
 
 
+# Statuses a session can hold across its lifecycle. Used to validate the
+# `status` filter so a typo returns an explicit 400 rather than silently
+# matching nothing.
+_SESSION_STATUSES = {"pending", "active", "submitted", "graded", "grading_failed"}
+
+
 @router.get("/sessions")
-def list_sessions(x_admin_token: str = Header(None), org_id: str | None = None):
+def list_sessions(
+    x_admin_token: str = Header(None),
+    org_id: str | None = None,
+    search: str | None = None,
+    status: list[str] | None = Query(None),
+):
     if x_admin_token != settings.admin_token:
         raise HTTPException(403, "Forbidden")
     # `org_id` is an optional tenant filter supplied by the recruiter-backend
     # proxy. When omitted (e.g. direct admin use) all sessions are returned,
     # preserving the original global behaviour.
+    #
+    # `search` (free-text, case-insensitive substring across candidate email,
+    # session key and challenge id) and `status` (one or more lifecycle states,
+    # repeatable: ?status=active&status=submitted) are optional and applied at
+    # the SQL level so the client never has to page through everything.
     sql = (
         "SELECT s.id, s.session_key, s.candidate_email, s.challenge_id, s.status, "
         "s.llm_spent_usd, s.llm_budget_usd, s.max_minutes, "
@@ -53,12 +69,38 @@ def list_sessions(x_admin_token: str = Header(None), org_id: str | None = None):
         "g.total_score "
         "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
     )
-    params: tuple = ()
+    clauses: list[str] = []
+    params: list = []
     if org_id is not None:
-        sql += "WHERE s.org_id = ? "
-        params = (org_id,)
+        clauses.append("s.org_id = ?")
+        params.append(org_id)
+    if search and search.strip():
+        # SQLite LIKE is case-insensitive for ASCII; escape the LIKE wildcards
+        # in the user term so a literal '%' or '_' doesn't widen the match.
+        term = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{term}%"
+        clauses.append(
+            "(s.candidate_email LIKE ? ESCAPE '\\' "
+            "OR s.session_key LIKE ? ESCAPE '\\' "
+            "OR s.challenge_id LIKE ? ESCAPE '\\')"
+        )
+        params.extend([like, like, like])
+    if status:
+        statuses = [s.strip() for s in status if s and s.strip()]
+        unknown = [s for s in statuses if s not in _SESSION_STATUSES]
+        if unknown:
+            raise HTTPException(
+                400,
+                f"Unknown status {unknown!r}; valid: {sorted(_SESSION_STATUSES)}",
+            )
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            clauses.append(f"s.status IN ({placeholders})")
+            params.extend(statuses)
+    if clauses:
+        sql += "WHERE " + " AND ".join(clauses) + " "
     sql += "ORDER BY s.created_at DESC"
-    rows = query(sql, params)
+    rows = query(sql, tuple(params))
     return {"sessions": [dict(r) for r in rows]}
 
 
