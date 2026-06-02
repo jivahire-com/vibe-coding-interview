@@ -3,24 +3,31 @@
 # extension's local spend meter never diverges from the server's enforcement.
 #
 # Sources (late 2025 / early 2026):
-#   - openai/gpt-4o-mini      — OpenAI list price
-#   - google/gemini-2.5-flash-lite — OpenRouter listing
+#   - openai/gpt-4o           — OpenAI list price ($2.50/$10, 50% cached input)
 #   - anthropic/claude-opus-4.6    — Anthropic list price ($15/$75, $1.50 cached)
 #   - anthropic/claude-sonnet-4.6  — Anthropic list price ($3/$15, $0.30 cached)
+#   - anthropic/claude-haiku-4.5   — Anthropic list price ($1/$5, $0.10 cached)
+#   - openai/gpt-4o-mini      — OpenAI list price; retained for the internal
+#     grader_model (no longer in the candidate picker)
 #
 # `cached_input` is the prompt-cache hit rate (OpenAI / Anthropic "cached"
 # input). When a provider does not publish a cache discount we fall back to
 # the regular input rate so cost is never under-counted.
 MODEL_PRICING: dict[str, dict[str, float]] = {
+    "openai/gpt-4o": {
+        "input": 2.50,
+        "cached_input": 1.25,
+        "output": 10.0,
+    },
+    "anthropic/claude-haiku-4.5": {
+        "input": 1.0,
+        "cached_input": 0.10,
+        "output": 5.0,
+    },
     "openai/gpt-4o-mini": {
         "input": 0.15,
         "cached_input": 0.075,
         "output": 0.60,
-    },
-    "google/gemini-2.5-flash-lite": {
-        "input": 0.10,
-        "cached_input": 0.025,
-        "output": 0.40,
     },
     "anthropic/claude-opus-4.6": {
         "input": 15.0,

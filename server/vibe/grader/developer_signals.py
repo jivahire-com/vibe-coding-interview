@@ -115,6 +115,18 @@ def compute_developer_confidence(session_id: str, client: OpenAI) -> dict[str, A
 
     signals["test_runs"] = sum(1 for e in events if e["event_type"] == "test_run")
 
+    # Terminal-command kinds (npm install, cmake --build, pytest, …) emitted by
+    # the extension's shell-integration listener. The grader surfaces install /
+    # build counts on the recruiter dashboard alongside test_runs so a recruiter
+    # can see whether the candidate exercised a realistic build/test loop.
+    terminal_events = [e for e in events if e["event_type"] == "terminal_command"]
+    signals["install_runs"] = sum(
+        1 for e in terminal_events if e["payload"].get("kind") == "install"
+    )
+    signals["build_runs"] = sum(
+        1 for e in terminal_events if e["payload"].get("kind") == "build"
+    )
+
     base_score = (
         min(signals["files_explored"] / 5, 1.0) * 15
         + signals["ai_output_modified_ratio"] * 20

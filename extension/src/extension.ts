@@ -100,13 +100,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("vibe.showBrief", () => {
       vscode.commands.executeCommand("vibe.dashboard.focus");
     }),
-    vscode.commands.registerCommand("vibe.runTests", () => {
-      // Focus the dashboard so the candidate can SEE the checklist results
-      // when they trigger this from the status bar (the dashboard webview is
-      // hidden whenever the File Explorer / another activity bar view is up).
-      vscode.commands.executeCommand("vibe.dashboard.focus");
-      dashboardProvider.runTests();
-    }),
     vscode.commands.registerCommand("vibe.openChat", () => {
       const config = context.globalState.get<SessionConfig>(SESSION_KEY);
       if (!config) {

@@ -25,13 +25,13 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     challenges_dir: str = "challenges"
-    chat_model: str = "openai/gpt-4o-mini"
+    chat_model: str = "openai/gpt-4o"
     grader_model: str = "openai/gpt-4o-mini"
     candidate_chat_models: str = (
-        "openai/gpt-4o-mini,"
-        "google/gemini-2.5-flash-lite,"
+        "openai/gpt-4o,"
         "anthropic/claude-opus-4.6,"
-        "anthropic/claude-sonnet-4.6"
+        "anthropic/claude-sonnet-4.6,"
+        "anthropic/claude-haiku-4.5"
     )
     grader_self_consistency_n: int = 1
     sendgrid_api_key: str = ""

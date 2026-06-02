@@ -40,7 +40,6 @@ const CLONE_DIR = '/home/testuser/vibe-aabbccdd';
 const ALL_COMMANDS = [
   'vibe.enterSessionKey',
   'vibe.showBrief',
-  'vibe.runTests',
   'vibe.openChat',
   'vibe.submit',
   'vibe.applyCodeBlock',

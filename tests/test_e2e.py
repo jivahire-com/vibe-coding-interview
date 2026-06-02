@@ -705,3 +705,46 @@ async def test_invite_email_mentions_end_video_when_required(client, monkeypatch
         )
     assert captured[0]["require_end_video"] is True
     assert captured[1]["require_end_video"] is False
+
+
+# ── org scoping (recruiter-backend proxy passes org_id) ───────────────────────
+
+async def _create_session_org(client, key: str, org_id: str | None) -> str:
+    body = {"session_key": key, "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"}
+    if org_id is not None:
+        body["org_id"] = org_id
+    r = await client.post("/api/v1/sessions", json=body, headers=_ADMIN)
+    assert r.status_code == 201
+    return r.json()["session_id"]
+
+
+async def test_list_sessions_scoped_by_org(client):
+    """GET /sessions?org_id=X returns only X's sessions; omitting it returns all."""
+    with respx.mock:
+        _mock_github()
+        await _create_session_org(client, "ORG-A-1", "org-A")
+        await _create_session_org(client, "ORG-B-1", "org-B")
+        await _create_session_org(client, "ORG-NONE-1", None)
+
+    a = await client.get("/api/v1/sessions", params={"org_id": "org-A"}, headers=_ADMIN)
+    assert a.status_code == 200
+    a_keys = {s["session_key"] for s in a.json()["sessions"]}
+    assert a_keys == {"ORG-A-1"}
+
+    all_sessions = await client.get("/api/v1/sessions", headers=_ADMIN)
+    all_keys = {s["session_key"] for s in all_sessions.json()["sessions"]}
+    assert {"ORG-A-1", "ORG-B-1", "ORG-NONE-1"} <= all_keys
+
+
+async def test_session_detail_scoped_by_org(client):
+    """Detail for another org's session is reported as 404; own org gets 200."""
+    with respx.mock:
+        _mock_github()
+        sid_b = await _create_session_org(client, "ORG-B-2", "org-B")
+
+    cross = await client.get(f"/api/v1/sessions/{sid_b}", params={"org_id": "org-A"}, headers=_ADMIN)
+    assert cross.status_code == 404
+
+    own = await client.get(f"/api/v1/sessions/{sid_b}", params={"org_id": "org-B"}, headers=_ADMIN)
+    assert own.status_code == 200
+    assert own.json()["session"]["org_id"] == "org-B"

@@ -234,7 +234,10 @@ describe('DashboardViewProvider', () => {
     provider.resolveWebviewView(view);
     provider.setConfig(makeConfig());
     const html: string = view.webview.html;
-    expect(html).toMatch(/data-action="runTests"/);
+    // Run Tests was removed from the dashboard — tests now run from the
+    // candidate's terminal and are picked up via shell-integration telemetry.
+    // Submit remains the only dashboard-driven action.
+    expect(html).not.toMatch(/data-action="runTests"/);
     expect(html).toMatch(/data-action="submit"/);
     // openChat was removed from the dashboard once the chat moved into a
     // dedicated secondary-sidebar view that's always open during a session —
@@ -343,93 +346,8 @@ describe('DashboardViewProvider', () => {
     expect(vscode.commands.executeCommand).not.toHaveBeenCalled();
   });
 
-  // ── Review-Bug 11: runChecklist rejection is caught + surfaced ──────────
-
-  test('Review-Bug 11: a rejected runChecklist surfaces an error and resets checklist UI', async () => {
-    // Use real timers — promise microtasks need to run for the .catch branch
-    // to fire, and the surrounding describe-block's beforeEach uses fake.
-    jest.useRealTimers();
-    // Swap the runChecklist export on the loaded module so the panel's
-    // bound `runChecklist` (after CommonJS interop) sees the rejecting fn.
-    const testsMod = require('../welcome/tests');
-    const original = testsMod.runChecklist;
-    const fakeRunChecklist = jest.fn().mockRejectedValue(new Error('fs unreachable'));
-    testsMod.runChecklist = fakeRunChecklist;
-    try {
-      const vscode = require('vscode');
-      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
-        { uri: { fsPath: '/ws' } },
-      ];
-      provider.resolveWebviewView(view);
-      provider.setConfig(makeConfig());
-      const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
-      (vscode.window.showErrorMessage as jest.Mock).mockClear();
-
-      handler({ command: 'runTests' });
-
-      // Let the rejected promise settle through the .catch branch.
-      await new Promise((r) => setTimeout(r, 0));
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(fakeRunChecklist).toHaveBeenCalled();
-      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-        expect.stringMatching(/tests?/i),
-      );
-    } finally {
-      testsMod.runChecklist = original;
-      jest.useFakeTimers();
-    }
-  });
-
-  // ── Bug B: raw child_process error never surfaces verbatim ───────────────
-
-  test('Bug B: runChecklist rejecting with a raw "Command failed:" string is not surfaced verbatim', async () => {
-    jest.useRealTimers();
-    const testsMod = require('../welcome/tests');
-    const original = testsMod.runChecklist;
-    const fakeRunChecklist = jest.fn().mockRejectedValue(
-      new Error('Command failed: bash -c "cmake --build build && ctest"'),
-    );
-    testsMod.runChecklist = fakeRunChecklist;
-    try {
-      const vscode = require('vscode');
-      (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
-        { uri: { fsPath: '/ws' } },
-      ];
-      provider.resolveWebviewView(view);
-      provider.setConfig(makeConfig());
-      const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
-      (vscode.window.showErrorMessage as jest.Mock).mockClear();
-
-      handler({ command: 'runTests' });
-
-      await new Promise((r) => setTimeout(r, 0));
-      await new Promise((r) => setTimeout(r, 0));
-
-      expect(fakeRunChecklist).toHaveBeenCalled();
-      expect(vscode.window.showErrorMessage).toHaveBeenCalled();
-      const msg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
-      expect(msg).not.toMatch(/Command failed/);
-      expect(msg).not.toMatch(/bash -c/);
-      expect(msg.toLowerCase()).toMatch(/test|environment|dependency|recruiter/);
-    } finally {
-      testsMod.runChecklist = original;
-      jest.useFakeTimers();
-    }
-  });
-
-  // ── Bug #17: empty-workspace runTests bails with a clear error ────────────
-
-  test('Bug #17: runTests with no workspace surfaces an error message', () => {
-    const vscode = require('vscode');
-    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
-    provider.resolveWebviewView(view);
-    provider.setConfig(makeConfig());
-    const handler = (view.webview.onDidReceiveMessage as jest.Mock).mock.calls[0][0] as (m: unknown) => void;
-    (vscode.window.showErrorMessage as jest.Mock).mockClear();
-    handler({ command: 'runTests' });
-    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/workspace/i),
-    );
-  });
+  // Run Tests was removed from the dashboard; the runChecklist-rejection,
+  // raw-child-process-error, and empty-workspace tests that previously lived
+  // here no longer apply. Test runs are picked up from the candidate's terminal
+  // by shell-integration telemetry — covered in telemetry.test.ts.
 });

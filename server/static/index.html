@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>JivaHire Dashboard</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=20260601-4" />
   <script>
     // Apply theme before render to prevent flash. App.toggleTheme() updates it later.
     (function () {
@@ -15,7 +15,11 @@
     })();
   </script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-  <script src="/app.js"></script>
+  <!-- Cache-bust on every static change: index.html is revalidated on
+       navigation, but app.js/style.css are served with only ETag/Last-Modified
+       (no Cache-Control), so browsers heuristically reuse a stale copy. Bumping
+       ?v= forces a fresh fetch. Increment it whenever app.js/style.css change. -->
+  <script src="/app.js?v=20260601-4"></script>
 </head>
 <body x-data="App" x-init="init()">
 
@@ -41,6 +45,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
         Authoring Docs
       </a>
+      <button class="btn btn-ghost btn-sm" @click="openFiles()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>
+        Edit Challenges
+      </button>
       <button class="btn btn-primary btn-sm" @click="openInvite()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Send Invite
@@ -60,7 +68,8 @@
       <div class="field">
         <label for="token">Admin Token</label>
         <input id="token" type="password" class="input" placeholder="••••••••••••"
-               x-model="adminToken" @keydown.enter="login()" autocomplete="current-password" />
+               x-model="adminToken" @input="adminToken = adminToken.replace(/\s+/g, '')"
+               @keydown.enter="login()" autocomplete="current-password" />
       </div>
       <button class="btn btn-primary w-full" @click="login()">Sign In →</button>
     </div>
@@ -313,6 +322,14 @@
                       <div class="stat-val" x-text="sigs.test_runs ?? '—'"></div>
                     </div>
                     <div class="stat-item">
+                      <div class="stat-label">Builds</div>
+                      <div class="stat-val" x-text="sigs.build_runs ?? '—'"></div>
+                    </div>
+                    <div class="stat-item">
+                      <div class="stat-label">Installs</div>
+                      <div class="stat-val" x-text="sigs.install_runs ?? '—'"></div>
+                    </div>
+                    <div class="stat-item">
                       <div class="stat-label">Used debugger</div>
                       <div class="stat-val" x-text="sigs.used_debugger ? 'yes' : 'no'"></div>
                     </div>
@@ -558,6 +575,104 @@
     </template>
   </div>
 
+  <!-- ═══════════════════════ CHALLENGE FILE EDITOR ═══════════════════════ -->
+  <div x-show="view === 'files'" x-transition class="page">
+
+    <div class="back-link" @click="leaveFiles()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      All Sessions
+    </div>
+
+    <div class="list-header">
+      <h2>Edit Challenge Files</h2>
+      <span x-show="unsavedFiles.length" class="count-chip" style="background:var(--border-warn,#f59e0b);color:#fff"
+            x-text="`${unsavedFiles.length} unsaved`"></span>
+    </div>
+
+    <div x-show="filesError" class="error-banner" x-text="filesError"></div>
+
+    <!-- Unsaved-changes notice: edits to every touched file are kept in memory
+         but are NOT committed until you Save / Save all. -->
+    <div x-show="unsavedFiles.length" class="files-unsaved-note">
+      <strong><span x-text="unsavedFiles.length"></span> file(s)</strong> have unsaved changes (marked ● in the list):
+      <span class="font-mono" x-text="unsavedFiles.join(', ')"></span>.
+      Switching files keeps your edits, but they're only committed when you click <strong>Save</strong> (this file) or <strong>Save all</strong>.
+    </div>
+
+    <div class="input-row" style="max-width:680px">
+      <div class="field" style="margin-bottom:12px">
+        <label>Challenge</label>
+        <select class="input" :value="filesChallengeId" @change="changeFilesChallenge($event.target.value, $event.target)">
+          <option value="" disabled x-show="challengeItems.length === 0">Loading challenges…</option>
+          <template x-for="c in challengeItems" :key="c.id">
+            <option :value="c.id" x-text="challengeLabel(c)"></option>
+          </template>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>Branch</label>
+        <select class="input" :value="filesBranch" @change="changeFilesBranch($event.target.value, $event.target)">
+          <template x-for="b in filesBranches" :key="b">
+            <option :value="b" x-text="b === 'main' ? 'main (original challenge)' : b"></option>
+          </template>
+        </select>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:280px 1fr;gap:16px;align-items:start">
+      <!-- File tree -->
+      <div class="card" style="padding:0;max-height:600px;overflow-y:auto">
+        <div x-show="filesLoading" style="padding:20px"><div class="spinner"></div></div>
+        <template x-if="!filesLoading && filesTree.length === 0">
+          <p class="text-muted" style="padding:16px;font-size:13px">No files.</p>
+        </template>
+        <template x-for="f in filesTree" :key="f.path">
+          <div class="file-row" :class="{ 'is-active': f.path === filesCurrentPath, 'is-dirty': isFileDirty(f.path) }"
+               @click="openFile(f.path)">
+            <span class="dirty-dot" x-show="isFileDirty(f.path)" title="Unsaved changes">●</span>
+            <span x-text="f.path"></span>
+          </div>
+        </template>
+      </div>
+
+      <!-- Editor -->
+      <div class="card">
+        <template x-if="!filesCurrentPath">
+          <p class="text-muted" style="font-size:13px">Select a file to view or edit.</p>
+        </template>
+        <template x-if="filesCurrentPath">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <strong class="font-mono" style="font-size:13px" x-text="filesCurrentPath"></strong>
+              <span class="text-sm text-muted" x-text="'@ ' + filesBranch"></span>
+              <span x-show="isFileDirty(filesCurrentPath)" class="badge" style="background:var(--border-warn,#f59e0b);color:#fff">unsaved</span>
+            </div>
+            <textarea class="input" x-model="filesContent" spellcheck="false"
+                      style="width:100%;min-height:380px;font-family:monospace;font-size:12.5px;white-space:pre;overflow:auto"></textarea>
+            <div class="input-row" style="margin-top:12px;align-items:end">
+              <div class="field" style="margin-bottom:0">
+                <label>Save to variant branch</label>
+                <input type="text" class="input" placeholder="variant/my-edit" x-model="filesVariantName" />
+              </div>
+              <div style="margin-bottom:0;display:flex;gap:8px">
+                <button class="btn btn-ghost" @click="saveFile()" :disabled="filesSaving">
+                  <span x-text="filesSaving ? 'Saving…' : 'Save this file'"></span>
+                </button>
+                <button class="btn btn-primary" @click="saveAllFiles()" :disabled="filesSaving || unsavedFiles.length === 0">
+                  <span x-text="filesSaving ? 'Saving…' : `Save all (${unsavedFiles.length})`"></span>
+                </button>
+              </div>
+            </div>
+            <p x-show="filesSaveMsg" class="text-sm" style="margin-top:8px;color:var(--text-good,#16a34a)" x-text="filesSaveMsg"></p>
+            <p class="input-hint" style="margin-top:6px;font-size:11px;color:var(--vscode-descriptionForeground);">
+              <strong>Save this file</strong> commits only the open file; <strong>Save all</strong> commits every file marked ●. Both go to the <code>variant/…</code> branch above — the original <code>main</code> is never modified. The <code>.jivahire/</code> answer-key directory is hidden and cannot be edited.
+            </p>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════ INVITE DRAWER ═══════════════════════ -->
   <div x-show="showInvitePanel" x-transition.opacity class="overlay"
        x-data="{ overlayMouseDown: false }"
@@ -602,16 +717,19 @@
       <div class="field">
         <label>Challenge</label>
         <select class="input"
-                x-model="inviteForm.challengeId"
-                @change="inviteForm.challengeId = $event.target.value"
-                :disabled="!!inviteResult || challengeItems.length === 0">
-          <option value="" disabled x-show="challengeItems.length === 0">Loading challenges…</option>
-          <template x-for="c in challengeItems" :key="c.id">
-            <option :value="c.id" x-text="challengeLabel(c)"></option>
+                x-model="inviteForm.selection"
+                @change="applyInviteSelection($event.target.value)"
+                :disabled="!!inviteResult || inviteOptions.length === 0">
+          <option value="" disabled x-show="inviteOptions.length === 0">Loading challenges…</option>
+          <template x-for="opt in inviteOptions" :key="opt.value">
+            <option :value="opt.value" x-text="opt.label"></option>
           </template>
         </select>
         <p class="input-hint" x-show="inviteForm.challengeId" style="margin-top:4px;font-size:11px;color:var(--vscode-descriptionForeground);">
           Selected: <strong x-text="inviteForm.challengeId"></strong>
+          <template x-if="inviteForm.sourceRef && inviteForm.sourceRef !== 'main'">
+            <span> · variant <strong x-text="inviteForm.sourceRef"></strong></span>
+          </template>
         </p>
       </div>
 

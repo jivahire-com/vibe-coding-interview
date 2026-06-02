@@ -58,7 +58,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private streamingText = "";
   private spentUsd = 0;
   private config: SessionConfig | undefined;
-  private selectedModel: string = "openai/gpt-4o-mini";
+  private selectedModel: string = "openai/gpt-4o";
   private budgetExhausted = false;
   // Chat-toolbar state — the timer pill, offline banner, and Run tests /
   // Submit / Join call buttons all live in the chat webview now, so the
@@ -237,10 +237,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(msg: { command: string; text?: string; filePath?: string; codeText?: string; blockId?: string; model?: string; lang?: string }): Promise<void> {
-    if (msg.command === "runTests") {
-      vscode.commands.executeCommand("vibe.runTests");
-      return;
-    }
     if (msg.command === "submit") {
       vscode.commands.executeCommand("vibe.submit");
       return;
@@ -495,9 +491,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const prettyModel = (m: string | undefined): string =>
       // Strip the OpenRouter/provider prefix so the picker shows compact labels
-      // ("Gpt 4o Mini", "Gemini 2.5 Flash Lite", "Claude Opus 4.6", …) instead
+      // ("Gpt 4o", "Claude Opus 4.6", "Claude Haiku 4.5", …) instead
       // of the fully qualified `<provider>/<model>` ids the API takes.
-      (m ?? "openai/gpt-4o-mini")
+      (m ?? "openai/gpt-4o")
         .replace(/^(?:openai|google|anthropic|meta-llama|mistralai|deepseek)\//, "")
         .replace(/-/g, " ")
         .replace(/\b\w/g, (c) => c.toUpperCase());

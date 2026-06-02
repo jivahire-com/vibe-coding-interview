@@ -61,11 +61,9 @@ export interface SessionConfig {
  * meter sane for every model the picker offers. */
 export const DEFAULT_MODEL_PRICING: Record<string, ModelPricing> = {
   "openai/gpt-4o": { input: 2.5, output: 10.0 },
-  "openai/gpt-4o-mini": { input: 0.15, output: 0.6 },
-  "openai/gpt-4o-2024-11-20": { input: 2.5, output: 10.0 },
-  "google/gemini-2.5-flash-lite": { input: 0.10, output: 0.40 },
   "anthropic/claude-opus-4.6": { input: 15.0, output: 75.0 },
   "anthropic/claude-sonnet-4.6": { input: 3.0, output: 15.0 },
+  "anthropic/claude-haiku-4.5": { input: 1.0, output: 5.0 },
 };
 
 /** Default per-request HTTP timeout (ms). validate-session creates a GitHub
@@ -138,8 +136,8 @@ export async function validateSession(
     llmBudgetUsd: res.llm_budget_usd,
     challengeId: res.challenge_id,
     challengeDescription: res.challenge_description ?? res.challenge_id ?? "",
-    chatModel: res.chat_model ?? "openai/gpt-4o-mini",
-    availableChatModels: res.available_chat_models ?? [res.chat_model ?? "openai/gpt-4o-mini"],
+    chatModel: res.chat_model ?? "openai/gpt-4o",
+    availableChatModels: res.available_chat_models ?? [res.chat_model ?? "openai/gpt-4o"],
     startedAt: Date.now(),
     pricingPerMillion: _normalisePricing(res.pricing_per_million),
     meetLink,

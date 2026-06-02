@@ -9,6 +9,10 @@ class CreateSessionRequest(BaseModel):
     session_key: str
     candidate_email: str
     challenge_id: str
+    # Git ref the candidate's interview branch is cut from. "main" is the
+    # original challenge; a "variant/..." branch is a recruiter-edited copy
+    # (see repo_files.py). Validated against the variant namespace server-side.
+    source_ref: str = "main"
     llm_budget_usd: float = 2.00
     max_minutes: int = 90
     meet_link: str | None = None
@@ -25,6 +29,9 @@ class CreateSessionRequest(BaseModel):
     # verify identity live. When True, the candidate is asked to record an
     # explainer after submitting even if a meet link is set.
     require_end_video: bool = False
+    # Organization tag set by the recruiter-backend proxy. Used only to scope
+    # admin list/detail queries to a single org; never surfaced to candidates.
+    org_id: str | None = None
 
     @field_validator("meet_link")
     @classmethod

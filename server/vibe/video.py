@@ -263,20 +263,25 @@ def browser_video_complete(req: BrowserCompleteRequest):
 # Recruiter playback
 # ──────────────────────────────────────────────────────────────────────
 @router.get("/sessions/{session_id}/video-url")
-def video_playback_url(session_id: str, x_admin_token: str = Header(None)):
+def video_playback_url(
+    session_id: str, x_admin_token: str = Header(None), org_id: str | None = None
+):
     if x_admin_token != settings.admin_token:
         raise HTTPException(401, "Unauthorized")
     if not _feature_enabled():
         raise HTTPException(503, "Video playback not configured on this server")
 
     rows = query(
-        "SELECT video_s3_key, video_uploaded_at, video_duration_seconds "
+        "SELECT video_s3_key, video_uploaded_at, video_duration_seconds, org_id "
         "FROM sessions WHERE id = ?",
         (session_id,),
     )
     if not rows:
         raise HTTPException(404, "Session not found")
     row = rows[0]
+    # Scope to the caller's org when supplied (see get_session_detail).
+    if org_id is not None and row.get("org_id") != org_id:
+        raise HTTPException(404, "Session not found")
     if not row["video_s3_key"]:
         raise HTTPException(404, "No video uploaded for this session")
 

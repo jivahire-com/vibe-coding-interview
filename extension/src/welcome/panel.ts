@@ -3,8 +3,6 @@ import * as https from "https";
 import * as crypto from "crypto";
 import { execSync } from "child_process";
 import { SessionConfig } from "../api";
-import { _friendlyErrorMessage } from "../submit";
-import { runChecklist, TestChecklist, TestRunnerError } from "./tests";
 
 interface PrereqChecks {
   git: boolean | null;
@@ -26,7 +24,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private config: SessionConfig | null = null;
   private submitted = false;
-  private checklist: TestChecklist = { basic: null, thread: null, edge: null };
   private prereqs: PrereqChecks = { git: null, internet: null, cmake: null };
   private refreshInterval: ReturnType<typeof setInterval> | undefined;
   private _prereqRequest: ReturnType<typeof https.request> | undefined;
@@ -120,39 +117,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Run the challenge test checklist. Public so the always-visible
-   * "Run tests" status bar item can invoke it without going through the
-   * webview message channel — which is needed because the dashboard webview
-   * is hidden whenever the user switches to another activity bar view.
-   */
-  runTests(): void {
-    if (this.submitted) {
-      vscode.window.showInformationMessage("Session already submitted. Further actions are disabled.");
-      return;
-    }
-    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!ws) {
-      vscode.window.showErrorMessage("Open the challenge workspace before running tests.");
-      return;
-    }
-    this.checklist = { basic: null, thread: null, edge: null };
-    this.render();
-    runChecklist(ws, this.config?.challengeId)
-      .then((result) => {
-        this.checklist = result;
-        this.render();
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof TestRunnerError
-          ? err.message
-          : _friendlyErrorMessage(err, "tests");
-        vscode.window.showErrorMessage(message);
-        this.checklist = { basic: null, thread: null, edge: null };
-        this.render();
-      });
-  }
-
-  /**
    * Force the dashboard into the welcome/onboarding state and prevent
    * resolveWebviewView from self-restoring the saved session config.
    * Used when the candidate dismisses the activation-time "Reopen vs.
@@ -206,7 +170,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     // entire webview, which flickers at 1Hz and would lose focus / scroll
     // state. Instead, post a small 'tick' message and let the brief's
     // inline script patch the timer DOM in-place. render() still fires on
-    // state changes (setConfig, markSubmitted, runTests) and once more when
+    // state changes (setConfig, markSubmitted) and once more when
     // the session expires to swap to the locked layout.
     this.refreshInterval = setInterval(() => {
       if (this._sessionExpired()) {
@@ -302,9 +266,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     switch (msg.command) {
       case "startTest":
         vscode.commands.executeCommand("vibe.enterSessionKey", msg.sessionKey);
-        break;
-      case "runTests":
-        this.runTests();
         break;
       case "submit":
         vscode.commands.executeCommand("vibe.submit");
@@ -637,7 +598,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         <div class="step-num">4</div>
         <div>
           <div class="step-title">Run tests and iterate</div>
-          <div class="step-desc">Use <strong>Run Tests</strong> in this panel. Green = passing, red = failing. Fix failures, refine with the AI, repeat.</div>
+          <div class="step-desc">Open a terminal and run the project's test command (e.g. <code>npm test</code>, <code>pytest</code>, <code>ctest</code>). Builds, installs, and test runs are detected automatically and contribute to your developer signal.</div>
         </div>
       </div>
       <div class="step">
@@ -739,16 +700,6 @@ Click Apply ──▶ Diff editor opens
         : urgent === "warn"
         ? "rgba(232,192,0,0.1)"
         : "var(--vscode-input-background)";
-
-    const checkItem = (label: string, tag: string, state: boolean | null) => {
-      const cls = state === true ? "pass" : state === false ? "fail" : "pending";
-      const icon = state === true ? "&#10003;" : state === false ? "&#10007;" : "&#9675;";
-      return `<div class="check-item ${cls}">
-        <span class="check-icon">${icon}</span>
-        <span class="check-label">${label}</span>
-        <span class="check-tag">${tag}</span>
-      </div>`;
-    };
 
     // All values below are interpolated into HTML — every server-supplied
     // string must be HTML-escaped to prevent XSS via challenge metadata.
@@ -919,26 +870,6 @@ Click Apply ──▶ Diff editor opens
   }
   .desc strong { color: var(--vscode-foreground); }
 
-  .check-list { display: flex; flex-direction: column; }
-  .check-item {
-    display: flex; align-items: center; gap: 9px;
-    padding: 7px 11px; font-size: 12px;
-    border-bottom: 1px solid var(--vscode-panel-border);
-  }
-  .check-item:last-child { border-bottom: none; }
-  .check-icon { font-size: 13px; flex-shrink: 0; width: 16px; text-align: center; }
-  .check-label { flex: 1; }
-  .check-tag {
-    font-size: 10px; color: var(--vscode-descriptionForeground);
-    font-family: var(--vscode-editor-font-family, monospace);
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border);
-    padding: 1px 5px; border-radius: 3px;
-  }
-  .pass .check-icon { color: #4caf50; }
-  .fail .check-icon { color: #f44336; }
-  .pending .check-icon { color: var(--vscode-descriptionForeground); }
-
   .actions { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
   .action-btn {
     width: 100%; padding: 8px 12px;
@@ -1005,25 +936,11 @@ Click Apply ──▶ Diff editor opens
 
   <div class="card">
     <div class="card-header">Challenge</div>
-    <p class="desc">${safeChallengeDesc}. See <strong>README.md</strong> for the full spec and build instructions.</p>
-  </div>
-
-  <div class="card">
-    <div class="card-header">Test Checklist</div>
-    <div class="check-list">
-      ${checkItem("Single-threaded correctness", "[basic]", this.checklist.basic)}
-      ${checkItem("Concurrent get/put", "[thread]", this.checklist.thread)}
-      ${checkItem("Capacity edge cases", "[edge]", this.checklist.edge)}
-    </div>
+    <p class="desc">${safeChallengeDesc}. See <strong>README.md</strong> for the full spec and build instructions. Run tests in your terminal &mdash; runs are detected automatically.</p>
   </div>
 
   <div class="actions">
-    <button class="action-btn primary" data-action="runTests" ${actionDisabled}>
-      <span>&#9654;</span>
-      <span class="btn-label">Run Tests</span>
-      <span class="btn-hint">execute compiled test suite</span>
-    </button>
-<button class="action-btn danger" data-action="submit" ${actionDisabled}>
+    <button class="action-btn danger" data-action="submit" ${actionDisabled}>
       <span>&#10003;</span>
       <span class="btn-label">Submit Solution</span>
       <span class="btn-hint">finalises &amp; locks your branch</span>

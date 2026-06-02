@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     candidate_email TEXT NOT NULL,
     challenge_id TEXT NOT NULL,
     branch_name TEXT NOT NULL,
+    source_ref TEXT NOT NULL DEFAULT 'main',
     status TEXT NOT NULL DEFAULT 'pending',
     llm_budget_usd REAL NOT NULL DEFAULT 2.00,
     llm_spent_usd REAL NOT NULL DEFAULT 0.0,

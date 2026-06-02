@@ -38,19 +38,27 @@ def _resolve_require_end_video(meet_link: str | None, override: bool) -> bool:
 
 
 @router.get("/sessions")
-def list_sessions(x_admin_token: str = Header(None)):
+def list_sessions(x_admin_token: str = Header(None), org_id: str | None = None):
     if x_admin_token != settings.admin_token:
         raise HTTPException(403, "Forbidden")
-    rows = query(
+    # `org_id` is an optional tenant filter supplied by the recruiter-backend
+    # proxy. When omitted (e.g. direct admin use) all sessions are returned,
+    # preserving the original global behaviour.
+    sql = (
         "SELECT s.id, s.session_key, s.candidate_email, s.challenge_id, s.status, "
         "s.llm_spent_usd, s.llm_budget_usd, s.max_minutes, "
         "s.typed_chars, s.pasted_chars, s.ai_applied_chars, "
         "s.meet_link, s.video_platform, s.scheduled_at, s.panelist_emails, "
-        "s.created_at, s.started_at, s.submitted_at, "
+        "s.created_at, s.started_at, s.submitted_at, s.org_id, "
         "g.total_score "
         "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
-        "ORDER BY s.created_at DESC"
     )
+    params: tuple = ()
+    if org_id is not None:
+        sql += "WHERE s.org_id = ? "
+        params = (org_id,)
+    sql += "ORDER BY s.created_at DESC"
+    rows = query(sql, params)
     return {"sessions": [dict(r) for r in rows]}
 
 
@@ -122,6 +130,13 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
 
     session_id = uuid.uuid4().hex
     branch = f"interview/{session_id}"
+    # The candidate branch is cut from `source_ref` at validate-session time —
+    # either the original challenge "main" or a recruiter-authored `variant/*`
+    # branch. Anything outside that namespace would let a recruiter assign an
+    # arbitrary ref (e.g. another candidate's `interview/*` branch), so reject it.
+    source_ref = (req.source_ref or "main").strip()
+    if source_ref != "main" and not source_ref.startswith("variant/"):
+        raise HTTPException(400, "source_ref must be 'main' or a 'variant/...' branch")
     # Store the panel list as a CSV string in SQLite. Pydantic has already
     # normalised it to a deduplicated, lowercase list with no whitespace.
     panelists_csv = ",".join(req.panelist_emails) if req.panelist_emails else None
@@ -130,13 +145,13 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
             "INSERT INTO sessions "
             "(id, session_key, candidate_email, challenge_id, branch_name, "
             "llm_budget_usd, max_minutes, meet_link, video_platform, "
-            "scheduled_at, panelist_emails, require_end_video) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "scheduled_at, panelist_emails, require_end_video, source_ref, org_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, req.session_key, req.candidate_email, req.challenge_id,
              branch, req.llm_budget_usd, req.max_minutes,
              req.meet_link, req.video_platform,
              req.scheduled_at, panelists_csv,
-             1 if req.require_end_video else 0),
+             1 if req.require_end_video else 0, source_ref, req.org_id),
         )
     except sqlite3.IntegrityError as e:
         if "session_key" in str(e):
@@ -247,7 +262,9 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
         raise HTTPException(500, "Server misconfigured: no challenge repo configured")
 
     if session["status"] == "pending":
-        await _create_github_branch(repo, session["branch_name"])
+        await _create_github_branch(
+            repo, session["branch_name"], source_ref=session.get("source_ref") or "main"
+        )
         execute(
             "UPDATE sessions SET status='active', started_at=? WHERE id=?",
             (int(time.time()), session["id"]),
@@ -318,11 +335,17 @@ async def refresh_github_token(session: dict = Depends(get_session)):
 
 
 @router.get("/sessions/{session_id}")
-def get_session_detail(session_id: str, x_admin_token: str = Header(None)):
+def get_session_detail(
+    session_id: str, x_admin_token: str = Header(None), org_id: str | None = None
+):
     if x_admin_token != settings.admin_token:
         raise HTTPException(403, "Forbidden")
     rows = query("SELECT * FROM sessions WHERE id = ?", (session_id,))
     if not rows:
+        raise HTTPException(404, "Not found")
+    # Scope to the caller's org when supplied: a session belonging to another
+    # org is reported as not-found so existence isn't leaked across tenants.
+    if org_id is not None and rows[0].get("org_id") != org_id:
         raise HTTPException(404, "Not found")
     grades = query("SELECT * FROM grades WHERE session_id = ?", (session_id,))
     exchanges = query(
@@ -368,11 +391,15 @@ def get_session_detail(session_id: str, x_admin_token: str = Header(None)):
     }
 
 
-async def _create_github_branch(repo: str, branch_name: str) -> None:
+async def _create_github_branch(repo: str, branch_name: str, source_ref: str = "main") -> None:
     # Mint a fresh installation token for this single branch-creation call.
     # The token lives ~1hr but we throw it away after the two HTTP calls below
     # — no caching server-side, since each session creates exactly one branch
     # and the cost of minting is one extra request to GitHub.
+    #
+    # `source_ref` is the branch the new branch is cut from. Defaults to "main"
+    # (the original challenge); recruiter-authored `variant/*` branches let a
+    # candidate be assigned an edited copy of the challenge instead.
     branch_token = await mint_installation_token(repo)
     headers = {
         "Authorization": f"Bearer {branch_token.token}",
@@ -381,11 +408,11 @@ async def _create_github_branch(repo: str, branch_name: str) -> None:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
-            f"https://api.github.com/repos/{repo}/git/ref/heads/main",
+            f"https://api.github.com/repos/{repo}/git/ref/heads/{source_ref}",
             headers=headers,
         )
         if r.status_code != 200:
-            raise HTTPException(502, f"GitHub: could not get main SHA: {r.text}")
+            raise HTTPException(502, f"GitHub: could not get '{source_ref}' SHA: {r.text}")
         sha = r.json()["object"]["sha"]
 
         r = await client.post(

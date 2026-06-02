@@ -61,6 +61,10 @@ def _migrate() -> None:
         ("sessions", "video_uploaded_at", "INTEGER"),
         ("sessions", "video_duration_seconds", "INTEGER"),
         ("sessions", "require_end_video", "INTEGER NOT NULL DEFAULT 0"),
+        ("sessions", "source_ref", "TEXT NOT NULL DEFAULT 'main'"),
+        # Tenant tag supplied by the recruiter-backend proxy so admin queries can
+        # be scoped to a single organization. NULL on legacy/direct sessions.
+        ("sessions", "org_id", "TEXT"),
         ("chat_exchanges", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "prompt_text", "TEXT"),
@@ -105,3 +109,9 @@ def _migrate() -> None:
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         except Exception:
             pass  # column already absent
+
+    # Indexes for columns added above. IF NOT EXISTS keeps this idempotent.
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org_id ON sessions(org_id)")
+    except Exception:
+        pass

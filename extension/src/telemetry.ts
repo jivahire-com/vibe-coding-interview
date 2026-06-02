@@ -39,6 +39,74 @@ export function suppressNextApplyForUri(uri: vscode.Uri | { fsPath: string }): v
   _suppressForUriPaths.add(uri.fsPath);
 }
 
+// Terminal command classification — used by the shell-integration listener to
+// tag candidate-issued commands (npm test, pytest, cmake --build, pip install,
+// etc.) so the developer-signal grader sees the same "test_run" events whether
+// they come from VS Code's Testing UI or from a terminal invocation.
+// Patterns are matched left-to-right, so the test list wins over build/install
+// when a command happens to contain multiple kinds (e.g. `cmake --build &&
+// ctest` is a test run — the test step is the candidate's intent).
+const _TEST_RUNNER_PATTERNS: RegExp[] = [
+  /\bpytest\b/,
+  /python[0-9.]*\s+-m\s+(pytest|unittest)\b/,
+  /\bvitest\b/,
+  /\bjest\b/,
+  /\bmocha\b/,
+  /\bnpm\s+(run\s+)?(test|t)\b/,
+  /\byarn\s+(run\s+)?(test|t)\b/,
+  /\bpnpm\s+(run\s+)?(test|t)\b/,
+  /\bnpx\s+(vitest|jest|mocha|playwright|cypress)\b/,
+  /\bcargo\s+test\b/,
+  /\bgo\s+test\b/,
+  /\bctest\b/,
+  /\bmake\s+(test|check)\b/,
+  /\bmvn\s+(test|verify)\b/,
+  /\bgradlew?\s+(test|check)\b/,
+  /(^|\s|\/)build\/tests?\b/,
+  /\bphpunit\b/,
+  /\brspec\b/,
+  /\brake\s+test\b/,
+];
+const _BUILD_PATTERNS: RegExp[] = [
+  /\bnpm\s+(run\s+)?build\b/,
+  /\byarn\s+(run\s+)?build\b/,
+  /\bpnpm\s+(run\s+)?build\b/,
+  /\bcmake\b/,
+  /\bmake\b/,
+  /\bcargo\s+(build|check)\b/,
+  /\bgo\s+build\b/,
+  /\btsc\b/,
+  /\besbuild\b/,
+  /\bwebpack\b/,
+  /\bvite\s+build\b/,
+  /\bmvn\s+(package|compile|install)\b/,
+  /\bgradlew?\s+(build|assemble)\b/,
+  /\bninja\b/,
+];
+const _INSTALL_PATTERNS: RegExp[] = [
+  /\bnpm\s+(i|install|ci)\b/,
+  /\byarn(\s+(install|add))?\s*$/,
+  /\byarn\s+(install|add)\b/,
+  /\bpnpm\s+(i|install|add)\b/,
+  /\bpip[0-9]?\s+install\b/,
+  /\bpoetry\s+(install|add)\b/,
+  /\buv\s+(pip\s+install|add|sync)\b/,
+  /\bcargo\s+(install|fetch|update)\b/,
+  /\bgo\s+(get|mod\s+download)\b/,
+  /\bbundle\s+install\b/,
+];
+
+export function _classifyTerminalCommand(
+  cmd: string,
+): "test" | "build" | "install" | "other" {
+  const c = cmd.trim().toLowerCase();
+  if (!c) return "other";
+  for (const p of _TEST_RUNNER_PATTERNS) if (p.test(c)) return "test";
+  for (const p of _INSTALL_PATTERNS) if (p.test(c)) return "install";
+  for (const p of _BUILD_PATTERNS) if (p.test(c)) return "build";
+  return "other";
+}
+
 // Set when the user invokes the paste command, consumed by the next doc change.
 // The flag has a short freshness window so a stale paste signal (e.g. a paste
 // into a non-editor input) can't get attributed to an unrelated later edit.
@@ -127,6 +195,24 @@ export class TelemetryTracker implements vscode.Disposable {
       this._disposables.push(
         (vscode as any).tests.onDidStartTestRun((run: { name?: string }) => this._onTestRun(run))
       );
+    }
+
+    // Shell-integration command capture. Candidate-issued commands in the
+    // integrated terminal (npm test, pytest, cmake --build, pip install …)
+    // surface here once the terminal has shell integration active. The API
+    // landed stable in VS Code 1.93; the extension's engines floor is 1.85,
+    // so we feature-detect and silently skip when unavailable.
+    const onShellExec = (vscode.window as unknown as {
+      onDidStartTerminalShellExecution?: (
+        cb: (e: { execution?: { commandLine?: { value?: string } } }) => void,
+      ) => vscode.Disposable;
+    }).onDidStartTerminalShellExecution;
+    if (typeof onShellExec === "function") {
+      try {
+        this._disposables.push(
+          onShellExec((e) => this._onTerminalShellExecution(e))
+        );
+      } catch { /* feature not available on this VS Code build */ }
     }
 
     // Intercept the paste command so we get a deterministic paste signal —
@@ -239,6 +325,28 @@ export class TelemetryTracker implements vscode.Disposable {
 
   private _onTestRun(run: { name?: string }): void {
     this.emit("test_run", { profile: run?.name ?? "default" });
+  }
+
+  private _onTerminalShellExecution(e: {
+    execution?: { commandLine?: { value?: string } };
+  }): void {
+    const raw = e?.execution?.commandLine?.value;
+    if (typeof raw !== "string") return;
+    const cmd = raw.trim();
+    if (!cmd) return;
+    const kind = _classifyTerminalCommand(cmd);
+    // Skip unrecognised commands so the telemetry stays focused on the
+    // build/install/test signals the grader cares about — and so we don't
+    // capture incidental shell traffic (env-var exports, `cat secrets`, etc.).
+    if (kind === "other") return;
+    // Truncate so a pathological multi-line paste into the terminal can't
+    // bloat the telemetry.jsonl row. The classification has already taken
+    // place, so the full text isn't needed downstream.
+    const command_line = cmd.length > 500 ? cmd.slice(0, 500) : cmd;
+    this.emit("terminal_command", { command_line, kind });
+    if (kind === "test") {
+      this.emit("test_run", { profile: "terminal", command_line });
+    }
   }
 
   private _onWindowState(state: vscode.WindowState): void {

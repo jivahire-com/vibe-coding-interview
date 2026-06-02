@@ -286,3 +286,26 @@ def test_goto_and_refs_signals_are_reserved_false():
     out = compute_developer_confidence(sid, _mock_client())
     assert out["signals"]["used_goto_definition"] is False
     assert out["signals"]["used_find_references"] is False
+
+
+# ── Terminal-command kinds (install / build / test) ─────────────────────────
+
+def test_terminal_install_and_build_counts_split_by_kind():
+    sid = "term-counts"
+    _seed_session(sid)
+    _inject_event(sid, 100, "terminal_command", {"kind": "install", "command_line": "npm install"})
+    _inject_event(sid, 200, "terminal_command", {"kind": "install", "command_line": "pip install -e ."})
+    _inject_event(sid, 300, "terminal_command", {"kind": "build", "command_line": "cmake --build build"})
+    _inject_event(sid, 400, "terminal_command", {"kind": "test", "command_line": "pytest -q"})
+    out = compute_developer_confidence(sid, _mock_client())
+    assert out["signals"]["install_runs"] == 2
+    assert out["signals"]["build_runs"] == 1
+
+
+def test_terminal_command_kind_zero_when_no_events():
+    sid = "term-none"
+    _seed_session(sid)
+    _inject_event(sid, 100, "file_open", {"file": "a.cpp"})
+    out = compute_developer_confidence(sid, _mock_client())
+    assert out["signals"]["install_runs"] == 0
+    assert out["signals"]["build_runs"] == 0

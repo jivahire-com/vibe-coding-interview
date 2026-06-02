@@ -575,6 +575,90 @@ describe('TelemetryTracker', () => {
     expect(ev.payload.profile).toBe('default');
   });
 
+  // ── Terminal shell-integration events ────────────────────────────────────
+
+  const getShellExecCb = () => (vscode.window as any)._terminalShellExecCallback as
+    ((e: any) => void) | null;
+
+  const fireShell = (cmd: string) =>
+    getShellExecCb()?.({ execution: { commandLine: { value: cmd } } });
+
+  const allEvents = () => mockAppendFileSync.mock.calls
+    .map((c) => JSON.parse((c[1] as string).trimEnd())) as Array<{
+      event_type: string;
+      payload: Record<string, unknown>;
+    }>;
+
+  test('npm test triggers a test_run event plus a terminal_command event', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('npm test');
+    const events = allEvents();
+    const terminal = events.find((e) => e.event_type === 'terminal_command');
+    const testRun = events.find((e) => e.event_type === 'test_run');
+    expect(terminal).toBeDefined();
+    expect(terminal!.payload.kind).toBe('test');
+    expect(terminal!.payload.command_line).toBe('npm test');
+    expect(testRun).toBeDefined();
+    expect(testRun!.payload.profile).toBe('terminal');
+  });
+
+  test.each([
+    ['pytest -q'],
+    ['python3 -m pytest tests/'],
+    ['ctest --output-on-failure'],
+    ['cargo test'],
+    ['go test ./...'],
+    ['npx vitest run'],
+    ['cmake --build build && ctest'],
+  ])('classifies %s as a test run', (cmd) => {
+    mockAppendFileSync.mockClear();
+    fireShell(cmd);
+    const events = allEvents();
+    expect(events.find((e) => e.event_type === 'test_run')).toBeDefined();
+  });
+
+  test('npm install emits terminal_command with kind=install but no test_run', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('npm install');
+    const events = allEvents();
+    const terminal = events.find((e) => e.event_type === 'terminal_command');
+    expect(terminal).toBeDefined();
+    expect(terminal!.payload.kind).toBe('install');
+    expect(events.find((e) => e.event_type === 'test_run')).toBeUndefined();
+  });
+
+  test('cmake --build emits terminal_command with kind=build', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('cmake --build build -j');
+    const events = allEvents();
+    const terminal = events.find((e) => e.event_type === 'terminal_command');
+    expect(terminal).toBeDefined();
+    expect(terminal!.payload.kind).toBe('build');
+  });
+
+  test('unrecognised commands (echo, ls, cat) emit no telemetry', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('echo hello');
+    fireShell('ls -la');
+    fireShell('cat README.md');
+    expect(allEvents()).toHaveLength(0);
+  });
+
+  test('blank command lines are ignored', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('');
+    fireShell('   ');
+    expect(allEvents()).toHaveLength(0);
+  });
+
+  test('command_line is truncated to 500 chars to bound telemetry rows', () => {
+    mockAppendFileSync.mockClear();
+    fireShell('pytest ' + 'a'.repeat(1000));
+    const terminal = allEvents().find((e) => e.event_type === 'terminal_command');
+    expect(terminal).toBeDefined();
+    expect((terminal!.payload.command_line as string).length).toBe(500);
+  });
+
   // ── file_focus duration ──────────────────────────────────────────────────
 
   function emittedFocusEvents(): Array<{ file: string; ms: number }> {

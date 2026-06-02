@@ -60,6 +60,10 @@ def _stub_github_mint(monkeypatch, request):
         monkeypatch.setattr("vibe.sessions.mint_installation_token", _stub)
     except (AttributeError, ImportError):
         pass
+    try:
+        monkeypatch.setattr("vibe.repo_files.mint_installation_token", _stub)
+    except (AttributeError, ImportError):
+        pass
     yield
 
 

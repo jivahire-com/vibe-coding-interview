@@ -143,6 +143,15 @@ export const window = {
       return { dispose: jest.fn() };
     },
   ),
+
+  /** Stores the last registered callback so tests can fire shell-exec events. */
+  _terminalShellExecCallback: null as ((e: unknown) => void) | null,
+  onDidStartTerminalShellExecution: jest.fn().mockImplementation(
+    (cb: (e: unknown) => void) => {
+      (window as any)._terminalShellExecCallback = cb;
+      return { dispose: jest.fn() };
+    },
+  ),
 };
 
 // ─── debug ───────────────────────────────────────────────────────────────────
