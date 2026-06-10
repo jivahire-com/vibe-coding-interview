@@ -547,6 +547,45 @@ describe('ChatViewProvider streamChat error handling', () => {
     expect(arg).not.toMatch(/nginx/);
     expect(arg.toLowerCase()).toMatch(/temporarily unavailable|retry/);
   });
+
+  // ── Session-over: chatting after submit / expiry (proxy 403) ────────────────
+
+  test('403 (submitted) surfaces a friendly notice, not a red recruiter error', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ detail: 'Session is submitted' }));
+    });
+    await setupSend('any update?');
+    // Calm info notice, NOT a red error toast, and NOT the raw HTTP/contact text.
+    expect(vscode.window.showErrorMessage as jest.Mock).not.toHaveBeenCalled();
+    const arg = (vscode.window.showInformationMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg).not.toMatch(/HTTP 403/);
+    expect(arg).not.toMatch(/Contact your recruiter/i);
+    expect(arg.toLowerCase()).toMatch(/interview has ended|submitted|no longer available/);
+  });
+
+  test('403 locks the composer so the candidate cannot keep firing dead requests', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ detail: 'Session is submitted' }));
+    });
+    await setupSend('hello?');
+    expect((provider as any).sessionEnded).toBe(true);
+    const html: string = view.webview.html;
+    expect(html).toMatch(/id="session-ended-warn"[^>]*display:block/);
+    expect(html).toMatch(/<vscode-text-area[^>]*\bdisabled\b/);
+    expect(html).toMatch(/id="send-btn"[^>]*\bdisabled\b/);
+  });
+
+  test('403 (pending) tells the candidate the interview has not started yet', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ detail: 'Session is pending' }));
+    });
+    await setupSend('hi early');
+    const arg = (vscode.window.showInformationMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg.toLowerCase()).toMatch(/hasn't started|not started|begin/);
+  });
 });
 
 // ── Review-Bug 1: Apply button persists in the rendered (non-streaming) HTML ──

@@ -16,6 +16,8 @@ import {
   buildUnauthedRemoteUrl,
   redactGitAuth,
   runSubmit,
+  _acquireGitLock,
+  _httpStatus,
 } from '../submit';
 import { execFileSync, execFile } from 'child_process';
 import { makeConfig } from './helpers';
@@ -247,6 +249,45 @@ describe('redactGitAuth (token must not leak through errors)', () => {
       // logger that inspects err.stderr can't re-leak.
       expect((e as { stderr?: string }).stderr).toBeUndefined();
     }
+  });
+});
+
+describe('_httpStatus', () => {
+  test('extracts the status from an api.post() error message', () => {
+    expect(_httpStatus(new Error('HTTP 409: Session is submitted'))).toBe(409);
+    expect(_httpStatus(new Error('HTTP 401: unauthorized'))).toBe(401);
+  });
+  test('returns undefined for non-HTTP errors', () => {
+    expect(_httpStatus(new Error('Command failed: git push'))).toBeUndefined();
+    expect(_httpStatus('ECONNREFUSED')).toBeUndefined();
+  });
+});
+
+describe('_acquireGitLock (serializes auto-commit vs. submit git work)', () => {
+  test('a second acquirer cannot enter the critical section until the first releases', async () => {
+    const order: string[] = [];
+
+    const releaseA = await _acquireGitLock();
+    order.push('A-enter');
+
+    // B requests the lock while A holds it — it must NOT enter yet.
+    let bEntered = false;
+    const bDone = _acquireGitLock().then((releaseB) => {
+      bEntered = true;
+      order.push('B-enter');
+      releaseB();
+    });
+
+    // Give the event loop a chance: B must still be blocked behind A.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(bEntered).toBe(false);
+
+    order.push('A-release');
+    releaseA();
+    await bDone;
+
+    expect(order).toEqual(['A-enter', 'A-release', 'B-enter']);
   });
 });
 
@@ -500,5 +541,48 @@ describe('runSubmit friendly errors (Bug B)', () => {
     const msg = (showErr.mock.calls[0][0] as string);
     expect(msg).not.toMatch(/HTTP 503/);
     expect(msg.toLowerCase()).toMatch(/temporar|unavailable|retry|wait/);
+  });
+});
+
+// ── Time-up submit: the auto-submit sweep flips the session to `submitted`
+//    server-side when the timer expires, so a manual submit afterwards gets a
+//    409. That must read as a successful terminal transition, not a failure. ──
+
+describe('runSubmit on an already-submitted session (HTTP 409)', () => {
+  const ws = '/tmp/fake-workspace';
+  const showWarn = vscode.window.showWarningMessage as jest.Mock;
+  const showErr = vscode.window.showErrorMessage as jest.Mock;
+  const showInfo = vscode.window.showInformationMessage as jest.Mock;
+  const submitSession = api.submitSession as jest.Mock;
+
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExecFile.mockReturnValue(Buffer.from(''));
+    showWarn.mockReset();
+    showWarn.mockResolvedValue('Submit'); // user confirms
+    showErr.mockReset();
+    showInfo.mockReset();
+    submitSession.mockReset();
+    submitSession.mockRejectedValue(new Error('HTTP 409: Session is submitted'));
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: ws } },
+    ];
+  });
+
+  test('409 → DONE-state cleanup runs and an informational (not error) toast is shown', async () => {
+    const onSubmitted = jest.fn().mockResolvedValue(undefined);
+    const onMarkSubmitted = jest.fn();
+    const config = makeConfig({ startedAt: Date.now() - 91 * 60_000, maxMinutes: 90 });
+
+    await runSubmit(config, { onSubmitted, onMarkSubmitted });
+
+    // The session is transitioned to the submitted/DONE state...
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    expect(onMarkSubmitted).toHaveBeenCalledTimes(1);
+    // ...the candidate sees a reassuring message, NOT the scary error toast.
+    expect(showErr).not.toHaveBeenCalled();
+    expect(showInfo).toHaveBeenCalled();
+    const msg = (showInfo.mock.calls[0][0] as string);
+    expect(msg.toLowerCase()).toMatch(/already submitted|submitted automatically|being graded/);
   });
 });

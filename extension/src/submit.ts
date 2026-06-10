@@ -6,6 +6,35 @@ import { getLogger } from "./logger";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Serializes every git operation in this module. The 3-minute auto-commit
+ * (gitCommitAndPushAsync) and the manual submit (gitCommitAndPush, invoked
+ * from runSubmit) both mutate the SAME working tree and the SAME `origin`
+ * remote URL. Run concurrently they race two ways:
+ *   1. Two git processes collide on `.git/index.lock` ("Unable to create
+ *      '.git/index.lock': File exists"), so one of them dies.
+ *   2. One path's `finally` restores the *unauthenticated* remote URL between
+ *      the other path's `set-url <authed>` and its `git push`, so the push
+ *      goes out unauthenticated and the server rejects it.
+ * Either way the first submit that lands during an auto-commit throws, surfaces
+ * the opaque "Submit failed" toast, and only succeeds on the retry once the
+ * collision window has passed. The mutex makes the two paths take turns, so a
+ * submit either runs before or strictly after any auto-commit — never atop it.
+ */
+let _gitLock: Promise<void> = Promise.resolve();
+export function _acquireGitLock(): Promise<() => void> {
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const prior = _gitLock;
+  // The next holder can't start until `next` resolves (i.e. release() is
+  // called), which can't happen until `prior` has resolved and handed out this
+  // release fn. That chaining is what enforces FIFO mutual exclusion.
+  _gitLock = prior.then(() => next);
+  return prior.then(() => release);
+}
+
 const GIT_EXEC_OPTS = (cwd: string) => ({
   cwd,
   stdio: "pipe" as const,
@@ -109,7 +138,16 @@ export async function runSubmit(
       log?.info("submit_started", { challengeId: config.challengeId });
       try {
         const ts = new Date().toISOString();
-        gitCommitAndPush(ws, config, `submit: ${ts}`, true);
+        // Take the git mutex so the final commit/push can't race an in-flight
+        // auto-commit (which would collide on `.git/index.lock` or clobber the
+        // authed remote URL mid-push). The lock is released before the network
+        // submit so an auto-commit isn't blocked on a slow POST.
+        const releaseLock = await _acquireGitLock();
+        try {
+          gitCommitAndPush(ws, config, `submit: ${ts}`, true);
+        } finally {
+          releaseLock();
+        }
         const resp = await submitSession(config);
         log?.info("submit_succeeded", { hasVideoUpload: !!resp.video_upload });
         // Bug fix: advance the IDLE → SUBMITTING → DONE state machine. Without
@@ -135,11 +173,40 @@ export async function runSubmit(
           }
         }
       } catch (err: unknown) {
+        // A 409 means the server no longer considers the session `active` —
+        // almost always because the auto-submit sweep already submitted it the
+        // moment the timer expired (or the candidate double-submitted). The
+        // work is captured and grading is queued, so this is a successful
+        // terminal state, NOT a failure. Run the same DONE-state cleanup the
+        // happy path runs and tell the candidate what actually happened,
+        // instead of the opaque "Submit failed. Contact your recruiter" toast.
+        if (_httpStatus(err) === 409) {
+          log?.info("submit_already_submitted");
+          await deps.onSubmitted?.();
+          deps.onMarkSubmitted?.();
+          vscode.window.showInformationMessage(
+            "Your interview was already submitted — time ran out and it was " +
+            "submitted automatically. Your work is being graded; results will " +
+            "appear in the recruiter dashboard shortly."
+          );
+          return;
+        }
         log?.errorFromException("submit_failed", err);
         vscode.window.showErrorMessage(_friendlyErrorMessage(err, "submit"));
       }
     }
   );
+}
+
+/**
+ * Extract an `HTTP <nnn>` status code from an error raised by api.post(), which
+ * formats network errors as `HTTP <status>: <detail>`. Returns undefined for
+ * non-HTTP errors (e.g. a git failure, a timeout).
+ */
+export function _httpStatus(err: unknown): number | undefined {
+  const raw = err instanceof Error ? err.message : String(err);
+  const m = raw.match(/HTTP\s+(\d{3})/i);
+  return m ? parseInt(m[1], 10) : undefined;
 }
 
 /**
@@ -167,6 +234,12 @@ export function _friendlyErrorMessage(
     const status = parseInt(httpMatch[1], 10);
     if (status === 401 || status === 403) {
       return "Session expired — re-enter your session key.";
+    }
+    if (status === 409) {
+      // The session is no longer accepting submissions — typically it was
+      // auto-submitted when the timer expired. Reassure rather than alarm.
+      return "This interview was already submitted — your work is being graded. " +
+        "Check the recruiter dashboard for results.";
     }
     if (status >= 500 && status < 600) {
       return "Server is temporarily unavailable — wait and retry.";
@@ -242,50 +315,57 @@ export async function gitCommitAndPushAsync(
   message: string,
   allowEmpty: boolean
 ): Promise<void> {
-  const run = async (args: string[]) => {
-    try {
-      return await execFileAsync("git", args, GIT_EXEC_OPTS(ws));
-    } catch (err) {
-      throw _redactedExecError(args, err);
-    }
-  };
+  // Take the git mutex so this auto-commit can never interleave with a manual
+  // submit (or another auto-commit) on the same repo. See `_acquireGitLock`.
+  const releaseLock = await _acquireGitLock();
+  try {
+    const run = async (args: string[]) => {
+      try {
+        return await execFileAsync("git", args, GIT_EXEC_OPTS(ws));
+      } catch (err) {
+        throw _redactedExecError(args, err);
+      }
+    };
 
-  await run(["config", "user.email", "candidate@vibe-interview.local"]);
-  await run(["config", "user.name", "Candidate"]);
+    await run(["config", "user.email", "candidate@vibe-interview.local"]);
+    await run(["config", "user.name", "Candidate"]);
 
-  const authedUrl = buildAuthedRemoteUrl(config.repoUrl, config.githubToken);
-  const unauthedUrl = buildUnauthedRemoteUrl(config.repoUrl);
+    const authedUrl = buildAuthedRemoteUrl(config.repoUrl, config.githubToken);
+    const unauthedUrl = buildUnauthedRemoteUrl(config.repoUrl);
 
-  // Bug fix: if a previous tick committed but failed to push (network blip,
-  // token race), the working tree is clean on the next tick — the old code
-  // returned early and the local commit was never pushed. The grader then
-  // saw a stale remote branch. Detect "local ahead of upstream" and push
-  // even when there are no working-tree changes to commit.
-  let needPushOnly = false;
-  if (!allowEmpty) {
-    const { stdout } = await run(["status", "--porcelain"]);
-    if (!stdout.trim()) {
-      const aheadCount = await _countAheadOfUpstreamAsync(run);
-      if (aheadCount > 0) {
-        needPushOnly = true;
-      } else {
-        return;
+    // Bug fix: if a previous tick committed but failed to push (network blip,
+    // token race), the working tree is clean on the next tick — the old code
+    // returned early and the local commit was never pushed. The grader then
+    // saw a stale remote branch. Detect "local ahead of upstream" and push
+    // even when there are no working-tree changes to commit.
+    let needPushOnly = false;
+    if (!allowEmpty) {
+      const { stdout } = await run(["status", "--porcelain"]);
+      if (!stdout.trim()) {
+        const aheadCount = await _countAheadOfUpstreamAsync(run);
+        if (aheadCount > 0) {
+          needPushOnly = true;
+        } else {
+          return;
+        }
       }
     }
-  }
 
-  await run(["remote", "set-url", "origin", authedUrl]);
-  try {
-    if (!needPushOnly) {
-      const commitArgs = ["commit", "-m", message];
-      if (allowEmpty) commitArgs.push("--allow-empty");
-      await run(["add", "-A"]);
-      await run(commitArgs);
+    await run(["remote", "set-url", "origin", authedUrl]);
+    try {
+      if (!needPushOnly) {
+        const commitArgs = ["commit", "-m", message];
+        if (allowEmpty) commitArgs.push("--allow-empty");
+        await run(["add", "-A"]);
+        await run(commitArgs);
+      }
+      await run(["push"]);
+    } finally {
+      try { await run(["remote", "set-url", "origin", unauthedUrl]); }
+      catch { /* swallow */ }
     }
-    await run(["push"]);
   } finally {
-    try { await run(["remote", "set-url", "origin", unauthedUrl]); }
-    catch { /* swallow */ }
+    releaseLock();
   }
 }
 

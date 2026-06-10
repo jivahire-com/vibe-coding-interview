@@ -246,6 +246,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (msg.command === "send" && msg.text && !this.isLoading && this.config) {
+      // The composer is disabled once the session ends, but guard here too so a
+      // stale or out-of-band webview message can't fire a request that would
+      // only 403.
+      if (this.sessionEnded) return;
       this.send(msg.text, this.config);
     }
     if (msg.command === "applyBlock" && msg.codeText && msg.blockId) {
@@ -311,6 +315,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let assistantText = "";
     let budgetExhausted = false;
     let errorMessage: string | undefined;
+    let errorStatus = 0;
     let promptTokens = 0;
     let completionTokens = 0;
     let cachedTokens = 0;
@@ -332,6 +337,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
     } catch (e: any) {
       errorMessage = e?.message ?? String(e);
+      errorStatus = typeof e?.httpStatus === "number" ? e.httpStatus : 0;
     }
 
     const latencyMs = Date.now() - start;
@@ -339,15 +345,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.streamingText = "";
 
     if (errorMessage) {
-      // Surface to user, but do NOT persist the error to the audit trail.
-      vscode.window.showErrorMessage(`AI chat error: ${errorMessage}`);
-      // Drop the optimistic user message from the history (it has no response
-      // to pair with) and ALSO push the original text back to the webview so
-      // the candidate can retry without retyping. The old code dropped the
-      // message and cleared the textarea, forcing the user to start over.
+      // Drop the optimistic user message either way — it has no paired response
+      // to log to the audit trail.
       if (this.messages.length > 0 && this.messages[this.messages.length - 1].role === "user") {
         this.messages.pop();
       }
+      if (errorStatus === 403) {
+        // The session is no longer active — it was submitted, or the timer ran
+        // out and the server auto-submitted it. Lock the composer so the
+        // candidate isn't typing into a box that can only error, and show a
+        // calm, explanatory notice instead of a red failure. There's nowhere to
+        // send the prompt, so we deliberately don't restore it.
+        this.sessionEnded = true;
+        vscode.window.showInformationMessage(errorMessage);
+        this.render();
+        return;
+      }
+      // Surface to user, but do NOT persist the error to the audit trail. Push
+      // the original text back to the webview so the candidate can retry
+      // without retyping.
+      vscode.window.showErrorMessage(`AI chat error: ${errorMessage}`);
       this._view?.webview.postMessage({ command: "restorePrompt", text: userText });
       this.render();
       return;
@@ -446,7 +463,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             let errBody = "";
             res.on("data", (d: Buffer) => { errBody += d.toString(); });
             res.on("end", () => {
-              done(new Error(_chatErrorMessage(status, errBody)));
+              const err = new Error(_chatErrorMessage(status, errBody));
+              (err as Error & { httpStatus?: number }).httpStatus = status;
+              done(err);
             });
             res.on("error", (e) => done(e));
             return;
@@ -709,12 +728,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     30% { transform: translateY(-5px); opacity: 1; }
   }
 
-  #budget-warn {
+  #budget-warn, #session-ended-warn {
     display: none;
     background: var(--vscode-inputValidation-errorBackground, rgba(244,67,54,0.1));
     color: var(--vscode-errorForeground, #f48771);
     border-top: 1px solid var(--vscode-inputValidation-errorBorder, rgba(244,67,54,0.3));
     padding: 7px 10px; font-size: 12px; text-align: center; flex-shrink: 0;
+  }
+  #session-ended-warn {
+    background: var(--vscode-inputValidation-infoBackground, rgba(33,150,243,0.1));
+    color: var(--vscode-foreground, inherit);
+    border-top: 1px solid var(--vscode-inputValidation-infoBorder, rgba(33,150,243,0.3));
   }
 
   #input-row {
@@ -804,14 +828,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>`}
 </div>
 <div id="budget-warn" style="${this.budgetExhausted ? "display:block;" : ""}">AI budget reached — finish the challenge on your own.</div>
+<div id="session-ended-warn" style="${this.sessionEnded ? "display:block;" : ""}">Your interview has ended — the AI assistant is no longer available. Your work is being graded.</div>
 <div id="attachments">${this.pendingAttachments.map((p) => `
   <span class="att-chip" data-attach-path="${escAttr(p)}">&#128206; ${escHtml(p)}<button class="att-chip-remove" data-remove-attach="${escAttr(p)}" title="Remove attachment">&times;</button></span>`).join("")}</div>
 <div class="attach-help">Attach files by right-clicking &rarr; "Add to JivaHire chat" or by typing @ to pick a workspace file.</div>
 <div id="suggest-box" role="listbox" aria-label="Workspace file suggestions"></div>
 <div id="input-row">
   <vscode-button id="attach-btn" appearance="icon" title="Attach a workspace file">&#128206;</vscode-button>
-  <vscode-text-area id="inp" placeholder="${this.budgetExhausted ? "AI budget reached" : (this.isLoading ? "Generating…" : "Ask anything… (Enter to send, Shift+Enter for newline)")}" ${(this.isLoading || this.budgetExhausted) ? "disabled" : ""} resize="none" rows="1" style="flex:1"></vscode-text-area>
-  <vscode-button id="send-btn" ${(this.isLoading || this.budgetExhausted) ? "disabled" : ""}>&#8593;</vscode-button>
+  <vscode-text-area id="inp" placeholder="${this.sessionEnded ? "Interview ended" : (this.budgetExhausted ? "AI budget reached" : (this.isLoading ? "Generating…" : "Ask anything… (Enter to send, Shift+Enter for newline)"))}" ${(this.isLoading || this.budgetExhausted || this.sessionEnded) ? "disabled" : ""} resize="none" rows="1" style="flex:1"></vscode-text-area>
+  <vscode-button id="send-btn" ${(this.isLoading || this.budgetExhausted || this.sessionEnded) ? "disabled" : ""}>&#8593;</vscode-button>
 </div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
@@ -1426,12 +1451,34 @@ function escAttr(s: string): string {
  * GPT-4o pricing and the candidate's spend meter diverged from the proxy's
  * server-side enforcement.
  */
-export function _chatErrorMessage(status: number, _body: string): string {
+export function _chatErrorMessage(status: number, body: string): string {
   if (status === 402) return "AI budget reached — switch models or finish on your own";
+  if (status === 403) {
+    // The proxy returns 403 whenever the session is no longer active. The
+    // common case is that the interview was submitted — either the candidate
+    // submitted it, or the timer ran out and it was auto-submitted. AI chat is
+    // only available during a live session.
+    if (_sessionStatusFromBody(body) === "pending") {
+      return "Your interview hasn't started yet — open your challenge to begin, then the AI assistant becomes available.";
+    }
+    return "Your interview has ended — it was submitted, so the AI assistant is no longer available. Your work is being graded; results will appear in the recruiter dashboard.";
+  }
   if (status === 408 || status === 504) return "AI service is slow right now — wait a few seconds and retry";
   if (status === 429) return "Too many requests — wait 10s and retry";
   if (status >= 500 && status <= 599) return "AI service is temporarily unavailable — wait and retry";
   return `AI request failed (HTTP ${status}). Contact your recruiter if this persists.`;
+}
+
+/**
+ * The proxy's 403 body is FastAPI's `{"detail": "Session is <status>"}` (and in
+ * some error paths a bare string). Pull the status word out so the 403 message
+ * can distinguish "not started yet" from "already over". Returns "" if no
+ * status can be parsed — callers treat that as the generic ended case.
+ */
+function _sessionStatusFromBody(body: string): string {
+  if (!body) return "";
+  const m = body.match(/Session is (\w+)/i);
+  return m ? m[1].toLowerCase() : "";
 }
 
 export function _resolvePricing(
