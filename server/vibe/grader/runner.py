@@ -34,6 +34,7 @@ from vibe.grader import (
     challenge_specific,
     cpp_runner,
     developer_signals,
+    engagement as engagement_mod,
     llm_eval,
     python_runner,
     trap_attribution,
@@ -55,6 +56,7 @@ _STAGE_MESSAGES = {
     "verification_discipline": "Verification-discipline scoring failed; grade unaffected.",
     "ai_judgment": "AI-judgment scoring failed; grade unaffected.",
     "challenge_specific": "Challenge-specific bonus failed; grade unaffected.",
+    "engagement": "Engagement assessment failed; scores left unfloored.",
     "developer_confidence": "Developer-signal computation failed; grade is unaffected.",
     "telemetry_ingest": "Could not read telemetry from your submission; some scoring may use partial data.",
 }
@@ -186,6 +188,37 @@ def run(session_id: str) -> None:
             _record_error(session_id, "challenge_specific")
             cs = {"score": _FALLBACK, "breakdown": {"reason": "computation failed"}}
 
+        # ── 7.5. Engagement / no-show gate ────────────────────────────────
+        # A candidate who submitted without doing anything otherwise collects
+        # neutral 5/10s on the behavioural dims and gets the starter scaffold
+        # graded as if it were their own work. Floor every non-objective
+        # dimension to NEAR_ZERO in that case (tests/traps stay objective). The
+        # clamp happens BEFORE stage 8 so the composite, the summary, and the
+        # per-dimension DB columns all reflect it consistently.
+        try:
+            engagement = engagement_mod.assess(session_id, clone_dir)
+        except Exception:
+            _record_error(session_id, "engagement")
+            engagement = {"attended": True, "reason": None, "signals": {}}
+
+        if not engagement["attended"]:
+            note = engagement["reason"]
+            for dim in (vd, aj, cs, llm_dims["code_quality"],
+                        llm_dims["architectural_reasoning"],
+                        llm_dims["llm_communication"]):
+                dim["score"] = min(float(dim.get("score", 0.0)), engagement_mod.NEAR_ZERO)
+                bd = dim.get("breakdown")
+                if not isinstance(bd, dict):
+                    bd = {}
+                    dim["breakdown"] = bd
+                bd["no_show"] = True
+                bd["reason"] = note
+            log.info(
+                "grading_no_show",
+                extra={"context": {"session_id": session_id,
+                                   "signals": engagement.get("signals")}},
+            )
+
         # ── 8. Composite ──────────────────────────────────────────────────
         tags_passed = sum(1 for v in tag_results.values() if v)
         tests_total = len(tag_results)
@@ -203,6 +236,9 @@ def run(session_id: str) -> None:
             "challenge_specific": cs["score"],
         }
         total_score, composite_breakdown = _composite(dim_scores)
+        if not engagement["attended"]:
+            composite_breakdown["no_show"] = True
+            composite_breakdown["no_show_reason"] = engagement["reason"]
         grader_summary = _build_summary(
             dim_scores,
             tests_passed=tags_passed, tests_total=tests_total,
@@ -353,6 +389,8 @@ def _criteria_reason(breakdown: dict[str, Any]) -> str:
 
     Picks the lowest-scoring criterion (most actionable signal) and surfaces its
     1-line reasoning. Falls back to breakdown['reason'] if no criteria block."""
+    if isinstance(breakdown, dict) and breakdown.get("no_show"):
+        return breakdown.get("reason") or "candidate did not attempt the challenge"
     criteria = breakdown.get("criteria") if isinstance(breakdown, dict) else None
     if not isinstance(criteria, dict) or not criteria:
         reason = breakdown.get("reason") if isinstance(breakdown, dict) else None
@@ -373,6 +411,8 @@ def _signals_reason(breakdown: dict[str, Any]) -> str:
     """One-line reasoning for vd/aj (telemetry-derived) dimensions."""
     if not isinstance(breakdown, dict):
         return "no signal detail available"
+    if breakdown.get("no_show"):
+        return breakdown.get("reason") or "candidate did not attempt the challenge"
     signals = breakdown.get("signals")
     if isinstance(signals, dict) and signals:
         scored = [(k, v) for k, v in signals.items()

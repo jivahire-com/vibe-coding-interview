@@ -477,6 +477,10 @@
               </span>
             </template>
           </div>
+          <template x-if="selectedSession.grade && gradeNoShow(selectedSession.grade)">
+            <p style="margin:0 0 14px;padding:9px 13px;border-radius:6px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-size:13px;font-weight:500"
+               x-text="gradeNoShow(selectedSession.grade)"></p>
+          </template>
           <template x-if="selectedSession.grade">
             <div x-data="{ reasons: summaryReasonByLabel(selectedSession.grade) }">
               <template x-for="dim in scoreDimensions" :key="dim.key">

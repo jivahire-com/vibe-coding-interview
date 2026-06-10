@@ -1,0 +1,159 @@
+"""Unit tests for the engagement / no-show gate (vibe.grader.engagement) and
+its integration points in the runner summary builders.
+
+The gate floors every non-objective dimension when a candidate submitted
+without engaging. These tests pin:
+  - assess() is conservative: ANY of {chars, chat, code change} → attended
+  - the code-change probe ignores the extension's `.jivahire/` bookkeeping
+  - the probe fails open (attended) when it can't read a clone
+  - runner summary builders surface the no-show note instead of the weakest
+    signal/criterion
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
+_db_fd, _db_path = tempfile.mkstemp(suffix=".db")
+os.environ.setdefault("OPENAI_API_KEY", "sk-test")
+os.environ.setdefault("GITHUB_BOT_PAT", "ghp-test")
+os.environ.setdefault("GITHUB_CHALLENGES_OWNER", "")
+os.environ.setdefault("GITHUB_CHALLENGES_REPO", "test-org/test-repo")
+os.environ.setdefault("ADMIN_TOKEN", "admin-secret")
+os.environ.setdefault("DB_PATH", _db_path)
+os.environ.setdefault("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+
+from vibe.db import bootstrap, execute  # noqa: E402
+from vibe.grader import engagement, runner  # noqa: E402
+
+bootstrap()
+
+
+@pytest.fixture(autouse=True)
+def _clean():
+    for tbl in ("grades", "jobs", "chat_exchanges", "telemetry", "sessions"):
+        execute(f"DELETE FROM {tbl}")
+    yield
+
+
+def _seed(sid: str, *, typed=0, pasted=0, ai_applied=0) -> None:
+    execute(
+        "INSERT INTO sessions (id, session_key, candidate_email, challenge_id, "
+        " branch_name, status, typed_chars, pasted_chars, ai_applied_chars) "
+        "VALUES (?, ?, 'c@test.com', 'python-ttl-cache', ?, 'submitted', ?, ?, ?)",
+        (sid, f"KEY-{sid}", f"interview/{sid}", typed, pasted, ai_applied),
+    )
+
+
+def _add_chat(sid: str) -> None:
+    execute(
+        "INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, "
+        " completion_tokens, cost_usd) VALUES (?, 1, 'gpt', 1, 1, 0.0)",
+        (sid,),
+    )
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _make_repo(tmp_path: Path, *, change_code=False, add_jivahire=False) -> Path:
+    """A branch clone: a starter root commit, an empty auto-commit, and
+    optionally a `.jivahire/` telemetry commit and/or a real code edit."""
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "main.py").write_text("def f():\n    return 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "starter")
+    # Empty auto-commit — what a no-show's 3-min timer produces.
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "auto")
+    if add_jivahire:
+        (repo / ".jivahire").mkdir(exist_ok=True)
+        (repo / ".jivahire" / "telemetry.jsonl").write_text('{"e":1}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "telemetry")
+    if change_code:
+        (repo / "main.py").write_text("def f():\n    return 2  # edit\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "work")
+    return repo
+
+
+def test_no_show_when_nothing(tmp_path):
+    _seed("ns")
+    repo = _make_repo(tmp_path)
+    out = engagement.assess("ns", repo)
+    assert out["attended"] is False
+    assert out["reason"] and "did not attempt" in out["reason"]
+    assert out["signals"]["code_changed"] is False
+
+
+def test_jivahire_telemetry_commit_does_not_count_as_engagement(tmp_path):
+    _seed("ns2")
+    repo = _make_repo(tmp_path, add_jivahire=True)
+    out = engagement.assess("ns2", repo)
+    # The committed telemetry JSONL is bookkeeping, not candidate code.
+    assert out["signals"]["code_changed"] is False
+    assert out["attended"] is False
+
+
+def test_attended_when_typed(tmp_path):
+    _seed("typed", typed=500)
+    repo = _make_repo(tmp_path)
+    assert engagement.assess("typed", repo)["attended"] is True
+
+
+def test_trivial_keystrokes_still_no_show(tmp_path):
+    _seed("trivial", typed=5)  # below _MIN_ENGAGED_CHARS
+    repo = _make_repo(tmp_path)
+    assert engagement.assess("trivial", repo)["attended"] is False
+
+
+def test_attended_when_chat(tmp_path):
+    _seed("chat")
+    _add_chat("chat")
+    repo = _make_repo(tmp_path)
+    assert engagement.assess("chat", repo)["attended"] is True
+
+
+def test_attended_when_code_changed(tmp_path):
+    _seed("coded")
+    repo = _make_repo(tmp_path, change_code=True)
+    out = engagement.assess("coded", repo)
+    assert out["signals"]["code_changed"] is True
+    assert out["attended"] is True
+
+
+def test_fails_open_when_no_clone():
+    _seed("noclone")
+    out = engagement.assess("noclone", None)
+    # Can't prove no changes → never falsely flag a no-show.
+    assert out["signals"]["code_changed"] is True
+    assert out["attended"] is True
+
+
+def test_floor_constant_is_near_zero_not_zero():
+    assert 0 < engagement.NEAR_ZERO < 1
+
+
+# ─── runner summary surfaces the no-show note ────────────────────────────────
+
+
+def test_signals_reason_prefers_no_show_note():
+    bd = {"no_show": True, "reason": engagement.NO_SHOW_NOTE,
+          "signals": {"pre_submit_test_run": {"score": 1.0, "reason": "x"}}}
+    assert runner._signals_reason(bd) == engagement.NO_SHOW_NOTE
+
+
+def test_criteria_reason_prefers_no_show_note():
+    bd = {"no_show": True, "reason": engagement.NO_SHOW_NOTE,
+          "criteria": {"edge_cases": {"score": 3.0, "reasoning": "y"}}}
+    assert runner._criteria_reason(bd) == engagement.NO_SHOW_NOTE

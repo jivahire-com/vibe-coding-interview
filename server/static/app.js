@@ -731,6 +731,21 @@ document.addEventListener('alpine:init', () => {
       return grade[dim.field] ?? '—';
     },
 
+    // When the grader flagged a no-show, composite_breakdown carries a
+    // `no_show` flag + reason. Returns the reason string to show as a banner, or
+    // null when the candidate engaged. composite_breakdown arrives as a JSON
+    // string from the grades row.
+    gradeNoShow(grade) {
+      if (!grade?.composite_breakdown) return null;
+      let cb = grade.composite_breakdown;
+      if (typeof cb === 'string') {
+        try { cb = JSON.parse(cb); } catch { return null; }
+      }
+      return cb && cb.no_show
+        ? (cb.no_show_reason || 'Candidate did not attempt the challenge.')
+        : null;
+    },
+
     // Map grader_summary lines (one per dimension, in canonical order) back to
     // each dimension's reasoning text, keyed by the human label.
     summaryReasonByLabel(grade) {
