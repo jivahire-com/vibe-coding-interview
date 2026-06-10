@@ -46,6 +46,7 @@ describe('validateSession', () => {
       llm_budget_usd: 2.5,
       challenge_id: 'lru-cache',
       challenge_description: 'Implement LRU',
+      language: 'cpp',
       chat_model: 'openai/gpt-4o-mini',
     };
 
@@ -55,6 +56,7 @@ describe('validateSession', () => {
     const config = await validate('http://server:8080', 'TEST-KEY');
 
     expect(config.sessionId).toBe('abc123');
+    expect(config.language).toBe('cpp');
     expect(config.sessionKey).toBe('TEST-KEY');
     expect(config.repoUrl).toBe('https://github.com/org/repo');
     expect(config.branch).toBe('interview/abc123');
@@ -97,6 +99,19 @@ describe('validateSession', () => {
     const { validateSession: validate } = await import('../api');
     const config = await validate('http://server:8080', 'KEY');
     expect(config.challengeDescription).toBe('fallback-id');
+  });
+
+  test('defaults language to "unknown" when the server omits it', async () => {
+    const responsePayload = {
+      session_id: 'x', repo_url: 'https://x', branch: 'b', github_clone_token: 't',
+      llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
+      challenge_id: 'c', challenge_description: 'c', chat_model: 'openai/gpt-4o-mini',
+      // no language
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(responsePayload) });
+    const { validateSession: validate } = await import('../api');
+    const config = await validate('http://server:8080', 'KEY');
+    expect(config.language).toBe('unknown');
   });
 
   test('uses default chat model when chat_model is absent', async () => {
@@ -333,6 +348,65 @@ describe('post() timeout (Review-Bug 9)', () => {
     const { validateSession: validate, POST_TIMEOUT_MS } = await import('../api');
     await validate('http://server:8080', 'KEY');
     expect(setTimeoutSpy).toHaveBeenCalledWith(POST_TIMEOUT_MS, expect.any(Function));
+  });
+});
+
+describe('preflightSession', () => {
+  beforeEach(() => jest.resetModules());
+
+  test('parses challenge info + sanitizes dependencies', async () => {
+    const payload = {
+      challenge_id: 'cpp-lru-cache',
+      title: 'Thread-Safe LRU Cache',
+      language: 'cpp',
+      dependencies: [
+        { label: 'CMake', check: 'cmake --version' },
+        { label: 'C++ compiler', check: 'c++ --version' },
+      ],
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { preflightSession } = await import('../api');
+    const info = await preflightSession('http://server:8080', 'KEY');
+    expect(info.challengeId).toBe('cpp-lru-cache');
+    expect(info.title).toBe('Thread-Safe LRU Cache');
+    expect(info.language).toBe('cpp');
+    expect(info.dependencies).toEqual([
+      { label: 'CMake', check: 'cmake --version' },
+      { label: 'C++ compiler', check: 'c++ --version' },
+    ]);
+  });
+
+  test('drops malformed dependency entries and defaults missing fields', async () => {
+    const payload = {
+      challenge_id: 'x',
+      // no title, no language
+      dependencies: [
+        { label: 'Good', check: 'node --version' },
+        { label: 'NoCheck' },           // missing check
+        { check: 'python3 --version' },  // missing label
+        'not-an-object',
+      ],
+    };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { preflightSession } = await import('../api');
+    const info = await preflightSession('http://server:8080', 'KEY');
+    expect(info.title).toBe('x');            // falls back to challenge_id
+    expect(info.language).toBe('unknown');
+    expect(info.dependencies).toEqual([{ label: 'Good', check: 'node --version' }]);
+  });
+
+  test('tolerates a response with no dependencies field', async () => {
+    const payload = { challenge_id: 'c', title: 't', language: 'python' };
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
+    const { preflightSession } = await import('../api');
+    const info = await preflightSession('http://server:8080', 'KEY');
+    expect(info.dependencies).toEqual([]);
+  });
+
+  test('rejects on HTTP error (e.g. 404 unknown key)', async () => {
+    mockHttpResponse({ statusCode: 404, body: 'Session not found' });
+    const { preflightSession } = await import('../api');
+    await expect(preflightSession('http://server:8080', 'BAD')).rejects.toThrow(/404/);
   });
 });
 

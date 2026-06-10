@@ -14,6 +14,7 @@ export function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfi
     llmBudgetUsd: 2.0,
     challengeId: 'lru-cache-challenge',
     challengeDescription: 'Implement a thread-safe LRU cache',
+    language: 'cpp',
     chatModel: 'openai/gpt-4o-mini',
     availableChatModels: ['openai/gpt-4o-mini', 'openai/gpt-4o'],
     startedAt: Date.now(),

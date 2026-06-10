@@ -207,6 +207,7 @@ Thumbs.db</code></pre>
   <tr><td><code>public_test_file</code></td><td>string</td><td>yes</td><td>Path relative to challenge root</td></tr>
   <tr><td><code>hidden_test_file</code></td><td>string</td><td>yes</td><td>Path relative to challenge root; injected by grader</td></tr>
   <tr><td><code>grader</code></td><td>string</td><td>yes</td><td>Grader backend slug (see per-language appendix)</td></tr>
+  <tr><td><code>dependencies</code></td><td>object[]</td><td>no</td><td>Toolchain the candidate needs, shown (with a live ✓/✗ install check) in the extension's pre-clone dialog. Each entry is <code>{"label": "CMake", "check": "cmake --version"}</code> — <code>check</code> must be a simple <code>&lt;tool&gt; &lt;flag&gt;</code> command (run without a shell). Omit for challenges that need no extra tooling.</td></tr>
   <tr><td><code>status</code></td><td>string</td><td>no</td><td><code>"active"</code> (default) or <code>"draft"</code>. Draft challenges are excluded from session assignment and grading. For drafts, <code>language</code> and <code>grader</code> are not validated.</td></tr>
 </tbody>
 </table>
@@ -222,7 +223,10 @@ Thumbs.db</code></pre>
   "tags": ["&lt;&lt;REPLACE: tag1&gt;&gt;", "&lt;&lt;REPLACE: tag2&gt;&gt;"],
   "public_test_file": "tests/&lt;&lt;REPLACE: test_public.py|public_test.cpp&gt;&gt;",
   "hidden_test_file": "tests/&lt;&lt;REPLACE: test_hidden.py|hidden_test.cpp&gt;&gt;",
-  "grader": "&lt;&lt;REPLACE: cpp|python&gt;&gt;"
+  "grader": "&lt;&lt;REPLACE: cpp|python&gt;&gt;",
+  "dependencies": [
+    { "label": "&lt;&lt;REPLACE: CMake&gt;&gt;", "check": "&lt;&lt;REPLACE: cmake --version&gt;&gt;" }
+  ]
 }</code></pre>
 
 <p><em>For drafts:</em> add <code>"status": "draft"</code> as a top-level field.

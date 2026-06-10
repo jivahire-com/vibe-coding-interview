@@ -6,6 +6,10 @@
   "estimated_minutes": 30,
   "max_minutes": 60,
   "tags": ["debounce", "async", "ui-state", "closures"],
+  "dependencies": [
+    { "label": "Node.js", "check": "node --version" },
+    { "label": "npm", "check": "npm --version" }
+  ],
   "public_test_file": "tests/user_search.public.test.js",
   "hidden_test_file": "tests/user_search.hidden.test.js",
   "grader": "typescript"

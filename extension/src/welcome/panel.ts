@@ -7,7 +7,6 @@ import { SessionConfig } from "../api";
 interface PrereqChecks {
   git: boolean | null;
   internet: boolean | null;
-  cmake: boolean | null;
 }
 
 /** Escape user/server-supplied strings before they are interpolated into HTML. */
@@ -24,7 +23,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private config: SessionConfig | null = null;
   private submitted = false;
-  private prereqs: PrereqChecks = { git: null, internet: null, cmake: null };
+  private prereqs: PrereqChecks = { git: null, internet: null };
   private refreshInterval: ReturnType<typeof setInterval> | undefined;
   private _prereqRequest: ReturnType<typeof https.request> | undefined;
   private disposed = false;
@@ -87,6 +86,12 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
   reportSessionError(message: string): void {
     this.view?.webview.postMessage({ command: "sessionError", message });
+  }
+
+  /** Re-enable the welcome "Begin" form without flagging an error — used when
+   *  the candidate dismisses the pre-clone tooling dialog (nothing failed). */
+  resetWelcomeEntry(): void {
+    this.view?.webview.postMessage({ command: "resetEntry" });
   }
 
   isVisible(): boolean {
@@ -226,9 +231,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private _runPrereqChecks(): void {
     try { execSync("git --version", { stdio: "pipe" }); this.prereqs.git = true; }
     catch { this.prereqs.git = false; }
-
-    try { execSync("cmake --version", { stdio: "pipe" }); this.prereqs.cmake = true; }
-    catch { this.prereqs.cmake = false; }
 
     const finish = (ok: boolean) => {
       if (this.disposed) return;
@@ -565,7 +567,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       <div class="prereq-list">
         ${prereqRow(this.prereqs.git, "Git installed", "git --version")}
         ${prereqRow(this.prereqs.internet, "Internet access", "api.github.com")}
-        ${prereqRow(this.prereqs.cmake, "CMake + C++ compiler", "cmake --version")}
       </div>
     </div>
   </div>
@@ -665,13 +666,15 @@ Click Apply ──▶ Diff editor opens
 
   window.addEventListener('message', function(e) {
     var msg = e.data;
-    if (msg.command === 'sessionError') {
+    if (msg.command === 'sessionError' || msg.command === 'resetEntry') {
       var btn = document.getElementById('startBtn');
       var input = document.getElementById('sessionKeyInput');
       btn.textContent = 'Begin →';
       btn.disabled = false;
       input.disabled = false;
-      input.classList.add('error');
+      // Only the error path flags the input red; a plain reset (e.g. the
+      // candidate dismissed the tooling dialog) just re-enables the form.
+      if (msg.command === 'sessionError') { input.classList.add('error'); }
       input.focus();
       input.select();
     }
@@ -705,6 +708,9 @@ Click Apply ──▶ Diff editor opens
     // string must be HTML-escaped to prevent XSS via challenge metadata.
     const safeChallengeId = escapeHtml(config.challengeId ?? "");
     const safeChallengeDesc = escapeHtml(config.challengeDescription || config.challengeId || "");
+    const safeLanguage = escapeHtml(
+      config.language && config.language !== "unknown" ? config.language : ""
+    );
     const submittedBanner = this.submitted
       ? `<div class="card" style="border-color:#4caf50;"><div class="card-header" style="color:#4caf50;">&#10003; Submitted</div><p class="desc">Session submitted. Grading is in progress — further edits are locked.</p></div>`
       : "";
@@ -836,6 +842,14 @@ Click Apply ──▶ Diff editor opens
     font-size: 14px; font-weight: 700;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .challenge-lang {
+    display: inline-block; margin-top: 3px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--vscode-button-foreground);
+    background: var(--vscode-button-background);
+    border-radius: 4px; padding: 1px 7px;
+  }
   .timer-box {
     flex-shrink: 0; text-align: center;
     border: 1px solid var(--vscode-panel-border);
@@ -921,6 +935,7 @@ Click Apply ──▶ Diff editor opens
   <div class="topbar">
     <div class="challenge-info">
       <div class="challenge-name">${safeChallengeId}</div>
+      ${safeLanguage ? `<div class="challenge-lang">${safeLanguage}</div>` : ""}
     </div>
     <div class="timer-box">
       <div class="timer-label">Time left</div>

@@ -6,6 +6,9 @@
   "estimated_minutes": 45,
   "max_minutes": 90,
   "tags": ["data-structures", "concurrency", "caching"],
+  "dependencies": [
+    { "label": "Python 3", "check": "python3 --version" }
+  ],
   "public_test_file": "tests/test_public.py",
   "hidden_test_file": "tests/test_hidden.py",
   "grader": "python"

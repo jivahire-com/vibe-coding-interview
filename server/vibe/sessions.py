@@ -17,6 +17,9 @@ from vibe.video import _feature_enabled as video_feature_enabled
 from vibe.logging_config import bind_session
 from vibe.models import (
     CreateSessionRequest,
+    Dependency,
+    SessionPreflightRequest,
+    SessionPreflightResponse,
     ValidateSessionRequest,
     ValidateSessionResponse,
 )
@@ -35,6 +38,22 @@ def _resolve_require_end_video(meet_link: str | None, override: bool) -> bool:
     if not video_feature_enabled():
         return False
     return not meet_link or bool(override)
+
+
+def load_challenge_metadata(challenge_id: str) -> dict:
+    """Read a challenge's `.jivahire/metadata.json` off the local filesystem.
+
+    Returns an empty dict if the file is missing or unparsable — callers default
+    individual fields. Mirrors the inline reads in list_challenges/create_session.
+    """
+    meta_path = os.path.join(
+        settings.challenges_dir, challenge_id, ".jivahire", "metadata.json"
+    )
+    try:
+        with open(meta_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
 
 
 # Statuses a session can hold across its lifecycle. Used to validate the
@@ -287,6 +306,46 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
     }
 
 
+@router.post("/session-preflight", response_model=SessionPreflightResponse)
+async def session_preflight(req: SessionPreflightRequest, request: Request):
+    """Read-only challenge info for the extension's pre-clone dialog.
+
+    Returns the assigned challenge's language and tooling dependencies so the
+    candidate can verify (and install) the required toolchain BEFORE the session
+    is activated. Unlike validate-session, this does NOT create the candidate
+    branch, mint a token, or start the timer — the session stays untouched.
+    """
+    ip = request.client.host
+    # Rate-limit before the session-key DB lookup (same invariant as
+    # validate-session). An invalid key stops here, so the brute-force path
+    # still costs exactly one attempt per try.
+    check_rate_limit(ip)
+
+    rows = query("SELECT * FROM sessions WHERE session_key = ?", (req.session_key,))
+    if not rows:
+        log.warning("session_preflight_not_found", extra={"context": {"ip": ip}})
+        raise HTTPException(404, "Session not found")
+
+    session = rows[0]
+    bind_session(session["id"])
+    if session["status"] not in ("pending", "active"):
+        raise HTTPException(409, f"Session is {session['status']}")
+
+    meta = load_challenge_metadata(session["challenge_id"])
+    raw_deps = meta.get("dependencies") or []
+    deps = [
+        Dependency(label=d["label"], check=d["check"])
+        for d in raw_deps
+        if isinstance(d, dict) and d.get("label") and d.get("check")
+    ]
+    return SessionPreflightResponse(
+        challenge_id=session["challenge_id"],
+        title=meta.get("title") or session["challenge_id"],
+        language=meta.get("language") or "unknown",
+        dependencies=deps,
+    )
+
+
 @router.post("/validate-session", response_model=ValidateSessionResponse)
 async def validate_session(req: ValidateSessionRequest, request: Request):
     ip = request.client.host
@@ -381,6 +440,7 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
         require_end_video=_resolve_require_end_video(
             session["meet_link"], bool(session.get("require_end_video") or 0)
         ),
+        language=load_challenge_metadata(session["challenge_id"]).get("language") or "unknown",
     )
 
 

@@ -73,6 +73,7 @@ function makeConfig(): SessionConfig {
     llmBudgetUsd: 2,
     challengeId: "cpp-lru-cache",
     challengeDescription: "",
+    language: "cpp",
     chatModel: "openai/gpt-4o-mini",
     availableChatModels: ["openai/gpt-4o-mini"],
     startedAt: Date.now(),

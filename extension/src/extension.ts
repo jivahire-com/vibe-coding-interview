@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
-import { validateSession, refreshGithubToken, SessionConfig } from "./api";
+import { validateSession, preflightSession, refreshGithubToken, SessionConfig, Dependency, SessionPreflight } from "./api";
 import { Timer } from "./timer";
 import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
@@ -642,6 +642,63 @@ function _scheduleTokenRefresh(
   context.subscriptions.push({ dispose: stop });
 }
 
+interface DepCheckResult {
+  label: string;
+  check: string;
+  ok: boolean;
+}
+
+// A dependency `check` is a server-supplied string from the challenge's
+// metadata.json. Restrict it to a simple `<tool> <flag>...` shape (alnum, dot,
+// plus, dash, underscore tokens separated by single spaces) and run it WITHOUT
+// a shell, so a compromised metadata source can't inject arbitrary commands
+// onto the candidate's machine.
+const _SAFE_CHECK = /^[\w.+-]+( [\w.+-]+)*$/;
+
+function runDependencyChecks(deps: Dependency[]): DepCheckResult[] {
+  return deps.map((dep) => {
+    const check = (dep.check ?? "").trim();
+    if (!_SAFE_CHECK.test(check)) {
+      return { label: dep.label, check, ok: false };
+    }
+    const [bin, ...args] = check.split(/\s+/);
+    try {
+      execFileSync(bin, args, { stdio: "pipe", shell: false, timeout: 5000 });
+      return { label: dep.label, check, ok: true };
+    } catch {
+      return { label: dep.label, check, ok: false };
+    }
+  });
+}
+
+/**
+ * Show the candidate the challenge's language + required tooling (with a live
+ * ✓/✗ install check) BEFORE the session is activated. Returns true iff they
+ * confirm — only then do we validate-session (which starts the timer) and clone.
+ */
+async function confirmToolingAndStart(info: SessionPreflight): Promise<boolean> {
+  const results = runDependencyChecks(info.dependencies);
+  const anyMissing = results.some((r) => !r.ok);
+  const language = info.language && info.language !== "unknown" ? info.language : "unknown";
+
+  const toolLines = results.length
+    ? results.map((r) => `${r.ok ? "✓" : "✗"}  ${r.label}   (${r.check})`).join("\n")
+    : "No additional tooling required.";
+  const footer = anyMissing
+    ? "Some tools are missing. Install them now, then click Continue — the timer starts only when you continue."
+    : "The timer starts when you click Continue.";
+  const detail = `Challenge language: ${language}\n\n${toolLines}\n\n${footer}`;
+
+  const message = anyMissing
+    ? "Missing required tools for this challenge"
+    : "Ready to start — your toolchain looks good";
+  const picker = anyMissing
+    ? vscode.window.showWarningMessage
+    : vscode.window.showInformationMessage;
+  const choice = await picker(message, { modal: true, detail }, "Continue & Start");
+  return choice === "Continue & Start";
+}
+
 async function promptForSession(
   context: vscode.ExtensionContext,
   timer: Timer,
@@ -670,6 +727,18 @@ async function promptForSession(
   if (!sessionKey) return;
 
   try {
+    // Preflight first: surface the challenge's language + required toolchain
+    // (with a live install check) and let the candidate confirm BEFORE we
+    // validate-session, which activates the session and starts the timer.
+    const preflight = await preflightSession(serverUrl, sessionKey);
+    const proceed = await confirmToolingAndStart(preflight);
+    if (!proceed) {
+      // Candidate dismissed the dialog — nothing started server-side. Re-enable
+      // the welcome form so they can retry or fix their environment.
+      dashboardProvider.resetWelcomeEntry();
+      return;
+    }
+
     const config = await validateSession(serverUrl, sessionKey);
     await context.globalState.update(SESSION_KEY, config);
     await context.globalState.update(SERVER_URL_KEY, serverUrl);

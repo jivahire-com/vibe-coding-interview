@@ -7,6 +7,24 @@ export interface ModelPricing {
   output: number;
 }
 
+/** A toolchain dependency the candidate needs for the assigned challenge.
+ *  `check` is a `<tool> <flag>` command the extension runs (without a shell)
+ *  to verify the tool is installed. Sourced from the challenge's metadata.json. */
+export interface Dependency {
+  label: string;
+  check: string;
+}
+
+/** Read-only challenge info for the pre-clone confirmation dialog. Fetched
+ *  before validate-session so the candidate can verify (and install) the
+ *  required toolchain BEFORE the session is activated and the timer starts. */
+export interface SessionPreflight {
+  challengeId: string;
+  title: string;
+  language: string;
+  dependencies: Dependency[];
+}
+
 export interface SessionConfig {
   sessionId: string;
   sessionKey: string;
@@ -26,6 +44,9 @@ export interface SessionConfig {
   llmBudgetUsd: number;
   challengeId: string;
   challengeDescription: string;
+  /** Coding language of the challenge (e.g. "cpp", "python"). Surfaced as a
+   *  badge on the session brief. "unknown" when the server omits it. */
+  language: string;
   chatModel: string;
   availableChatModels: string[];
   startedAt: number; // epoch ms, recorded client-side on validate
@@ -136,6 +157,7 @@ export async function validateSession(
     llmBudgetUsd: res.llm_budget_usd,
     challengeId: res.challenge_id,
     challengeDescription: res.challenge_description ?? res.challenge_id ?? "",
+    language: typeof res.language === "string" ? res.language : "unknown",
     chatModel: res.chat_model ?? "openai/gpt-4o",
     availableChatModels: res.available_chat_models ?? [res.chat_model ?? "openai/gpt-4o"],
     startedAt: Date.now(),
@@ -144,6 +166,39 @@ export async function validateSession(
     videoPlatform,
     scheduledAt,
     requireEndVideo,
+  };
+}
+
+/**
+ * Fetch read-only challenge info (language + tooling dependencies) for the
+ * pre-clone confirmation dialog. This does NOT activate the session or start
+ * the timer server-side — that happens only when the candidate confirms and
+ * the extension goes on to call {@link validateSession}.
+ */
+export async function preflightSession(
+  serverUrl: string,
+  sessionKey: string
+): Promise<SessionPreflight> {
+  const base = serverUrl.replace(/\/+$/, "");
+  const body = JSON.stringify({ session_key: sessionKey });
+  const res = await post(`${base}/api/v1/session-preflight`, body);
+
+  const rawDeps = Array.isArray(res.dependencies) ? res.dependencies : [];
+  const dependencies: Dependency[] = rawDeps
+    .filter(
+      (d: unknown): d is { label: string; check: string } =>
+        !!d &&
+        typeof d === "object" &&
+        typeof (d as { label?: unknown }).label === "string" &&
+        typeof (d as { check?: unknown }).check === "string"
+    )
+    .map((d: { label: string; check: string }) => ({ label: d.label, check: d.check }));
+
+  return {
+    challengeId: typeof res.challenge_id === "string" ? res.challenge_id : "",
+    title: typeof res.title === "string" ? res.title : (res.challenge_id ?? ""),
+    language: typeof res.language === "string" ? res.language : "unknown",
+    dependencies,
   };
 }
 

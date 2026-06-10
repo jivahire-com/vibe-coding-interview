@@ -6,6 +6,10 @@
   "estimated_minutes": 45,
   "max_minutes": 90,
   "tags": ["data-structures", "concurrency", "templates"],
+  "dependencies": [
+    { "label": "CMake (build system)", "check": "cmake --version" },
+    { "label": "C++ compiler", "check": "c++ --version" }
+  ],
   "public_test_file": "tests/public_test.cpp",
   "hidden_test_file": "tests/hidden_test.cpp",
   "grader": "cpp"

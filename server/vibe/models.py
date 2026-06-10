@@ -127,6 +127,33 @@ class ValidateSessionResponse(BaseModel):
     # submitting. Resolved server-side from the feature flag + per-session
     # override so the extension can surface an upfront notice in the dashboard.
     require_end_video: bool = False
+    # Coding language of the assigned challenge (from .jivahire/metadata.json).
+    # Lets the extension show a language badge on the session brief after a
+    # workspace reopen, when the pre-clone preflight is no longer in play.
+    language: str = "unknown"
+
+
+class Dependency(BaseModel):
+    # Human-readable tool name shown to the candidate (e.g. "CMake").
+    label: str
+    # A `<tool> <flag>` command the extension runs to verify the tool is
+    # installed (e.g. "cmake --version"). Executed without a shell on the
+    # candidate's machine — see runDependencyChecks in the extension.
+    check: str
+
+
+class SessionPreflightRequest(BaseModel):
+    session_key: str
+
+
+class SessionPreflightResponse(BaseModel):
+    # Read-only challenge info shown in the pre-clone confirmation dialog. This
+    # response does NOT activate the session or start the timer — that happens
+    # only when the candidate confirms and the extension calls validate-session.
+    challenge_id: str
+    title: str
+    language: str = "unknown"
+    dependencies: list[Dependency] = []
 
 
 class ChatMessage(BaseModel):
