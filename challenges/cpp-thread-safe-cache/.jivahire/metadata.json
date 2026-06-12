@@ -1,0 +1,49 @@
+{
+  "challenge_id": "cpp-thread-safe-cache",
+  "title": "Thread-Safe Cache",
+  "language": "cpp",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 60,
+  "tags": ["data-structures", "concurrency", "templates"],
+  "public_test_file": "tests/public_test.cpp",
+  "hidden_test_file": "tests/hidden_test.cpp",
+  "grader": "cpp",
+  "dependencies": {
+    "toolchain": [
+      {
+        "name": "CMake",
+        "min_version": "3.14",
+        "check": "cmake --version",
+        "install": {
+          "macos": "brew install cmake",
+          "debian": "sudo apt install cmake",
+          "windows": "winget install Kitware.CMake"
+        }
+      },
+      {
+        "name": "C++17 compiler",
+        "min_version": "GCC 11+, Clang 14+, or MSVC 2019+",
+        "check": "c++ --version",
+        "install": {
+          "macos": "xcode-select --install",
+          "debian": "sudo apt install build-essential clang",
+          "windows": "Visual Studio 2019+ with the \"Desktop development with C++\" workload"
+        }
+      },
+      {
+        "name": "Git",
+        "min_version": "any",
+        "check": "git --version",
+        "install": {
+          "macos": "brew install git",
+          "debian": "sudo apt install git",
+          "windows": "winget install Git.Git"
+        }
+      }
+    ],
+    "auto_fetched": [
+      "Catch2 v3 — fetched automatically by CMake on the first build (one-time network access; cached afterwards)"
+    ]
+  }
+}

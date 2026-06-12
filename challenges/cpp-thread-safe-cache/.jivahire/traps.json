@@ -1,0 +1,36 @@
+{
+  "traps": [
+    {
+      "id": "race",
+      "description": "No mutex: get/put mutate std::list and std::unordered_map without synchronisation.",
+      "summary": "get/put mutate the list and map with no mutex — a data race.",
+      "detection_tag": "[thread]",
+      "points": 20,
+      "severity": 2
+    },
+    {
+      "id": "shared_lock_on_mutating_get",
+      "description": "get() promotes the entry it returns (splice -> list mutation), so it is NOT read-only. Using std::shared_mutex with a std::shared_lock on get() — the naive 'read-heavy' optimization — lets concurrent readers mutate the list and is a data race. Only an exclusive lock in get() is correct.",
+      "summary": "get() mutates the list, so a shared/read lock still races; needs an exclusive lock.",
+      "detection_tag": "[thread]",
+      "points": 15,
+      "severity": 3
+    },
+    {
+      "id": "off_by_one",
+      "description": "Eviction loop uses > capacity instead of >= capacity; cache grows one entry beyond limit.",
+      "summary": "Eviction uses > instead of >= capacity, so the cache overgrows by one.",
+      "detection_tag": "[basic]",
+      "points": 10,
+      "severity": 2
+    },
+    {
+      "id": "capacity_zero",
+      "description": "capacity=0: eviction check (0 > 0) is false, so first put inserts an entry instead of being a no-op.",
+      "summary": "capacity=0 isn't a no-op; the first put still stores an entry.",
+      "detection_tag": "[edge]",
+      "points": 10,
+      "severity": 3
+    }
+  ]
+}

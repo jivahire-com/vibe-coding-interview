@@ -1,0 +1,39 @@
+{
+  "challenge_id": "cpp-thread-safe-cache",
+  "title": "Thread-Safe Cache",
+  "description": "Make an existing LRU cache implementation thread-safe and fix planted bugs in eviction and edge-case handling. Get/put must remain O(1).",
+  "language": "cpp",
+  "code_fence": "cpp",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 60,
+  "submission_files": ["include/lru_cache.hpp"],
+  "starter_code_note": "The data-structure choice (std::list + std::unordered_map with splice-based eviction) is provided in the starter code. The candidate is expected to add synchronisation, fix the off-by-one in the eviction loop, and handle capacity=0. Do NOT credit them for the algorithm or data-structure choice.",
+  "code_quality_criteria": [
+    "Correctness (does it pass the tests and fix the planted traps?)",
+    "Thread safety (mutex/lock usage, no data races)",
+    "Idiomatic C++ (move semantics, const correctness, RAII)",
+    "Clarity and naming"
+  ],
+  "architectural_criteria": [
+    "Synchronisation primitive choice (std::mutex vs std::shared_mutex)",
+    "Lock placement and granularity (per-method, scope of critical section)",
+    "Deadlock avoidance (no nested locking, no recursive locks)",
+    "Edge case handling (capacity=0 no-op, eviction boundary off-by-one)",
+    "Const-correctness of the locking strategy (e.g., size() under shared lock)"
+  ],
+  "tasks": [
+    {"id": "basic",         "points": 30, "test_tag": "[basic]",  "description": "Core get/put and LRU eviction behaviour."},
+    {"id": "thread_safety", "points": 35, "test_tag": "[thread]", "description": "Concurrent get/put stay correct with no data races."},
+    {"id": "edge_cases",    "points": 20, "test_tag": "[edge]",   "description": "Boundary handling such as capacity=0 and eviction limits."}
+  ],
+  "composite_weights": {
+    "test_score":  0.25,
+    "trap_score":  0.15,
+    "code_quality": 0.25,
+    "ai_orchestration": 0.20,
+    "architectural_reasoning": 0.15
+  },
+  "total_points": 100,
+  "expected_tokens": 30000
+}
