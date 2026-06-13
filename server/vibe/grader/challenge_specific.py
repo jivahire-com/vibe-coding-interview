@@ -1,15 +1,15 @@
 """
-Challenge-specific bonus (5% of composite).
+Challenge-specific rubric (GRADING_METRICS_MAP.md §2A) + the product-sense bonus.
 
-Per-challenge scoring of decisions that don't generalise across challenges —
-sync primitive choice, time source, const-correctness, etc. The scaffold
-dispatches on `challenge_id`; new challenges add a function and a dispatch
-entry. Unknown challenges return 5.0 with reasoning ("no per-challenge
-criteria configured") so the composite stays stable as new challenges land.
+`score()` is a per-challenge static scan of the submitted code — the small,
+non-generalising calls (sync primitive, time source, const-correctness). It
+returns one holistic 1-10 plus strong/weak/missing subpoints. Unknown challenges
+return a neutral 5.0 with no subpoints so the composite stays stable.
 
-The signals are surfaced as boolean / categorical evidence rather than full
-LLM-style narrative — recruiters get a quick read on whether the candidate
-made the right small calls.
+`product_sense_bonus()` is the optional "go further" bonus that LIFTS the
+architectural-reasoning score (never its own /100 line, never a penalty). It
+returns a report bonus card and a small `boost` (on the 1-10 arch scale) for the
+runner to add to architectural reasoning.
 """
 
 from __future__ import annotations
@@ -18,182 +18,199 @@ import re
 from pathlib import Path
 from typing import Any
 
+from vibe.grader.rubric_common import verdict_from_score
+
 DEFAULT_SCORE = 5.0
+_MAX_PRODUCT_BOOST = 1.0  # on the 1-10 architectural-reasoning scale
 
 
-def compute(challenge_id: str, clone_dir: Path, rubric: dict[str, Any]) -> dict[str, Any]:
-    """Dispatch to a per-challenge scorer. Returns {score, breakdown}."""
-    handler = _DISPATCH.get(challenge_id, _default_score)
+# ─── Challenge-specific rubric ───────────────────────────────────────────────
+
+
+def score(challenge_id: str, clone_dir: Path, rubric: dict[str, Any]) -> dict[str, Any]:
+    handler = _DISPATCH.get(challenge_id)
+    if handler is None:
+        return {"score": DEFAULT_SCORE, "subpoints": [],
+                "note": "No per-challenge criteria configured for this challenge."}
     return handler(clone_dir, rubric)
 
 
-def _default_score(_clone_dir: Path, _rubric: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "score": DEFAULT_SCORE,
-        "breakdown": {"reason": "no per-challenge criteria configured for this challenge"},
-    }
-
-
-# ─── python-ttl-cache ────────────────────────────────────────────────────────
-
-
 def _python_ttl_cache(clone_dir: Path, rubric: dict[str, Any]) -> dict[str, Any]:
-    source = _read_submission(clone_dir, rubric, default="src/ttl_cache.py")
+    source = _read_submission(clone_dir, rubric, "src/ttl_cache.py")
     if source is None:
-        return _default_score(clone_dir, rubric)
+        return {"score": DEFAULT_SCORE, "subpoints": [], "note": "Submission file not found."}
 
-    criteria: dict[str, dict[str, Any]] = {}
-
-    # 1. Synchronisation primitive — threading.Lock is the right default for
-    #    non-recursive critical sections. RLock costs more and signals the
-    #    candidate didn't think about whether recursive entry is needed.
     has_lock = bool(re.search(r"\bthreading\.Lock\s*\(", source))
     has_rlock = bool(re.search(r"\bthreading\.RLock\s*\(", source))
     if has_lock and not has_rlock:
-        prim_score, prim_reason = 9.0, "uses threading.Lock — correct default for non-recursive locking"
+        prim = (9.0, "Uses threading.Lock — correct default for non-recursive locking.")
     elif has_rlock:
-        prim_score, prim_reason = 6.0, "uses RLock — overkill unless recursive entry is required"
+        prim = (6.0, "Uses RLock — overkill unless recursive entry is required.")
     elif has_lock:
-        prim_score, prim_reason = 8.0, "uses Lock (with some RLock fallback)"
+        prim = (8.0, "Uses Lock (with some RLock fallback).")
     else:
-        prim_score, prim_reason = 2.0, "no threading.Lock or RLock found — likely no synchronisation"
-    criteria["sync_primitive"] = {"score": prim_score, "reason": prim_reason,
-                                   "has_lock": has_lock, "has_rlock": has_rlock}
+        prim = (2.0, "No threading.Lock or RLock found — likely no synchronisation.")
 
-    # 2. Monotonic time source — time.time() is wall-clock and goes backwards
-    #    on NTP correction; time.monotonic() is the right call for TTLs.
     uses_monotonic = bool(re.search(r"\btime\.monotonic\s*\(", source))
-    uses_wallclock = bool(re.search(r"\btime\.time\s*\(", source))
-    if uses_monotonic and not uses_wallclock:
-        mono_score, mono_reason = 9.0, "uses time.monotonic — clock-skew-safe"
+    uses_wall = bool(re.search(r"\btime\.time\s*\(", source))
+    if uses_monotonic and not uses_wall:
+        mono = (9.0, "Uses time.monotonic — clock-skew-safe.")
     elif uses_monotonic:
-        mono_score, mono_reason = 7.0, "uses time.monotonic but also references time.time"
-    elif uses_wallclock:
-        mono_score, mono_reason = 3.0, "uses time.time — vulnerable to wall-clock jumps"
+        mono = (7.0, "Uses time.monotonic but also references time.time.")
+    elif uses_wall:
+        mono = (3.0, "Uses time.time — vulnerable to wall-clock jumps.")
     else:
-        mono_score, mono_reason = 5.0, "no explicit time source detected"
-    criteria["time_source"] = {"score": mono_score, "reason": mono_reason,
-                                "uses_monotonic": uses_monotonic,
-                                "uses_wallclock": uses_wallclock}
+        mono = (5.0, "No explicit time source detected.")
 
-    # 3. TTL-on-read strategy — get() must check expiry inline (lazy) or a
-    #    background sweeper must purge before the next get; lazy is simpler.
-    has_lazy_check = _has_lazy_ttl_check(source)
-    if has_lazy_check:
-        ttl_score, ttl_reason = 9.0, "get() contains a TTL-vs-elapsed check — lazy expiry implemented"
-    else:
-        ttl_score, ttl_reason = 4.0, "no obvious TTL check inside get() — expired entries may be returned"
-    criteria["ttl_strategy"] = {"score": ttl_score, "reason": ttl_reason,
-                                 "has_lazy_check": has_lazy_check}
+    lazy = _has_lazy_ttl_check(source)
+    ttl = (9.0, "get() contains a TTL-vs-elapsed check — lazy expiry implemented.") if lazy \
+        else (4.0, "No obvious TTL check inside get() — expired entries may be returned.")
 
-    return _aggregate(criteria)
+    parts = {"sync_primitive": (prim, "A real synchronisation primitive is present."),
+             "time_source": (mono, "A monotonic time source is used for the TTL."),
+             "ttl_strategy": (ttl, "Expiry is checked on read.")}
+    return _aggregate(parts)
 
 
-def _has_lazy_ttl_check(source: str) -> bool:
-    """Heuristic: inside any get() definition, the function body subtracts a
-    stored timestamp from time.monotonic()/time.time() and compares to ttl.
-    """
-    # Pull each get() body and look for a TTL comparison inside it.
-    bodies = re.findall(
-        r"def\s+get\s*\([^)]*\)[^:]*:\n(?P<body>(?:    .*\n|\t.*\n|\n)+)",
-        source,
-    )
-    for body in bodies:
-        if re.search(
-            r"(time\.(monotonic|time)\s*\(\s*\)\s*-\s*\w+|"
-            r"\w+\s*-\s*\w+\s*[<>]\s*\w*ttl|"
-            r"\w+\s*>\s*\w+\s*\+\s*\w*ttl)",
-            body,
-        ):
-            return True
-    return False
-
-
-# ─── cpp-lru-cache ───────────────────────────────────────────────────────────
-
-
-def _cpp_lru_cache(clone_dir: Path, rubric: dict[str, Any]) -> dict[str, Any]:
-    source = _read_submission(clone_dir, rubric, default="include/lru_cache.hpp")
+def _cpp_thread_safe_cache(clone_dir: Path, rubric: dict[str, Any]) -> dict[str, Any]:
+    source = _read_submission(clone_dir, rubric, "include/lru_cache.hpp")
     if source is None:
-        return _default_score(clone_dir, rubric)
+        return {"score": DEFAULT_SCORE, "subpoints": [], "note": "Submission file not found."}
 
-    criteria: dict[str, dict[str, Any]] = {}
-
-    # 1. Synchronisation primitive — std::mutex is a fine default; shared_mutex
-    #    is the more sophisticated choice for read-heavy workloads BUT the
-    #    rubric notes that LRU is not naturally read-heavy (every get() also
-    #    promotes the entry, requiring exclusive access). So shared_mutex
-    #    without scoping reader-vs-writer correctly is actually worse.
     has_mutex = bool(re.search(r"\bstd::mutex\b", source))
     has_shared_mutex = bool(re.search(r"\bstd::shared_mutex\b", source))
     has_shared_lock = bool(re.search(r"\bstd::shared_lock\b", source))
     if has_shared_mutex and has_shared_lock:
-        prim_score, prim_reason = 8.0, (
-            "shared_mutex + shared_lock — correct read-heavy split (but check "
-            "that get() still takes an exclusive lock for LRU promotion)"
-        )
-    elif has_shared_mutex and not has_shared_lock:
-        prim_score, prim_reason = 5.0, (
-            "shared_mutex declared but never used with shared_lock — defeats "
-            "the purpose; exclusive lock-only path makes std::mutex simpler"
-        )
+        prim = (2.5, "std::shared_mutex + std::shared_lock — fell for the read-heavy bait: "
+                     "get() promotes via splice and mutates the list, so a shared_lock on it is a race.")
     elif has_mutex:
-        prim_score, prim_reason = 9.0, "std::mutex — correct default; LRU promotes on get()"
+        prim = (9.0, "std::mutex — correct default; get() mutates (LRU promotion) so exclusive locking is right.")
+    elif has_shared_mutex:
+        prim = (7.0, "std::shared_mutex without std::shared_lock — exclusive-only is correct but pointless here.")
     else:
-        prim_score, prim_reason = 2.0, "no std::mutex / std::shared_mutex found — likely no synchronisation"
-    criteria["sync_primitive"] = {
-        "score": prim_score, "reason": prim_reason,
-        "has_mutex": has_mutex, "has_shared_mutex": has_shared_mutex,
-        "has_shared_lock": has_shared_lock,
-    }
+        prim = (2.0, "No std::mutex / std::shared_mutex found — likely no synchronisation.")
 
-    # 2. Const-correctness — size() and contains() are inspection methods and
-    #    should be `const`. Locking inside a const method requires `mutable
-    #    std::mutex`. Look for those markers.
     has_const_size = bool(re.search(r"\bsize\s*\([^)]*\)\s*const\b", source))
     has_mutable_mutex = bool(re.search(r"\bmutable\b[^;\n]*mutex", source))
     if has_const_size and has_mutable_mutex:
-        const_score, const_reason = 9.0, "size()/contains() are const + mutex is mutable — clean"
-    elif has_const_size and not has_mutable_mutex:
-        const_score, const_reason = 6.0, "const inspection methods declared but mutex is not mutable — won't compile if locked"
+        const = (9.0, "size()/contains() are const + mutex is mutable — clean.")
+    elif has_const_size:
+        const = (6.0, "const inspection methods declared but mutex is not mutable — won't compile if locked.")
     elif has_mutable_mutex:
-        const_score, const_reason = 7.0, "mutable mutex present but inspection methods not const-qualified"
+        const = (7.0, "mutable mutex present but inspection methods not const-qualified.")
     else:
-        const_score, const_reason = 4.0, "no const-qualified inspection methods detected"
-    criteria["const_correctness"] = {
-        "score": const_score, "reason": const_reason,
-        "has_const_size": has_const_size,
-        "has_mutable_mutex": has_mutable_mutex,
+        const = (4.0, "No const-qualified inspection methods detected.")
+
+    parts = {"sync_primitive": (prim, "A real synchronisation primitive is present."),
+             "const_correctness": (const, "Locking stays const-correct.")}
+    return _aggregate(parts)
+
+
+def _aggregate(parts: dict[str, tuple[tuple[float, str], str]]) -> dict[str, Any]:
+    subs = []
+    total = 0.0
+    for key, ((sc, detail), checks) in parts.items():
+        subs.append({"key": key, "checks": checks,
+                     "verdict": verdict_from_score(sc), "detail": detail})
+        total += sc
+    avg = total / len(parts) if parts else DEFAULT_SCORE
+    return {"score": round(avg, 2), "subpoints": subs, "note": None}
+
+
+def _has_lazy_ttl_check(source: str) -> bool:
+    bodies = re.findall(
+        r"def\s+get\s*\([^)]*\)[^:]*:\n(?P<body>(?:    .*\n|\t.*\n|\n)+)", source)
+    for body in bodies:
+        if re.search(
+            r"(time\.(monotonic|time)\s*\(\s*\)\s*-\s*\w+|"
+            r"\w+\s*-\s*\w+\s*[<>]\s*\w*ttl|\w+\s*>\s*\w+\s*\+\s*\w*ttl)", body):
+            return True
+    return False
+
+
+# ─── Product-sense bonus (lifts architectural reasoning) ─────────────────────
+
+
+def product_sense_bonus(clone_dir: Path, rubric: dict[str, Any],
+                        design_why: str | None = None) -> dict[str, Any]:
+    """Optional bonus → {card, boost}. `boost` is on the 1-10 arch scale."""
+    source = _read_submission(clone_dir, rubric, "") or ""
+    notes_path = clone_dir / "NOTES.md"
+    try:
+        notes = notes_path.read_text(encoding="utf-8") if notes_path.exists() else ""
+    except OSError:
+        notes = ""
+
+    has_notes = len(notes.strip()) >= 200
+    some_notes = bool(notes.strip())
+    justified = bool(re.search(r"\b(because|instead|trade[- ]?off|chose|rather than)\b", notes, re.I)) \
+        or bool(design_why and len(design_why) > 40)
+    thread_safe = bool(re.search(r"\b(std::atomic|threading\.Lock|std::mutex|with\s+self\._?lock)\b", source))
+    new_feature = bool(re.search(
+        r"\b(hit|hits|miss|misses|hit_count|miss_count|on_evict|eviction_callback|"
+        r"ttl|expire|expiry|stale|metric|observ)\w*", source, re.I))
+    proven = bool(re.search(r"\btest", notes, re.I)) or new_feature
+    attempted = has_notes or some_notes or new_feature
+
+    real_need = 9.0 if has_notes else 5.0 if some_notes else None
+    justified_sc = 9.0 if justified else 5.0 if some_notes else None
+    thread_sc = 9.0 if thread_safe and new_feature else 6.0 if thread_safe else None
+    proven_sc = 8.0 if proven else None
+
+    def _sp(key, checks, sc, detail):
+        return {"key": key, "checks": checks,
+                "verdict": verdict_from_score(sc) if sc is not None else "missing",
+                "detail": detail}
+
+    subpoints = [
+        _sp("real_need", "Identified a real user/operator need.", real_need,
+            "NOTES.md describes a real need." if has_notes else
+            "Some NOTES.md content." if some_notes else "No NOTES.md write-up."),
+        _sp("justified_choice", "Explained why this over alternatives.", justified_sc,
+            "Rationale present in NOTES.md / chat." if justified else "Little stated 'why'."),
+        _sp("thread_safe", "Kept any new state safe under concurrency.", thread_sc,
+            "New state is synchronised." if thread_safe else "No new synchronised state detected."),
+        _sp("proven_by_tests", "Showed the new behaviour works with tests.", proven_sc,
+            "New behaviour appears exercised." if proven else "No new tests detected."),
+    ]
+
+    boost = 0.0
+    if has_notes:
+        boost += 0.5
+    if new_feature:
+        boost += 0.25
+    if thread_safe and new_feature:
+        boost += 0.25
+    boost = round(min(_MAX_PRODUCT_BOOST, boost), 2)
+
+    note = ("Optional; lifts architectural reasoning, never subtracts."
+            if attempted else
+            "Not attempted — reported as an observation only, never a penalty.")
+    card = {
+        "key": "product_sense",
+        "title": "Product-sense bonus",
+        "attempted": attempted,
+        "lifts": "architectural reasoning",
+        "note": note,
+        "subpoints": subpoints if attempted else [],
     }
+    return {"card": card, "boost": boost if attempted else 0.0}
 
-    return _aggregate(criteria)
 
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def _read_submission(clone_dir: Path, rubric: dict[str, Any], default: str) -> str | None:
-    """Read the candidate's primary submission file. Returns None if missing."""
-    files = rubric.get("submission_files") or [default]
-    path = clone_dir / files[0]
+    files = rubric.get("submission_files") or ([default] if default else [])
+    if not files:
+        return None
     try:
-        return path.read_text(encoding="utf-8")
+        return (clone_dir / files[0]).read_text(encoding="utf-8")
     except Exception:
         return None
 
 
-def _aggregate(criteria: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Equal-weight average of per-criterion scores → dimension score."""
-    if not criteria:
-        return {"score": DEFAULT_SCORE, "breakdown": {"reason": "no criteria evaluated"}}
-    avg = sum(c["score"] for c in criteria.values()) / len(criteria)
-    return {
-        "score": round(avg, 2),
-        "breakdown": {"criteria": criteria},
-    }
-
-
 _DISPATCH = {
     "python-ttl-cache": _python_ttl_cache,
-    "cpp-lru-cache": _cpp_lru_cache,
+    "cpp-thread-safe-cache": _cpp_thread_safe_cache,
 }

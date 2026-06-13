@@ -2153,7 +2153,7 @@ All evaluations use GPT-4o-mini with `temperature=0`. Each returns a score (1–
 
 ---
 
-#### Challenge: Thread-Safe LRU Cache (`cpp-lru-cache`)
+#### Challenge: Thread-Safe Cache (`cpp-thread-safe-cache`)
 
 **Language:** C++ | **Difficulty:** Mid | **Estimated time:** 45 min | **Time limit:** 90 min
 

@@ -597,13 +597,9 @@ document.addEventListener('alpine:init', () => {
     // ─────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────
-    scoreColor(n) {
-      if (n == null) return '';
-      if (n >= 7) return 'good';
-      if (n >= 4) return 'warn';
-      return 'poor';
-    },
-
+    // Maps a 0-10 score to a colour class. The session list still shows
+    // total_score/10; the detail hero passes (score/10) so its 0-100 value maps
+    // through the same thresholds.
     scoreCssClass(n) {
       if (n == null) return '';
       if (n >= 7) return 'score-good';
@@ -611,151 +607,217 @@ document.addEventListener('alpine:init', () => {
       return 'score-poor';
     },
 
-    scoreBarWidth(n, max = 10) {
-      if (n == null) return '0%';
-      return `${Math.round((n / max) * 100)}%`;
+    // ─────────────────────────────────────────────
+    // Structured grade report (GRADING_METRICS_MAP.md §5)
+    //
+    // The session-detail API returns `report` — the exact per-track object
+    // produced by server/vibe/grader/report.py (identical to one entry of
+    // REPORT_DATA.reports.<track> in dummy_grading_report.html). These render
+    // helpers are ported from that page's renderer, adapted to use the
+    // dashboard's HTML-escaping and the .grade-report CSS namespace. The whole
+    // grade view is built as one HTML string and injected via x-html.
+    // ─────────────────────────────────────────────
+    VERDICT_LABEL: { strong: 'Strong', weak: 'Weak', missing: 'Missing', na: 'N/A' },
+
+    // HTML-escape — every dynamic value flows through this before going into
+    // the x-html string, so report text can never inject markup.
+    escHtml(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
     },
 
-    devConfidenceBadgeClass(verdict) {
-      if (verdict === 'developer') return 'badge-graded';
-      if (verdict === 'uncertain') return 'badge-submitted';
-      if (verdict === 'non_developer') return 'badge-poor';
-      return 'badge-pending';
+    grVerdictPill(verdict) {
+      const e = this.escHtml.bind(this);
+      return `<span class="gr-pill ${e(verdict)}">${e(this.VERDICT_LABEL[verdict] || verdict)}</span>`;
     },
 
-    parseDevConfidenceSignals(raw) {
-      if (!raw) return {};
-      if (typeof raw === 'object') return raw;
-      try { return JSON.parse(raw); } catch { return {}; }
+    grLegendHtml(legend) {
+      const e = this.escHtml.bind(this);
+      const verdicts = (legend && legend.verdicts) || [];
+      const items = verdicts.map((v) =>
+        `<span class="gr-item">${this.grVerdictPill(v.key)} ${e(v.definition)}</span>`).join('');
+      return `<div class="gr-legend"><span class="gr-legend-title">How to read a verdict:</span>${items}</div>`;
     },
 
-    parseSummaryLine(line) {
-      const m = (line || '').match(/^(.+?)\s*\(([\d.]+\/10)\)\s*:\s*(.*)$/s);
-      if (!m) return { label: '', score: '', body: line || '', matched: false };
-      return { label: m[1], score: m[2], body: m[3], matched: true };
+    grSubpointsHtml(subpoints) {
+      const e = this.escHtml.bind(this);
+      if (!subpoints || !subpoints.length) return '';
+      const rows = subpoints.map((sp) => `
+        <li>
+          <span>${this.grVerdictPill(sp.verdict)}</span>
+          <span class="sp-body">
+            <span class="checks">${e(sp.checks)}</span>
+            ${sp.detail ? `<span class="detail"> — ${e(sp.detail)}</span>` : ''}
+            <span class="sp-key"><code>${e(sp.key)}</code></span>
+          </span>
+        </li>`).join('');
+      return `<ul class="gr-subpoints">${rows}</ul>`;
     },
 
-    // Plain-English glossary for criterion/signal names that surface in
-    // grader_summary reasons like `weakest criterion 'sync_primitive' ...`.
-    // Hover-tooltip lookup — keep blurbs short (≤ ~120 chars).
-    criterionGlossary: {
-      // code_quality
-      correctness:        "Code runs and passes the hidden tests.",
-      idiomatic:          "Uses the language's standard conventions and libraries.",
-      clarity:            "Readable structure, well-named identifiers.",
-      edge_cases:         "Handles empty inputs, limits, and unusual values.",
-      no_ai_defects:      "No new races, security holes, hallucinated APIs, or unnecessary AI-suggested abstractions.",
-      // llm_communication
-      context_framing:    "Pasted relevant code, errors, and constraints into the prompt instead of relying on the model to guess.",
-      constraint_spec:    "Stated requirements explicitly (e.g. O(1), thread-safe, no allocations).",
-      decomposition:      "Broke big tasks into 2–3 focused prompts instead of one giant ask.",
-      iterative_refinement: "Gave specific feedback when the AI's output was wrong (e.g. 'line 12 has a race because…').",
-      debug_loop:         "After a test failed, included the failing assertion and the relevant snippet in the next prompt.",
-      token_discipline:   "Prompt length is roughly proportional to the problem (no massive dumps, no underspecified one-liners).",
-      // architectural_reasoning
-      why_before_how:     "Asked about tradeoffs (X vs Y) before asking for an implementation.",
-      algorithm_choice:   "Credit only if the candidate (not the AI) picked the algorithm.",
-      data_structure_choice: "Credit only if the candidate (not the AI) picked the data structure.",
-      concurrency_design: "Lock placement, primitive choice, deadlock avoidance.",
-      edge_case_awareness:"Considered boundary conditions, capacity limits, and unexpected inputs in the design.",
-      constraint_driven:  "The solution respects stated constraints because the candidate raised them.",
-      not_over_engineered:"Didn't add AI-suggested abstractions the problem doesn't need.",
-      // challenge_specific (per-challenge bonus)
-      sync_primitive:     "Picked the right concurrency primitive (e.g. plain mutex vs shared_mutex, Lock vs RLock).",
-      time_source:        "Used a monotonic clock (time.monotonic) instead of wall-clock time for TTLs.",
-      ttl_strategy:       "Expired entries are checked on read (lazy expiry) instead of being returned stale.",
-      const_correctness:  "Inspection methods are `const` and the mutex is `mutable` (C++).",
-      // verification_discipline signals
-      test_after_apply_ratio:    "How often the candidate ran tests after applying AI-suggested code.",
-      apply_then_edit_rate:      "How often the candidate edited AI code after applying it (vs accepting blindly).",
-      self_authored_ratio:       "Share of code the candidate typed themselves vs pasted from the AI.",
-      incremental_apply_pattern: "Applied AI code in small chunks rather than huge unreviewable dumps.",
-      pre_submit_test_run:       "Ran the test suite shortly before submitting.",
-      // ai_judgment signals
-      explicit_rejections: "Times the candidate explicitly told the AI its suggestion was wrong.",
-      modify_after_apply:  "Times the candidate edited AI suggestions after applying them.",
-      hand_fixed_traps:    "Planted bugs the candidate caught and fixed without AI help.",
-      recovery_events:     "Times the candidate recovered from a bad AI suggestion (reverts, do-overs).",
+    grRubricHtml(r) {
+      const e = this.escHtml.bind(this);
+      // Every rubric is shown. N/A rubrics (applies === false) render as N/A —
+      // never dropped — with their na_reason and na verdict subpoints intact.
+      const isNa = r.applies === false;
+      const scoreBlock = isNa
+        ? `<span class="gr-na-badge">N/A</span><div class="weight">not counted</div>`
+        : `<div class="val">${e(r.score)}<span class="den"> / ${e(r.out_of)}</span></div>
+           <div class="weight">weight ${e(r.weight)}%</div>`;
+      return `
+        <article class="gr-rubric ${isNa ? 'is-na' : ''}">
+          <div class="gr-rubric-head">
+            <div>
+              <p class="gr-title">${e(r.title)}</p>
+              <span class="gr-label"><code>${e(r.label)}</code> · ${e(r.kind === 'llm' ? 'LLM-judged' : 'deterministic')}</span>
+            </div>
+            <div class="gr-rubric-score">${scoreBlock}</div>
+          </div>
+          <div class="gr-yardstick">
+            <div class="col good"><span class="k">Good</span>${e(r.good)}</div>
+            <div class="col bad"><span class="k">Bad</span>${e(r.bad)}</div>
+          </div>
+          ${isNa && r.na_reason ? `<p class="gr-na-reason">${e(r.na_reason)}</p>` : ''}
+          ${this.grSubpointsHtml(r.subpoints)}
+          ${r.note ? `<p class="gr-note">${e(r.note)}</p>` : ''}
+        </article>`;
     },
 
-    // Split a grader_summary reason into (prefix, term, suffix) so the
-    // criterion/signal name can be rendered with a glossary tooltip. If no
-    // known term is present, returns the whole text as `prefix` with empty
-    // `term`/`suffix` so the same template still renders cleanly.
-    parseReasonParts(text) {
-      const empty = { prefix: text || '', term: '', glossary: '', suffix: '' };
-      if (!text) return empty;
-      const m = text.match(/^(.*?weakest (?:criterion|signal) ')([a-z_][a-z0-9_]*)('.*)$/s);
-      if (!m) return empty;
-      const glossary = this.criterionGlossary[m[2]] || `Sub-criterion '${m[2]}' — no glossary entry yet.`;
-      return { prefix: m[1], term: m[2], glossary, suffix: m[3] };
+    grSectionHtml(sec) {
+      const e = this.escHtml.bind(this);
+      return `
+        <h2 class="gr-section-title">${e(sec.title)}</h2>
+        <p class="gr-section-sub">${e(sec.subtitle)}</p>
+        ${(sec.rubrics || []).map((r) => this.grRubricHtml(r)).join('')}`;
     },
 
-    // Canonical dimension order — mirrors COMPOSITE_WEIGHTS in
-    // server/vibe/grader/runner.py. The grader builds grader_summary in this
-    // same order, so rendering both from this list keeps the breakdown rows
-    // and summary reasoning in lock-step.
-    scoreDimensions: [
-      { label: 'Tests',                   key: 'tests',                   weight: 20, kind: 'fraction', num: 'tests_passed',    denom: 'tests_total',
-        tip: 'Hidden quality checks the candidate\'s code passed.' },
-      { label: 'Traps',                   key: 'traps',                   weight: 12, kind: 'fraction', num: 'traps_detected',  denom: 'traps_total',
-        tip: 'Intentional bugs hidden in the starter code; counts how many the candidate caught and fixed.' },
-      { label: 'Verification discipline', key: 'verification_discipline', weight: 13, kind: 'score',    field: 'verification_discipline_score',
-        tip: 'How rigorously the candidate verified their own work (tests run, edge cases probed).' },
-      { label: 'AI judgment',             key: 'ai_judgment',             weight:  8, kind: 'score',    field: 'ai_judgment_score',
-        tip: 'Quality of decisions about when (and when not) to accept AI suggestions.' },
-      { label: 'LLM communication',       key: 'llm_communication',       weight: 17, kind: 'score',    field: 'llm_communication_score',
-        tip: 'How precisely and professionally the candidate prompted the AI.' },
-      { label: 'Code quality',            key: 'code_quality',            weight: 15, kind: 'score',    field: 'code_quality_score',
-        tip: 'Readability, structure, and idiomatic use of the language.' },
-      { label: 'Architectural reasoning', key: 'architectural_reasoning', weight: 10, kind: 'score',    field: 'architectural_reasoning_score',
-        tip: 'Soundness of the broader design choices the candidate made.' },
-      { label: 'Challenge-specific',      key: 'challenge_specific',      weight:  5, kind: 'score',    field: 'challenge_specific_score',
-        tip: 'Bonus criteria unique to this challenge\'s rubric.' },
-    ],
+    grBonusHtml(b) {
+      const e = this.escHtml.bind(this);
+      return `
+        <div class="gr-bonus">
+          <div class="gr-bonus-head">
+            <span class="gr-title">${e(b.title)}</span>
+            <span>${b.attempted ? this.grVerdictPill('strong') : this.grVerdictPill('na')} <span class="lifts">lifts ${e(b.lifts)}</span></span>
+          </div>
+          <p class="note-plain">${e(b.note)}</p>
+          ${this.grSubpointsHtml(b.subpoints)}
+        </div>`;
+    },
 
-    dimensionScore(grade, dim) {
-      if (!grade) return null;
-      if (dim.kind === 'fraction') {
-        const denom = grade[dim.denom];
-        if (!denom) return null;
-        return (grade[dim.num] / denom) * 10;
+    grTelemetryHtml(rows) {
+      const e = this.escHtml.bind(this);
+      rows = rows || [];
+      // vibe-only rows show as N/A on the non-AI track (applies === false).
+      const groups = [
+        { key: 'both', title: 'Shared — both tracks' },
+        { key: 'vibe', title: 'AI collaboration — vibe coding only' },
+      ];
+      const body = groups.map((g) => {
+        const rs = rows.filter((r) => r.track === g.key);
+        if (!rs.length) return '';
+        const trs = rs.map((r) => `
+          <tr class="${r.applies === false ? 'is-na' : ''}">
+            <td>${e(r.name)}<div class="src"><code>${e(r.source)}</code></div></td>
+            <td class="val">${r.applies === false ? '<span class="gr-pill na">N/A</span>' : e(r.value)}</td>
+            <td>${e(r.detail)}</td>
+          </tr>`).join('');
+        return `
+          <div class="gr-tele-group-title">${e(g.title)}</div>
+          <table class="gr-tele">
+            <thead><tr><th>Signal</th><th>Value</th><th>Detail</th></tr></thead>
+            <tbody>${trs}</tbody>
+          </table>`;
+      }).join('');
+      return `<details class="gr-telemetry" open><summary>Telemetry — the raw signals behind the scores</summary>${body}</details>`;
+    },
+
+    // Banner surfaced from report.meta: the no-show / telemetry-tamper state now
+    // lives in meta.no_show / meta.telemetry_tampered (reflected in floored
+    // rubric scores + their note fields). We surface a headline banner from
+    // meta; the per-rubric explanation rides along in each rubric's note.
+    grMetaBannerHtml(meta) {
+      if (!meta) return '';
+      const e = this.escHtml.bind(this);
+      let html = '';
+      if (meta.telemetry_tampered) {
+        html += `<div class="gr-banner">
+          <span class="gr-banner-title">⚠ Telemetry integrity violation</span>
+          The telemetry record this grade relies on was deleted or tampered with — all dimensions were floored. See the per-rubric notes below.
+        </div>`;
       }
-      const v = grade[dim.field];
-      return (v == null) ? null : v;
-    },
-
-    dimensionDisplay(grade, dim) {
-      if (!grade) return '—';
-      if (dim.kind === 'fraction') return `${grade[dim.num] ?? 0}/${grade[dim.denom] ?? 0}`;
-      return grade[dim.field] ?? '—';
-    },
-
-    // When the grader flagged a no-show, composite_breakdown carries a
-    // `no_show` flag + reason. Returns the reason string to show as a banner, or
-    // null when the candidate engaged. composite_breakdown arrives as a JSON
-    // string from the grades row.
-    gradeNoShow(grade) {
-      if (!grade?.composite_breakdown) return null;
-      let cb = grade.composite_breakdown;
-      if (typeof cb === 'string') {
-        try { cb = JSON.parse(cb); } catch { return null; }
+      if (meta.no_show) {
+        html += `<div class="gr-banner">
+          <span class="gr-banner-title">Candidate did not engage</span>
+          The behavioural and judgment dimensions were floored because the candidate did not attempt the challenge. See the per-rubric notes below.
+        </div>`;
       }
-      return cb && cb.no_show
-        ? (cb.no_show_reason || 'Candidate did not attempt the challenge.')
-        : null;
+      return html;
     },
 
-    // Map grader_summary lines (one per dimension, in canonical order) back to
-    // each dimension's reasoning text, keyed by the human label.
-    summaryReasonByLabel(grade) {
-      const out = {};
-      if (!grade?.grader_summary) return out;
-      for (const line of grade.grader_summary.split(' | ')) {
-        const p = this.parseSummaryLine(line);
-        if (p.matched) out[p.label] = p.body;
+    // Build the whole grade view as one HTML string for x-html. Handles the
+    // three states the API can present:
+    //   • report present  → full §5 layout (overall + sections + bonuses + telemetry)
+    //   • report === null but a grade row exists → flat headline + re-grade notice
+    //   • no grade row at all → "grading in progress"
+    gradeReportHtml(detail) {
+      const e = this.escHtml.bind(this);
+      const report = detail && detail.report;
+      const grade = detail && detail.grade;
+
+      if (report) {
+        const o = report.overall || {};
+        const overall = `
+          <section class="gr-overall">
+            <div class="gr-dial">
+              <div class="num">${e(o.score)}</div>
+              <div class="den">/ ${e(o.out_of)}</div>
+              <span class="gr-band ${e(o.band)}">${e(o.band)}</span>
+              <div class="dial-note">weighted average</div>
+            </div>
+            <div>
+              <div class="gr-track-label">Track: ${e(report.track_label)}</div>
+              <h1>Why this score</h1>
+              <ul class="gr-summary">${(o.summary_points || []).map((p) => `<li>${e(p)}</li>`).join('')}</ul>
+              ${this.grLegendHtml(report.legend)}
+            </div>
+          </section>`;
+        const sections = (report.sections || []).map((s) => this.grSectionHtml(s)).join('');
+        const bonuses = (report.bonuses && report.bonuses.length)
+          ? `<h2 class="gr-section-title">Bonuses</h2>
+             <p class="gr-section-sub">Optional credit that can only lift a score, never lower it.</p>
+             ${report.bonuses.map((b) => this.grBonusHtml(b)).join('')}`
+          : '';
+        return `<div class="grade-report">
+          ${this.grMetaBannerHtml(report.meta)}
+          ${overall}
+          ${sections}
+          ${bonuses}
+          ${this.grTelemetryHtml(report.telemetry)}
+        </div>`;
       }
-      return out;
+
+      // No structured report. Fall back to the flat grade headline, or to a
+      // grading-in-progress notice when there's no grade row at all.
+      if (grade && grade.total_score != null) {
+        const band = grade.band || '';
+        return `<div class="grade-report">
+          <section class="gr-overall">
+            <div class="gr-dial">
+              <div class="num">${e(grade.total_score)}</div>
+              <div class="den">/ 100</div>
+              ${band ? `<span class="gr-band ${e(band)}">${e(band)}</span>` : ''}
+            </div>
+            <div>
+              <div class="gr-track-label">Track: ${e(grade.track || '—')}</div>
+              <h1>Grade summary</h1>
+              <p class="gr-section-sub">The detailed per-rubric report is not available in the new format for this session — a re-grade is needed to populate it.</p>
+            </div>
+          </section>
+        </div>`;
+      }
+      return `<div class="grade-report">
+        <p class="text-muted" style="font-size:13px">Grading in progress — no grade is available yet.</p>
+      </div>`;
     },
 
     formatDate(ts) {

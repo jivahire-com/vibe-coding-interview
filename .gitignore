@@ -13,3 +13,6 @@ extension/dist/
 *.vsix
 /tmp/grade-*/
 logs/
+
+# CMake out-of-source build dirs (e.g. build-tsan/)
+build-*/

@@ -209,9 +209,9 @@ describe('runChecklist (monorepo / unknown)', () => {
     existsOnly([
       '/ws/python-ttl-cache',
       '/ws/python-ttl-cache/pyproject.toml',
-      '/ws/cpp-lru-cache',
-      '/ws/cpp-lru-cache/CMakeLists.txt',
-      '/ws/cpp-lru-cache/build/tests',
+      '/ws/cpp-thread-safe-cache',
+      '/ws/cpp-thread-safe-cache/CMakeLists.txt',
+      '/ws/cpp-thread-safe-cache/build/tests',
     ]);
     mockExecFile.mockImplementation((_b, _a, _o, cb: Function) => cb(null));
 

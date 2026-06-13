@@ -354,36 +354,49 @@ describe('post() timeout (Review-Bug 9)', () => {
 describe('preflightSession', () => {
   beforeEach(() => jest.resetModules());
 
-  test('parses challenge info + sanitizes dependencies', async () => {
+  test('parses challenge info + nested deps (name/min_version/install) + auto_fetched', async () => {
     const payload = {
-      challenge_id: 'cpp-lru-cache',
-      title: 'Thread-Safe LRU Cache',
+      challenge_id: 'cpp-thread-safe-cache',
+      title: 'Thread-Safe Cache',
       language: 'cpp',
+      // Server emits the normalized rich shape: name + min_version + install.
       dependencies: [
-        { label: 'CMake', check: 'cmake --version' },
-        { label: 'C++ compiler', check: 'c++ --version' },
+        {
+          name: 'CMake',
+          min_version: '3.14',
+          check: 'cmake --version',
+          install: { macos: 'brew install cmake', debian: 'sudo apt install cmake' },
+        },
+        { name: 'C++17 compiler', check: 'c++ --version' },
       ],
+      auto_fetched: ['Catch2 v3 — fetched by CMake on first build'],
     };
     mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
     const { preflightSession } = await import('../api');
     const info = await preflightSession('http://server:8080', 'KEY');
-    expect(info.challengeId).toBe('cpp-lru-cache');
-    expect(info.title).toBe('Thread-Safe LRU Cache');
+    expect(info.challengeId).toBe('cpp-thread-safe-cache');
+    expect(info.title).toBe('Thread-Safe Cache');
     expect(info.language).toBe('cpp');
     expect(info.dependencies).toEqual([
-      { label: 'CMake', check: 'cmake --version' },
-      { label: 'C++ compiler', check: 'c++ --version' },
+      {
+        name: 'CMake',
+        minVersion: '3.14',
+        check: 'cmake --version',
+        install: { macos: 'brew install cmake', debian: 'sudo apt install cmake' },
+      },
+      { name: 'C++17 compiler', minVersion: undefined, check: 'c++ --version', install: undefined },
     ]);
+    expect(info.autoFetched).toEqual(['Catch2 v3 — fetched by CMake on first build']);
   });
 
-  test('drops malformed dependency entries and defaults missing fields', async () => {
+  test('drops malformed entries, tolerates legacy label, defaults missing fields', async () => {
     const payload = {
       challenge_id: 'x',
       // no title, no language
       dependencies: [
-        { label: 'Good', check: 'node --version' },
-        { label: 'NoCheck' },           // missing check
-        { check: 'python3 --version' },  // missing label
+        { label: 'Legacy', check: 'node --version' }, // legacy flat entry → name from label
+        { name: 'NoCheck' },                           // missing check
+        { check: 'python3 --version' },                // missing name/label
         'not-an-object',
       ],
     };
@@ -392,15 +405,19 @@ describe('preflightSession', () => {
     const info = await preflightSession('http://server:8080', 'KEY');
     expect(info.title).toBe('x');            // falls back to challenge_id
     expect(info.language).toBe('unknown');
-    expect(info.dependencies).toEqual([{ label: 'Good', check: 'node --version' }]);
+    expect(info.dependencies).toEqual([
+      { name: 'Legacy', minVersion: undefined, check: 'node --version', install: undefined },
+    ]);
+    expect(info.autoFetched).toEqual([]);
   });
 
-  test('tolerates a response with no dependencies field', async () => {
+  test('tolerates a response with no dependencies / auto_fetched fields', async () => {
     const payload = { challenge_id: 'c', title: 't', language: 'python' };
     mockHttpResponse({ statusCode: 200, body: JSON.stringify(payload) });
     const { preflightSession } = await import('../api');
     const info = await preflightSession('http://server:8080', 'KEY');
     expect(info.dependencies).toEqual([]);
+    expect(info.autoFetched).toEqual([]);
   });
 
   test('rejects on HTTP error (e.g. 404 unknown key)', async () => {

@@ -31,11 +31,11 @@
     "Deadlock avoidance and treatment of late-arriving readings"
   ],
   "tasks": [
-    {"id": "thread_safe_ingest",     "points": 25, "test_tag": "[thread]"},
-    {"id": "numerical_stability",    "points": 20, "test_tag": "[stats]"},
-    {"id": "spc_wiring",             "points": 15, "test_tag": "[spc]"},
-    {"id": "wafer_lifecycle",        "points": 15, "test_tag": "[lifecycle]"},
-    {"id": "excursion_reporter",     "points": 25, "test_tag": "[reporter]"}
+    {"id": "thread_safe_ingest",  "points": 25, "test_tag": "[thread]",    "description": "Concurrent sensor ingest loses no samples and stays race-free."},
+    {"id": "numerical_stability", "points": 20, "test_tag": "[stats]",     "description": "Running mean/stddev stay numerically stable (no NaN or zero variance)."},
+    {"id": "spc_wiring",          "points": 15, "test_tag": "[spc]",       "description": "SPC limit checks are correctly wired to chamber statistics."},
+    {"id": "wafer_lifecycle",     "points": 15, "test_tag": "[lifecycle]", "description": "Completed wafers are not resurrected by late readings."},
+    {"id": "excursion_reporter",  "points": 25, "test_tag": "[reporter]",  "description": "Excursion reporter drains pending events and joins cleanly on shutdown."}
   ],
   "composite_weights": {
     "test_score":  0.25,

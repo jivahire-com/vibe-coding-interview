@@ -48,7 +48,7 @@ async def pending_session(client):
     """A created-but-not-yet-validated session (status='pending')."""
     r = await client.post(
         "/api/v1/sessions",
-        json={"session_key": "PF-001", "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"},
+        json={"session_key": "PF-001", "candidate_email": "c@test.com", "challenge_id": "cpp-thread-safe-cache"},
         headers=_ADMIN,
     )
     assert r.status_code == 201
@@ -59,12 +59,18 @@ async def test_preflight_returns_language_and_dependencies(client, pending_sessi
     r = await client.post("/api/v1/session-preflight", json={"session_key": "PF-001"})
     assert r.status_code == 200
     data = r.json()
-    assert data["challenge_id"] == "cpp-lru-cache"
+    assert data["challenge_id"] == "cpp-thread-safe-cache"
     assert data["language"] == "cpp"
-    labels = [d["label"] for d in data["dependencies"]]
+    names = [d["name"] for d in data["dependencies"]]
     checks = [d["check"] for d in data["dependencies"]]
     assert "cmake --version" in checks
-    assert any("CMake" in lbl for lbl in labels)
+    assert any("CMake" in n for n in names)
+    # Nested toolchain shape carries a min_version and per-OS install hints.
+    cmake = next(d for d in data["dependencies"] if "CMake" in d["name"])
+    assert cmake["min_version"]
+    assert cmake["install"].get("debian")
+    # Catch2 is fetched by the build, surfaced as informational auto_fetched.
+    assert any("Catch2" in s for s in data["auto_fetched"])
 
 
 async def test_preflight_does_not_activate_session(client, pending_session):

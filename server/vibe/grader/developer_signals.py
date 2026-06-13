@@ -1,212 +1,138 @@
-"""Developer-confidence behavioral signal.
-
-Computes a 0–100 score indicating how strongly the candidate behaved like a
-practicing developer in the editor. Per Section 7.6 of the interview plan, this
-score is **not** included in the composite grade — it is a separate signal
-shown on the recruiter dashboard.
-
-Signals are split into:
-  Base (max 75 pts) — always scored; presence and quality both count.
-  Bonus (max 25 pts; today only +15) — presence-only, never penalizing absence.
-
-The two goto_definition / find_references bonus signals are reserved for a
-future iteration (the extension does not emit them yet); they appear in the
-returned `signals` dict as False for forward-compatibility.
 """
+Developer-signal rubric (GRADING_METRICS_MAP.md §2A) — scored on both tracks.
+
+"Did they behave like a developer?" — opens and reads the relevant files, and
+runs the tests. Folded into the /100 (weight 10) on both tracks; the debugger is
+a bonus that lifts this score and never penalises its absence.
+
+A pure consumer of Layer-2 :class:`signals.Signals`. The natural scale of the
+developer formula is 0-100; the rubric emits the equivalent 1-10 holistic
+(``score = dev_0_100 / 10``) so it flows through the same ×10 step as every other
+rubric in ``report.py``. The 0-100 value still maps to the recruiter verdict
+(developer ≥ 60, uncertain ≥ 35, else non-developer).
+"""
+
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from openai import OpenAI
+from vibe.grader.rubric_common import subpoint
+from vibe.grader.signals import Signals
 
-from vibe.db import query
-from vibe.grader.llm_eval import _commentary_call
-
-_CODE_KEYWORDS = (
-    "function", "variable", "line", "error", "type", "return",
-    "parameter", "import", "async", "null", "index", "array",
-    "object", "class", "method", "callback", "promise",
-)
-
-# Aligned to the extension's POST_APPLY_WINDOW_MS (telemetry.ts) so the grader
-# considers exactly the same edits the extension tagged with `post_apply_of`.
-# Previously this was 60s while the extension carried tags for 90s; the 30s
-# gap silently dropped legitimate post-apply edits from the modified-ratio.
-_POST_AI_EDIT_WINDOW_MS = 90_000
+_DEBUGGER_BONUS = 15
 
 
-def compute_developer_confidence(session_id: str, client: OpenAI) -> dict[str, Any]:
-    events = _load_events(session_id)
-    chat_prompts = _load_chat_prompts(session_id)
-
-    signals: dict[str, Any] = {}
-
-    files_opened = {
-        e["payload"].get("file")
-        for e in events
-        if e["event_type"] == "file_open" and e["payload"].get("file")
-    }
-    signals["files_explored"] = len(files_opened)
-    signals["files_explored_list"] = sorted(files_opened)
-
-    # Time-spent per file from file_focus events emitted by the extension on
-    # editor switch / window unfocus / dispose. A file with an open event but
-    # no focus events (e.g. flipped past too fast for the listener to fire) is
-    # still surfaced with 0 ms so the recruiter sees the full set.
-    file_time_ms: dict[str, int] = {f: 0 for f in files_opened if f}
-    for e in events:
-        if e["event_type"] != "file_focus":
-            continue
-        f = e["payload"].get("file")
-        ms = e["payload"].get("ms")
-        if not f or not isinstance(ms, (int, float)) or ms <= 0:
-            continue
-        file_time_ms[f] = file_time_ms.get(f, 0) + int(ms)
-    signals["files_explored_detail"] = [
-        {"file": f, "ms": ms}
-        for f, ms in sorted(file_time_ms.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
-
-    ai_inserts = [e for e in events if e["event_type"] == "edit_ai_applied"]
-    typed = [e for e in events if e["event_type"] == "edit_typed"]
-    # Char-weighted so the ratio reflects the FRACTION of AI output that the
-    # candidate reworked, not whether *any* keystroke followed an apply. The
-    # prior count-of-events formula reported 100% when a candidate typed a
-    # single comment after a 1,600-char AI apply — flagged in production by
-    # RAH-144. Each typed event counts at most once across all eligible
-    # applies on the same file.
-    ai_chars_total = sum(
-        int(ai["payload"].get("chars") or 0) for ai in ai_inserts
-    )
-    apply_ts_by_file: dict[str, list[int]] = {}
-    for ai_e in ai_inserts:
-        f = ai_e["payload"].get("file")
-        if f is None:
-            continue
-        apply_ts_by_file.setdefault(f, []).append(ai_e["ts"])
-
-    post_typed_chars = 0
-    for t_e in typed:
-        chars = int(t_e["payload"].get("chars") or 0)
-        if chars <= 0:
-            continue
-        for ai_ts in apply_ts_by_file.get(t_e["payload"].get("file"), ()):
-            dt = t_e["ts"] - ai_ts
-            if 0 < dt < _POST_AI_EDIT_WINDOW_MS:
-                post_typed_chars += chars
-                break
-
-    if ai_chars_total > 0:
-        signals["ai_output_modified_ratio"] = round(
-            min(post_typed_chars / ai_chars_total, 1.0), 2
-        )
+def score(signals: Signals, client: Any | None = None,
+          session_id: str | None = None) -> dict[str, Any]:
+    if signals.ai_assistance:
+        dev_0_100, subs = _vibe(signals)
     else:
-        signals["ai_output_modified_ratio"] = 0
+        dev_0_100, subs = _non_ai(signals)
 
-    if chat_prompts:
-        with_terms = sum(
-            1 for p in chat_prompts
-            if any(kw in p.lower() for kw in _CODE_KEYWORDS)
-        )
-        signals["prompt_specificity"] = round(with_terms / len(chat_prompts), 2)
-    else:
-        signals["prompt_specificity"] = None
-
-    signals["test_runs"] = sum(1 for e in events if e["event_type"] == "test_run")
-
-    # Terminal-command kinds (npm install, cmake --build, pytest, …) emitted by
-    # the extension's shell-integration listener. The grader surfaces install /
-    # build counts on the recruiter dashboard alongside test_runs so a recruiter
-    # can see whether the candidate exercised a realistic build/test loop.
-    terminal_events = [e for e in events if e["event_type"] == "terminal_command"]
-    signals["install_runs"] = sum(
-        1 for e in terminal_events if e["payload"].get("kind") == "install"
-    )
-    signals["build_runs"] = sum(
-        1 for e in terminal_events if e["payload"].get("kind") == "build"
-    )
-
-    base_score = (
-        min(signals["files_explored"] / 5, 1.0) * 15
-        + signals["ai_output_modified_ratio"] * 20
-        + (signals["prompt_specificity"] or 0) * 30
-        + min(signals["test_runs"] / 3, 1.0) * 10
-    )
-
-    signals["used_debugger"] = any(e["event_type"] == "debug_session" for e in events)
-    # Reserved for follow-up: emitted by extension once provider wrappers land.
-    signals["used_goto_definition"] = False
-    signals["used_find_references"] = False
-
-    bonus = 0
-    if signals["used_debugger"]:
-        bonus += 15
-    if signals["used_goto_definition"]:
-        bonus += 5
-    if signals["used_find_references"]:
-        bonus += 5
-
-    score = min(round(base_score + bonus), 100)
-
-    if score >= 60:
-        verdict = "developer"
-    elif score >= 35:
-        verdict = "uncertain"
-    else:
-        verdict = "non_developer"
-
-    reasoning = _build_reasoning(client, score, verdict, signals, session_id)
+    dev_0_100 = min(round(dev_0_100), 100)
+    verdict = "developer" if dev_0_100 >= 60 else "uncertain" if dev_0_100 >= 35 else "non_developer"
+    reasoning = _reasoning(client, dev_0_100, verdict, signals, session_id)
 
     return {
-        "score": score,
-        "verdict": verdict,
-        "base_score": round(base_score),
-        "bonus_score": bonus,
-        "signals": signals,
+        "score": round(dev_0_100 / 10.0, 2),   # 1-10 holistic; report ×10 → 0-100
+        "subpoints": subs,
+        "note": None,
+        "verdict_label": verdict,
+        "dev_score_0_100": dev_0_100,
         "reasoning": reasoning,
     }
 
 
-def _load_events(session_id: str) -> list[dict[str, Any]]:
-    rows = query(
-        "SELECT ts, event_type, payload FROM telemetry WHERE session_id=? ORDER BY ts",
-        (session_id,),
-    )
-    out = []
-    for r in rows:
-        try:
-            payload = json.loads(r["payload"]) if isinstance(r["payload"], str) else (r["payload"] or {})
-        except Exception:
-            payload = {}
-        out.append({"ts": r["ts"], "event_type": r["event_type"], "payload": payload})
-    return out
+def _vibe(s: Signals) -> tuple[float, list[dict[str, Any]]]:
+    files = min(s.files_explored / 5, 1.0)
+    rework = s.ai_output_modified_ratio
+    spec = s.prompt_specificity or 0.0
+    tests = min(s.test_runs / 3, 1.0)
+
+    base = files * 15 + rework * 20 + spec * 30 + tests * 10  # max 75
+    bonus = _DEBUGGER_BONUS if s.used_debugger else 0
+    total = base + bonus
+
+    subs = [
+        subpoint("files_explored", "Reads the relevant files.",
+                 files * 10, f"Opened {s.files_explored} file(s)."),
+        subpoint("ai_output_modified_ratio", "Reworks AI output rather than rubber-stamping it.",
+                 rework * 10, f"Edited {round(rework * 100)}% of accepted AI characters."),
+        subpoint("prompt_specificity", "Prompts are specific, not vague.",
+                 (spec * 10) if s.prompt_specificity is not None else None,
+                 _spec_detail(s.prompt_specificity)),
+        subpoint("test_runs", "Runs the test suite during the session.",
+                 tests * 10, f"Ran the suite {s.test_runs} time(s)."),
+        _debugger_subpoint(s.used_debugger),
+    ]
+    return total, subs
 
 
-def _load_chat_prompts(session_id: str) -> list[str]:
-    rows = query(
-        "SELECT prompt_text FROM chat_exchanges WHERE session_id=? AND prompt_text IS NOT NULL",
-        (session_id,),
-    )
-    return [r["prompt_text"] for r in rows if r["prompt_text"]]
+def _non_ai(s: Signals) -> tuple[float, list[dict[str, Any]]]:
+    files = min(s.files_explored / 5, 1.0)
+    tests = min(s.test_runs / 3, 1.0)
+    base = files * 37.5 + tests * 37.5  # rescaled to fill the 75-pt base
+    bonus = _DEBUGGER_BONUS if s.used_debugger else 0
+    total = base + bonus
+
+    subs = [
+        subpoint("files_explored", "Reads the relevant files.",
+                 files * 10, f"Opened {s.files_explored} file(s)."),
+        subpoint("test_runs", "Runs the test suite during the session.",
+                 tests * 10, f"Ran the suite {s.test_runs} time(s)."),
+        _debugger_subpoint(s.used_debugger),
+    ]
+    return total, subs
 
 
-def _build_reasoning(client: OpenAI, score: int, verdict: str,
-                      signals: dict, session_id: str) -> str:
+def _debugger_subpoint(used: bool) -> dict[str, Any]:
+    return {
+        "key": "debugger_bonus",
+        "checks": "Bonus — used the debugger to investigate.",
+        "verdict": "strong" if used else "missing",
+        "detail": ("Started the debugger; lifts this score (never a penalty if absent)."
+                   if used else "Debugger not used — observation only, no penalty."),
+    }
+
+
+def _spec_detail(spec: float | None) -> str:
+    if spec is None:
+        return "No chat prompts recorded."
+    return f"{round(spec * 100)}% of prompts used code-specific terms."
+
+
+def _reasoning(client: Any | None, dev_0_100: int, verdict: str,
+               s: Signals, session_id: str | None) -> str:
+    fallback = f"Behavioral signal: {verdict} ({dev_0_100}/100)."
+    if client is None:
+        return fallback
+    from vibe.grader.llm_eval import _commentary_call
     prompt = (
-        "You are summarizing behavioral evidence about whether a candidate behaved "
-        "like a practicing developer during a coding interview. Write 1-2 plain "
-        "sentences explaining the verdict from the signals below. Do not invent "
-        "facts; only describe what the signals show. Do not output a score.\n\n"
-        f"Verdict: {verdict} (score {score}/100)\n"
-        f"Files explored: {signals['files_explored']}\n"
-        f"Fraction of AI-applied chars reworked by typing within 90s: {signals['ai_output_modified_ratio']}\n"
-        f"Fraction of chat prompts using code-specific terms: {signals['prompt_specificity']}\n"
-        f"Test runs: {signals['test_runs']}\n"
-        f"Used debugger: {signals['used_debugger']}\n"
+        "Summarise in 1-2 plain sentences whether a candidate behaved like a practicing "
+        "developer during a coding interview, from the signals below. Do not invent facts; "
+        "do not output a score.\n\n"
+        f"Verdict: {verdict} ({dev_0_100}/100)\n"
+        f"Files explored: {s.files_explored}\n"
+        f"AI output reworked: {s.ai_output_modified_ratio}\n"
+        f"Prompt specificity: {s.prompt_specificity}\n"
+        f"Test runs: {s.test_runs}\n"
+        f"Used debugger: {s.used_debugger}\n"
     )
-    return _commentary_call(
-        client, prompt,
-        fallback=f"Behavioral signal: {verdict} ({score}/100).",
-        session_id=session_id,
-    )
+    return _commentary_call(client, prompt, fallback=fallback, session_id=session_id)
+
+
+def debugger_bonus(signals: Signals) -> dict[str, Any]:
+    """Report bonus card for debugger usage (lifts developer signal)."""
+    used = signals.used_debugger
+    return {
+        "key": "debugger",
+        "title": "Debugger usage",
+        "attempted": used,
+        "lifts": "developer signal",
+        "note": (
+            "Started the debugger to investigate. Counts as a bonus that lifts the "
+            "developer-signal score — skipping it is never a penalty."
+            if used else
+            "Debugger not used. Reported as an observation only — never a penalty."
+        ),
+    }

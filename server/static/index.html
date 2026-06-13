@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>JivaHire Dashboard</title>
-  <link rel="stylesheet" href="/style.css?v=20260601-4" />
+  <link rel="stylesheet" href="/style.css?v=20260613-1" />
   <script>
     // Apply theme before render to prevent flash. App.toggleTheme() updates it later.
     (function () {
@@ -19,7 +19,7 @@
        navigation, but app.js/style.css are served with only ETag/Last-Modified
        (no Cache-Control), so browsers heuristically reuse a stale copy. Bumping
        ?v= forces a fresh fetch. Increment it whenever app.js/style.css change. -->
-  <script src="/app.js?v=20260601-4"></script>
+  <script src="/app.js?v=20260613-1"></script>
 </head>
 <body x-data="App" x-init="init()">
 
@@ -210,9 +210,11 @@
         <!-- Hero -->
         <div class="detail-hero">
           <div>
-            <div class="hero-score" :class="scoreCssClass(selectedSession.grade?.total_score)">
-              <span x-text="selectedSession.grade ? Number(selectedSession.grade.total_score).toFixed(1) : '—'"></span>
-              <span class="hero-denom" x-show="selectedSession.grade">/10</span>
+            <!-- Score is now on the 0-100 scale (report.overall.score, mirrored
+                 by the flat grade.total_score). Prefer the report's value/band. -->
+            <div class="hero-score" :class="scoreCssClass((selectedSession.report?.overall?.score ?? selectedSession.grade?.total_score) / 10)">
+              <span x-text="(selectedSession.report?.overall?.score ?? selectedSession.grade?.total_score) != null ? (selectedSession.report?.overall?.score ?? selectedSession.grade.total_score) : '—'"></span>
+              <span class="hero-denom" x-show="(selectedSession.report?.overall?.score ?? selectedSession.grade?.total_score) != null">/100</span>
             </div>
           </div>
           <div class="hero-meta">
@@ -287,93 +289,8 @@
             </div>
           </template>
 
-          <!-- Developer Signal (behavioral — NOT part of the score) -->
-          <div class="card">
-            <h3>Developer Signal</h3>
-            <p class="text-sm text-muted" style="margin:-4px 0 10px">
-              Behavioral signal — does not affect the score.
-            </p>
-            <template x-if="selectedSession.grade && selectedSession.grade.developer_confidence_score !== null && selectedSession.grade.developer_confidence_score !== undefined">
-              <div>
-                <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-                  <div style="font-size:32px;font-weight:600" x-text="`${selectedSession.grade.developer_confidence_score}/100`"></div>
-                  <span class="badge"
-                        :class="devConfidenceBadgeClass(selectedSession.grade.developer_confidence_verdict)"
-                        x-text="selectedSession.grade.developer_confidence_verdict"></span>
-                </div>
-                <p class="text-sm" style="margin:0 0 10px" x-text="selectedSession.grade.developer_confidence_reasoning || ''"></p>
-                <div x-data="{ sigs: parseDevConfidenceSignals(selectedSession.grade.developer_confidence_signals) }">
-                  <div class="text-sm text-muted" style="margin-top:12px;margin-bottom:6px">Signal breakdown</div>
-                  <div class="stat-grid">
-                    <div class="stat-item">
-                      <div class="stat-label">Files explored</div>
-                      <div class="stat-val" x-text="sigs.files_explored ?? '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">AI output modified</div>
-                      <div class="stat-val" x-text="sigs.ai_output_modified_ratio !== undefined ? `${Math.round(sigs.ai_output_modified_ratio * 100)}%` : '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">Prompt specificity</div>
-                      <div class="stat-val" x-text="sigs.prompt_specificity !== null && sigs.prompt_specificity !== undefined ? `${Math.round(sigs.prompt_specificity * 100)}%` : '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">Test runs</div>
-                      <div class="stat-val" x-text="sigs.test_runs ?? '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">Builds</div>
-                      <div class="stat-val" x-text="sigs.build_runs ?? '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">Installs</div>
-                      <div class="stat-val" x-text="sigs.install_runs ?? '—'"></div>
-                    </div>
-                    <div class="stat-item">
-                      <div class="stat-label">Used debugger</div>
-                      <div class="stat-val" x-text="sigs.used_debugger ? 'yes' : 'no'"></div>
-                    </div>
-                  </div>
-                  <template x-if="Array.isArray(sigs.files_explored_detail) && sigs.files_explored_detail.length > 0">
-                    <div style="margin-top:12px">
-                      <div class="text-sm text-muted" style="margin-bottom:6px">Files opened</div>
-                      <div style="max-height:220px;overflow-y:auto;border:1px solid var(--border, #e5e7eb);border-radius:4px">
-                        <table style="width:100%;border-collapse:collapse;font-family:monospace;font-size:12px">
-                          <thead>
-                            <tr style="background:var(--bg-subtle, #f9fafb);position:sticky;top:0">
-                              <th style="text-align:left;padding:6px 10px;font-weight:600">File</th>
-                              <th style="text-align:right;padding:6px 10px;font-weight:600;white-space:nowrap">Time spent</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            <template x-for="row in sigs.files_explored_detail" :key="row.file">
-                              <tr style="border-top:1px solid var(--border, #e5e7eb)">
-                                <td style="padding:4px 10px" x-text="row.file"></td>
-                                <td style="padding:4px 10px;text-align:right;white-space:nowrap" x-text="fmtDuration(row.ms)"></td>
-                              </tr>
-                            </template>
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </template>
-                  <template x-if="(!sigs.files_explored_detail || sigs.files_explored_detail.length === 0) && Array.isArray(sigs.files_explored_list) && sigs.files_explored_list.length > 0">
-                    <div style="margin-top:12px">
-                      <div class="text-sm text-muted" style="margin-bottom:6px">Files opened</div>
-                      <ul style="margin:0;padding-left:18px;font-family:monospace;font-size:12px;line-height:1.5;max-height:180px;overflow-y:auto">
-                        <template x-for="f in sigs.files_explored_list" :key="f">
-                          <li x-text="f"></li>
-                        </template>
-                      </ul>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </template>
-            <template x-if="!selectedSession.grade || selectedSession.grade.developer_confidence_score === null || selectedSession.grade.developer_confidence_score === undefined">
-              <p class="text-muted" style="font-size:13px">Not yet computed.</p>
-            </template>
-          </div>
+          <!-- Developer signal now lives inside the structured report as the
+               `developer_signal` rubric, rendered in the grade view below. -->
         </div>
 
         <!-- Score grids -->
@@ -465,52 +382,14 @@
 
         </div>
 
-        <!-- Score Breakdown + Grader Summary (always rendered in canonical
-             COMPOSITE_WEIGHTS order — reasoning line sits under each row so
-             the score and its justification can never drift apart) -->
-        <div class="card breakdown-card">
-          <div class="breakdown-header">
-            <h3>Score Breakdown</h3>
-            <template x-if="selectedSession.grade">
-              <span class="breakdown-total" :class="scoreCssClass(selectedSession.grade.total_score)">
-                <span x-text="Number(selectedSession.grade.total_score).toFixed(1)"></span><span class="breakdown-total-denom">/10</span>
-              </span>
-            </template>
-          </div>
-          <template x-if="selectedSession.grade && gradeNoShow(selectedSession.grade)">
-            <p style="margin:0 0 14px;padding:9px 13px;border-radius:6px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-size:13px;font-weight:500"
-               x-text="gradeNoShow(selectedSession.grade)"></p>
-          </template>
-          <template x-if="selectedSession.grade">
-            <div x-data="{ reasons: summaryReasonByLabel(selectedSession.grade) }">
-              <template x-for="dim in scoreDimensions" :key="dim.key">
-                <div class="score-dim">
-                  <div class="score-row">
-                    <span class="score-label">
-                      <span x-text="dim.label"></span>
-                      <span class="score-weight" x-text="`${dim.weight}%`"></span>
-                    </span>
-                    <div class="score-bar-wrap">
-                      <div class="score-bar"
-                           :class="scoreColor(dimensionScore(selectedSession.grade, dim))"
-                           :style="`width:${scoreBarWidth(dimensionScore(selectedSession.grade, dim))}`"></div>
-                    </div>
-                    <span class="score-val"
-                          :class="dim.kind === 'fraction' ? 'text-muted' : scoreCssClass(dimensionScore(selectedSession.grade, dim))"
-                          x-text="dimensionDisplay(selectedSession.grade, dim)"></span>
-                    <span class="info-icon" :title="dim.tip">i</span>
-                  </div>
-                  <p class="score-reason" x-show="reasons[dim.label]"
-                     x-data="{ get parts() { return parseReasonParts(reasons[dim.label] || ''); } }"
-                  ><span x-text="parts.prefix"></span><span class="criterion-term" x-show="parts.term" :title="parts.glossary" x-text="parts.term"></span><span x-text="parts.suffix"></span></p>
-                </div>
-              </template>
-            </div>
-          </template>
-          <template x-if="!selectedSession.grade">
-            <p class="text-muted" style="font-size:13px">Not yet graded.</p>
-          </template>
-        </div>
+        <!-- Structured grade report (GRADING_METRICS_MAP.md §5). The whole view
+             — overall score+band+track, summary points, the two rubric sections
+             (every rubric shown; N/A rubrics rendered as N/A), bonuses, and the
+             telemetry catalogue — is built in app.js (gradeReportHtml) from
+             data.report and injected here. Falls back to the flat grade headline
+             when report is null, or a grading-in-progress notice when there is no
+             grade at all. -->
+        <div x-html="gradeReportHtml(selectedSession)"></div>
 
         <!-- Candidate Prompts -->
         <div class="card prompts-card" x-data="{ expanded: {} }">

@@ -149,9 +149,19 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
         raise HTTPException(403, f"Session is {session['status']}")
 
     rows = query(
-        "SELECT llm_spent_usd, llm_budget_usd, challenge_id FROM sessions WHERE id=?",
+        "SELECT llm_spent_usd, llm_budget_usd, challenge_id, ai_assistance FROM sessions WHERE id=?",
         (session["id"],),
     )
+    # Normal coding interview: the AI chat is disabled in the extension, but
+    # refuse here too so a tampered client can't reach the model regardless.
+    if not bool(rows[0].get("ai_assistance", 1)):
+        log.warning(
+            "ai_disabled_chat_blocked",
+            extra={"context": {"challenge_id": rows[0]["challenge_id"]}},
+        )
+        raise HTTPException(403, {"error": "ai_disabled",
+                                  "message": "AI is not available for this interview"})
+
     spent = rows[0]["llm_spent_usd"]
     budget = rows[0]["llm_budget_usd"]
     challenge_id = rows[0]["challenge_id"]
@@ -250,6 +260,30 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
 
             if not aborted:
                 yield "data: [DONE]\n\n"
+
+        except Exception:
+            # The upstream call failed (oversized prompt, auth, rate limit,
+            # model error, …). We've already sent a 200 with the SSE media
+            # type, so the status code can't change — emit an in-band error
+            # event instead of letting the stream close empty, which the
+            # client rendered as a blank assistant turn (silent failure).
+            # Log the full detail server-side; hand the client only a safe,
+            # generic message.
+            log.exception(
+                "chat_upstream_error",
+                extra={"context": {"model": model_to_use, "challenge_id": challenge_id}},
+            )
+            yield (
+                "data: "
+                + json.dumps({
+                    "error": "upstream_error",
+                    "code": 502,
+                    "message": "The AI service rejected the request. Please retry; "
+                               "if it keeps happening, contact your recruiter.",
+                })
+                + "\n\n"
+            )
+            yield "data: [DONE]\n\n"
 
         finally:
             if prompt_tokens > 0 or completion_tokens > 0:

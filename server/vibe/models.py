@@ -29,6 +29,13 @@ class CreateSessionRequest(BaseModel):
     # verify identity live. When True, the candidate is asked to record an
     # explainer after submitting even if a meet link is set.
     require_end_video: bool = False
+    # Whether the candidate has the AI chat assistant during the interview.
+    # True (default) is the original "vibe coding" experience: AI chat + LLM
+    # proxy + AI-usage grading. False is a "normal coding" interview — no AI
+    # chat in the editor, the LLM proxy refuses chat, and the AI-interaction
+    # grading dimensions are dropped (see grader/runner.py). Orthogonal to
+    # panel vs async: a normal interview can still be a panel or async session.
+    ai_assistance: bool = True
     # Organization tag set by the recruiter-backend proxy. Used only to scope
     # admin list/detail queries to a single org; never surfaced to candidates.
     org_id: str | None = None
@@ -127,6 +134,10 @@ class ValidateSessionResponse(BaseModel):
     # submitting. Resolved server-side from the feature flag + per-session
     # override so the extension can surface an upfront notice in the dashboard.
     require_end_video: bool = False
+    # Whether this session grants the AI chat assistant. False ⇒ "normal coding"
+    # interview: the extension hides/disables the AI chat and the LLM proxy
+    # refuses chat. Defaults True so older servers/extensions keep AI on.
+    ai_assistance: bool = True
     # Coding language of the assigned challenge (from .jivahire/metadata.json).
     # Lets the extension show a language badge on the session brief after a
     # workspace reopen, when the pre-clone preflight is no longer in play.
@@ -135,11 +146,17 @@ class ValidateSessionResponse(BaseModel):
 
 class Dependency(BaseModel):
     # Human-readable tool name shown to the candidate (e.g. "CMake").
-    label: str
+    name: str
+    # Minimum acceptable version, free-form (e.g. "3.14" or "GCC 11+, Clang 14+").
+    # Display-only — the extension shows it but does not parse or enforce it.
+    min_version: str | None = None
     # A `<tool> <flag>` command the extension runs to verify the tool is
     # installed (e.g. "cmake --version"). Executed without a shell on the
     # candidate's machine — see runDependencyChecks in the extension.
     check: str
+    # Per-OS install hints keyed by platform ("macos", "debian", "windows"),
+    # surfaced when the check fails. Optional.
+    install: dict[str, str] = {}
 
 
 class SessionPreflightRequest(BaseModel):
@@ -154,6 +171,9 @@ class SessionPreflightResponse(BaseModel):
     title: str
     language: str = "unknown"
     dependencies: list[Dependency] = []
+    # Tooling fetched automatically by the build (e.g. "Catch2 v3 — fetched by
+    # CMake on first build"). Informational; no install check is run for these.
+    auto_fetched: list[str] = []
 
 
 class ChatMessage(BaseModel):

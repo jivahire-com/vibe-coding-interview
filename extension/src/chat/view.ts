@@ -125,6 +125,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   setConfig(config: SessionConfig): void {
+    // Normal coding interview (no AI): never wire up the chat. Leaving config
+    // unset keeps render() a no-op, so even if the view is somehow shown it has
+    // nothing to talk to. The proxy also refuses chat server-side.
+    if (!config.aiAssistance) {
+      this.config = undefined;
+      return;
+    }
     this.config = config;
     this.selectedModel = config.availableChatModels[0] ?? config.chatModel;
     void this.refreshWorkspaceFiles();
@@ -322,7 +329,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       await this.streamChat(config, this.messages, requestModel, attachmentBlock, (chunk) => {
-        if (chunk.error) { budgetExhausted = true; return; }
+        if (chunk.error) {
+          // 402 is the budget channel; anything else is an upstream failure
+          // the proxy surfaced in-band (it had already sent a 200, so it
+          // couldn't use an HTTP error). Show the real message rather than a
+          // misleading "budget exhausted" notice, and let the candidate retry.
+          if (chunk.code === 402 || chunk.error === "budget_exhausted_midstream") {
+            budgetExhausted = true;
+          } else {
+            errorMessage = chunk.message || "AI service error — please retry.";
+            errorStatus = typeof chunk.code === "number" ? chunk.code : 0;
+          }
+          return;
+        }
         const delta = chunk.choices?.[0]?.delta?.content;
         if (delta) {
           assistantText += delta;
@@ -1107,9 +1126,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   function send() {
     const inp = getInp();
     if (!inp || inp.hasAttribute('disabled')) return;
-    const text = (inp.value || '').trim();
+    // Read via getInpValue(): on the <vscode-text-area> web component the typed
+    // text lives in the shadow-DOM <textarea>, and inp.value is sometimes
+    // undefined. Reading inp.value directly made (inp.value||'').trim() === ''
+    // so send() bailed at the guard below and the prompt was silently dropped —
+    // the candidate hit Enter and nothing appeared.
+    const text = (getInpValue() || '').trim();
     if (!text) return;
-    inp.value = '';
+    setInpValue('');
     vscode.postMessage({ command: 'send', text });
   }
 
@@ -1132,7 +1156,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   function useChip(text) {
     const inp = getInp();
     if (!inp || inp.hasAttribute('disabled')) return;
-    inp.value = text;
+    setInpValue(text);
     inp.focus();
   }
 
@@ -1180,7 +1204,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // send; on error we never re-populated it before, which forced a re-type.
       const inp = getInp();
       if (inp && typeof text === 'string') {
-        inp.value = text;
+        setInpValue(text);
         inp.focus();
       }
     }

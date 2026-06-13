@@ -71,13 +71,14 @@ function makeConfig(): SessionConfig {
     llmProxyUrl: "http://server.test:1234",
     maxMinutes: 90,
     llmBudgetUsd: 2,
-    challengeId: "cpp-lru-cache",
+    challengeId: "cpp-thread-safe-cache",
     challengeDescription: "",
     language: "cpp",
     chatModel: "openai/gpt-4o-mini",
     availableChatModels: ["openai/gpt-4o-mini"],
     startedAt: Date.now(),
     pricingPerMillion: {},
+    aiAssistance: true,
   };
 }
 

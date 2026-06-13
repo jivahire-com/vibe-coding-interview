@@ -322,9 +322,9 @@ The Architectural Reasoning and Code Quality criteria above apply to every chall
 
 ---
 
-### Challenge: Thread-Safe LRU Cache (`cpp-lru-cache`)
+### Challenge: Thread-Safe Cache (`cpp-thread-safe-cache`)
 
-**Language:** C++ | **Difficulty:** Mid | **Estimated time:** 45 min | **Time limit:** 90 min
+**Language:** C++ | **Difficulty:** Mid | **Estimated time:** 45 min | **Time limit:** 60 min
 
 **Task:** Make an existing LRU cache thread-safe and fix planted bugs in eviction and edge-case handling. Get/put must remain O(1).
 
@@ -344,13 +344,17 @@ The Architectural Reasoning and Code Quality criteria above apply to every chall
 | Trap | Description | Points |
 |---|---|---|
 | Race condition | `get`/`put` mutate `std::list` and `std::unordered_map` without synchronisation. | 20 |
+| Shared-lock on mutating `get` | The "read-heavy" framing baits `std::shared_mutex` + `std::shared_lock` on `get()`, but `get()` promotes the entry (splices the list) and so mutates state — a `shared_lock` here is a data race. Only an exclusive lock in `get()` is correct. | 15 |
 | Off-by-one eviction | Eviction loop uses `> capacity` instead of `>= capacity`; cache grows one entry beyond limit. | 10 |
 | Capacity-zero no-op | `capacity=0`: eviction check `(0 > 0)` is false, so the first `put` inserts an entry instead of being a no-op. | 10 |
 
+> Both thread traps share the `[thread]` detection tag: it passes only when a mutex is present **and** `get()` holds an exclusive lock, so a `shared_lock`-on-`get()` design leaves the tag red (caught by the `concurrent reads of shared keys are race-free` hidden test under ThreadSanitizer).
+
 **Challenge-Specific Architectural Criteria** (in addition to the shared Architectural Reasoning criteria):
 
-- Synchronisation primitive choice (`std::mutex` vs `std::shared_mutex`)
-- Const-correctness of locking strategy (e.g. `size()` under shared lock)
+- Synchronisation primitive choice (`std::mutex` is the correct default; `std::shared_mutex` + `std::shared_lock` on `get()` is the planted trap, since `get()` mutates)
+- Const-correctness of locking strategy (e.g. `size()` under the lock with a `mutable` mutex)
+- Optional bonus: a thread-safe real-world extension (observability counter, staleness/TTL, eviction callback) documented in `NOTES.md`
 
 ---
 

@@ -19,6 +19,7 @@ export function makeConfig(overrides: Partial<SessionConfig> = {}): SessionConfi
     availableChatModels: ['openai/gpt-4o-mini', 'openai/gpt-4o'],
     startedAt: Date.now(),
     pricingPerMillion: { ...DEFAULT_MODEL_PRICING },
+    aiAssistance: true,
     ...overrides,
   };
 }

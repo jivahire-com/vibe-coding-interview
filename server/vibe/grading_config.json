@@ -1,55 +1,163 @@
 {
-  "$schema_version": "1.0",
-  "_comment": "Pinned config for all LLM grader evaluations. Weights match GRADING_RUBRICS.md; re-graded sessions must use the same model_version + weights to be comparable.",
+  "$schema_version": "2.0",
+  "_comment": "Pinned config for the grader. Weights and rubric definitions follow GRADING_METRICS_MAP.md. The weights are the /100 split per track (vibe = 9 rubrics, non_ai = 7). LLM-scored rubrics run ONCE at temperature 0 (self_consistency_n = 1) and return ONE holistic 1-10 score plus a strong/weak/missing verdict per criterion — never a number per criterion. The backend multiplies every 1-10 score by 10 once, so the page reads a single 0-100 scale and does no arithmetic.",
 
   "model": {
     "name": "openai/gpt-4o-mini",
     "version": "2024-07-18",
     "temperature": 0,
-    "self_consistency_n": 3,
+    "self_consistency_n": 1,
     "max_tokens": 1200
   },
 
-  "code_quality": {
-    "weight_in_composite": 0.15,
-    "criteria": {
-      "correctness":      {"weight": 0.30, "description": "Passes hidden tests, fixes planted traps"},
-      "idiomatic":        {"weight": 0.20, "description": "Proper language conventions, standard library use"},
-      "clarity":          {"weight": 0.15, "description": "Readable structure, well-named identifiers"},
-      "edge_cases":       {"weight": 0.15, "description": "Robust failure modes, boundary conditions"},
-      "no_ai_defects":    {"weight": 0.20, "description": "No new races, security holes, hallucinated APIs, or unnecessary abstractions from AI"}
-    }
-  },
-
-  "llm_communication": {
-    "weight_in_composite": 0.17,
-    "criteria": {
-      "context_framing":     {"weight": 0.25, "description": "Provides file contents, errors, constraints upfront"},
-      "constraint_spec":     {"weight": 0.15, "description": "Explicit requirements (O(1), thread-safe, no allocations)"},
-      "decomposition":       {"weight": 0.20, "description": "Breaks complex tasks into 2-3 focused prompts"},
-      "iterative_refinement":{"weight": 0.15, "description": "Specific feedback on wrong output ('line 12 has a race because...')"},
-      "debug_loop":          {"weight": 0.15, "description": "After test failure, includes failing assertion + relevant snippet"},
-      "token_discipline":    {"weight": 0.10, "description": "Tokens proportionate to problem (0.5-2x baseline)"}
+  "weights": {
+    "vibe": {
+      "tests": 18,
+      "traps": 11,
+      "code_quality": 13,
+      "architectural_reasoning": 9,
+      "challenge_specific": 5,
+      "verification_discipline": 12,
+      "ai_judgment": 7,
+      "llm_communication": 15,
+      "developer_signal": 10
     },
-    "prompt_classification_ladder": {
-      "5": "Model-native: minimal-but-sufficient context, structured prompts, 1-2 tries",
-      "4": "Professional: cites exact errors, types, line numbers; 2-3 iterations max",
-      "3": "Competent: clear problems, some context, occasional back-and-forth",
-      "2": "Naive: generic descriptions, over-relies on model to figure out intent",
-      "1": "Counterproductive: massive dumps, 'fix this', no context"
+    "non_ai": {
+      "tests": 22,
+      "traps": 14,
+      "code_quality": 17,
+      "architectural_reasoning": 14,
+      "challenge_specific": 9,
+      "verification_discipline": 14,
+      "developer_signal": 10
     }
   },
 
-  "architectural_reasoning": {
-    "weight_in_composite": 0.10,
-    "criteria": {
-      "why_before_how":      {"weight": 0.15, "description": "Asks 'what are the tradeoffs of X vs Y' before 'implement Z'"},
-      "algorithm_choice":    {"weight": 0.15, "description": "Only credited if candidate selected the algorithm (not starter)"},
-      "data_structure_choice":{"weight": 0.15, "description": "Only credited if candidate selected the structure (not starter)"},
-      "concurrency_design":  {"weight": 0.25, "description": "Lock placement, primitive choice, deadlock avoidance"},
-      "edge_case_awareness": {"weight": 0.15, "description": "Boundary handling, capacity constraints, unexpected inputs"},
-      "constraint_driven":   {"weight": 0.10, "description": "Solution respects stated constraints because candidate specified them"},
-      "not_over_engineered": {"weight": 0.05, "description": "Didn't add AI-suggested abstractions the problem doesn't need"}
+  "rubrics": {
+    "tests": {
+      "title": "Does the code work?",
+      "label": "tests",
+      "kind": "deterministic",
+      "section": "engineering",
+      "good": "Passes every hidden check — the basic behaviour, the core mechanism under load, and the edge cases.",
+      "bad": "Tests fail — wrong results, races, or breakage at the boundaries."
+    },
+    "traps": {
+      "title": "Did they fix the planted bugs?",
+      "label": "traps",
+      "kind": "deterministic",
+      "section": "engineering",
+      "good": "The deliberately planted bugs are caught and fixed.",
+      "bad": "The planted bugs are left in the code."
+    },
+    "code_quality": {
+      "title": "Is the final code clean and correct?",
+      "label": "code quality",
+      "kind": "llm",
+      "section": "engineering",
+      "good": "Correct, idiomatic, readable, handles edge cases, no new defects.",
+      "bad": "Incorrect, awkward, unclear, misses edge cases, or introduces defects.",
+      "criteria": {
+        "correctness": "Does it work — passes tests, fixes traps.",
+        "idiomatic": "Uses the language the normal way — standard library and conventions.",
+        "clarity": "Easy to read, well named.",
+        "edge_cases": "Handles boundaries and failure.",
+        "no_ai_defects": "No new races, hallucinated APIs, leaked secrets, or needless abstractions."
+      }
+    },
+    "architectural_reasoning": {
+      "title": "Did they make sound design decisions?",
+      "label": "architectural reasoning",
+      "kind": "llm",
+      "section": "engineering",
+      "good": "Weighed trade-offs before coding, got this challenge's core mechanism right, thought about boundaries, kept it simple.",
+      "bad": "No rationale, the core mechanism is unsafe or missing, ignores constraints, or over-engineered.",
+      "criteria": {
+        "why_before_how": "Decided the approach before coding.",
+        "algorithm_choice": "Picked a sensible algorithm (credited only if the candidate chose it, not the starter).",
+        "data_structure_choice": "Picked a sensible data structure (credited only if the candidate chose it, not the starter).",
+        "core_mechanism_design": "Got the central hard part of THIS challenge right — lock placement for a cache, monotonic-time correctness for a TTL, backpressure for a rate limiter, and so on.",
+        "edge_case_awareness": "Thought about boundaries.",
+        "constraint_driven": "Respected the stated limits.",
+        "not_over_engineered": "Kept it as simple as the problem needs."
+      }
+    },
+    "challenge_specific": {
+      "title": "Did they handle this challenge's specifics?",
+      "label": "challenge-specific",
+      "kind": "deterministic",
+      "section": "engineering",
+      "good": "Reaches for the right primitive and keeps the small, challenge-specific calls correct.",
+      "bad": "Misses the challenge-specific call — wrong primitive or a detail that won't compile/run correctly."
+    },
+    "verification_discipline": {
+      "title": "Did they check their own work?",
+      "label": "verification discipline",
+      "kind": "deterministic",
+      "section": "engineering",
+      "good": "Runs the tests as they go, reviews changes instead of trusting them blindly, and runs the tests once more before submitting.",
+      "bad": "Never runs the tests, accepts code without checking, or submits untested."
+    },
+    "developer_signal": {
+      "title": "Did they behave like a developer?",
+      "label": "developer signal",
+      "kind": "deterministic",
+      "section": "engineering",
+      "good": "Opens and reads the relevant files, and runs the tests.",
+      "bad": "Minimal engagement — barely opens files and never runs tests."
+    },
+    "ai_judgment": {
+      "title": "Did they judge the AI's output?",
+      "label": "AI judgment",
+      "kind": "deterministic",
+      "section": "ai_collaboration",
+      "good": "Rejects wrong AI suggestions, edits AI code after accepting it, recovers from bad changes.",
+      "bad": "Accepts everything the AI produces without question."
+    },
+    "llm_communication": {
+      "title": "Did they instruct the AI clearly?",
+      "label": "LLM communication",
+      "kind": "llm",
+      "section": "ai_collaboration",
+      "good": "Gives the AI the context it needs, states constraints, breaks work into focused prompts, and gives specific feedback when the AI is wrong.",
+      "bad": "Vague one-liners like \"fix the bugs\" with no context and no follow-up.",
+      "criteria": {
+        "context_framing": "Gave the AI the context it needed.",
+        "constraint_spec": "Stated the constraints.",
+        "decomposition": "Broke the work into focused prompts.",
+        "iterative_refinement": "Built on previous answers instead of restarting.",
+        "debug_loop": "Gave specific feedback when the AI was wrong.",
+        "token_discipline": "Kept prompts efficient vs the budget."
+      }
     }
+  },
+
+  "bonuses": {
+    "debugger": {
+      "title": "Debugger usage",
+      "lifts": "developer signal",
+      "good": "Started the debugger (and used code navigation) to investigate the problem — rewarded most heavily of all the developer signals.",
+      "bad": "Nothing counts as bad — skipping the debugger carries no penalty."
+    },
+    "product_sense": {
+      "title": "Product-sense bonus",
+      "lifts": "architectural reasoning",
+      "good": "Picks a real user/operator need, builds a safe, tested change for it, and writes a clear NOTES.md.",
+      "bad": "Nothing counts as bad — skipping the bonus carries no penalty.",
+      "criteria": {
+        "real_need": "Identified a real user/operator need.",
+        "justified_choice": "Explained why this over alternatives.",
+        "thread_safe": "Kept any new state safe under concurrency.",
+        "proven_by_tests": "Showed the new behaviour works with tests."
+      }
+    }
+  },
+
+  "prompt_classification_ladder": {
+    "5": "Model-native: minimal-but-sufficient context, structured prompts, 1-2 tries",
+    "4": "Professional: cites exact errors, types, line numbers; 2-3 iterations max",
+    "3": "Competent: clear problems, some context, occasional back-and-forth",
+    "2": "Naive: generic descriptions, over-relies on model to figure out intent",
+    "1": "Counterproductive: massive dumps, 'fix this', no context"
   }
 }

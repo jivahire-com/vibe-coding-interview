@@ -5,6 +5,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from vibe.auth import check_rate_limit, get_session
@@ -54,6 +55,86 @@ def load_challenge_metadata(challenge_id: str) -> dict:
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def load_challenge_tests_traps(challenge_id: str) -> dict:
+    """Short, recruiter-facing descriptions of a challenge's hidden-test groups
+    and planted traps, read off the challenge's `.jivahire/` config.
+
+    `tests` comes from rubric.json `tasks` (one entry per hidden-test tag);
+    `traps` from traps.json. Each is `{id, description}` with a short string
+    suitable for a list view — never the underlying test code. Tests prefer the
+    optional `tasks[].description`, falling back to a humanised id; traps prefer
+    the optional short `summary`, falling back to the full `description`. Missing
+    or unparsable files yield empty lists so the caller can render nothing.
+    """
+    base = os.path.join(settings.challenges_dir, challenge_id, ".jivahire")
+
+    def _read(name: str) -> dict:
+        try:
+            with open(os.path.join(base, name), "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    tests = []
+    for task in _read("rubric.json").get("tasks", []):
+        tid = task.get("id")
+        if not tid:
+            continue
+        desc = task.get("description") or tid.replace("_", " ").capitalize()
+        tests.append({"id": tid, "description": desc})
+
+    traps = []
+    for trap in _read("traps.json").get("traps", []):
+        tid = trap.get("id")
+        if not tid:
+            continue
+        desc = trap.get("summary") or trap.get("description") or ""
+        traps.append({"id": tid, "description": desc})
+
+    return {"tests": tests, "traps": traps}
+
+
+def _normalize_dependencies(raw) -> tuple[list[Dependency], list[str]]:
+    """Build the preflight dependency list from a challenge's `dependencies`.
+
+    Accepts two metadata shapes:
+      * nested — ``{"toolchain": [{name, min_version, check, install}],
+        "auto_fetched": [...]}`` (used by cpp-thread-safe-cache)
+      * legacy flat — ``[{"label", "check"}, ...]`` (still used by the other
+        challenges; ``label`` maps to ``name``)
+    Malformed entries are dropped silently — preflight is advisory, not a gate.
+    """
+    if isinstance(raw, dict):
+        toolchain = raw.get("toolchain") or []
+        auto_fetched = [s for s in (raw.get("auto_fetched") or []) if isinstance(s, str)]
+    elif isinstance(raw, list):
+        toolchain, auto_fetched = raw, []
+    else:
+        return [], []
+
+    deps: list[Dependency] = []
+    for d in toolchain:
+        if not isinstance(d, dict):
+            continue
+        name = d.get("name") or d.get("label")
+        check = d.get("check")
+        if not (isinstance(name, str) and name and isinstance(check, str) and check):
+            continue
+        min_version = d.get("min_version")
+        install = d.get("install")
+        deps.append(
+            Dependency(
+                name=name,
+                min_version=min_version if isinstance(min_version, str) else None,
+                check=check,
+                install={k: v for k, v in install.items() if isinstance(v, str)}
+                if isinstance(install, dict)
+                else {},
+            )
+        )
+    return deps, auto_fetched
 
 
 # Statuses a session can hold across its lifecycle. Used to validate the
@@ -242,13 +323,15 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
             "INSERT INTO sessions "
             "(id, session_key, candidate_email, challenge_id, branch_name, "
             "llm_budget_usd, max_minutes, meet_link, video_platform, "
-            "scheduled_at, panelist_emails, require_end_video, source_ref, org_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "scheduled_at, panelist_emails, require_end_video, ai_assistance, "
+            "source_ref, org_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, req.session_key, req.candidate_email, req.challenge_id,
              branch, req.llm_budget_usd, req.max_minutes,
              req.meet_link, req.video_platform,
              req.scheduled_at, panelists_csv,
-             1 if req.require_end_video else 0, source_ref, req.org_id),
+             1 if req.require_end_video else 0,
+             1 if req.ai_assistance else 0, source_ref, req.org_id),
         )
     except sqlite3.IntegrityError as e:
         if "session_key" in str(e):
@@ -265,6 +348,7 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
             scheduled_at=req.scheduled_at,
             session_id=session_id,
             require_end_video=require_end_video,
+            ai_assistance=req.ai_assistance,
         )
     except Exception:
         pass
@@ -332,17 +416,13 @@ async def session_preflight(req: SessionPreflightRequest, request: Request):
         raise HTTPException(409, f"Session is {session['status']}")
 
     meta = load_challenge_metadata(session["challenge_id"])
-    raw_deps = meta.get("dependencies") or []
-    deps = [
-        Dependency(label=d["label"], check=d["check"])
-        for d in raw_deps
-        if isinstance(d, dict) and d.get("label") and d.get("check")
-    ]
+    deps, auto_fetched = _normalize_dependencies(meta.get("dependencies"))
     return SessionPreflightResponse(
         challenge_id=session["challenge_id"],
         title=meta.get("title") or session["challenge_id"],
         language=meta.get("language") or "unknown",
         dependencies=deps,
+        auto_fetched=auto_fetched,
     )
 
 
@@ -440,6 +520,7 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
         require_end_video=_resolve_require_end_video(
             session["meet_link"], bool(session.get("require_end_video") or 0)
         ),
+        ai_assistance=bool(session.get("ai_assistance", 1)),
         language=load_challenge_metadata(session["challenge_id"]).get("language") or "unknown",
     )
 
@@ -472,6 +553,21 @@ async def refresh_github_token(session: dict = Depends(get_session)):
     }
 
 
+def _parse_report(grade: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The grade's structured report (GRADING_METRICS_MAP.md §5), parsed from
+    `report_json`. Returns None for a legacy row that predates the three-layer
+    rework (no `report_json`), so the API can fall back gracefully."""
+    if not grade:
+        return None
+    raw = grade.get("report_json")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return None
+
+
 @router.get("/sessions/{session_id}")
 def get_session_detail(
     session_id: str, x_admin_token: str = Header(None), org_id: str | None = None
@@ -486,6 +582,11 @@ def get_session_detail(
     if org_id is not None and rows[0].get("org_id") != org_id:
         raise HTTPException(404, "Not found")
     grades = query("SELECT * FROM grades WHERE session_id = ?", (session_id,))
+    grade = grades[0] if grades else None
+    report = _parse_report(grade)
+    # The candidate-prompt rows still travel separately (the report's telemetry
+    # catalogue summarises them, but the recruiter "Candidate Prompts" card needs
+    # the per-prompt text + classification badges).
     exchanges = query(
         "SELECT ts, prompt_tokens, completion_tokens, candidate_prompt_tokens, "
         "cached_input_tokens, reasoning_tokens, "
@@ -493,38 +594,21 @@ def get_session_detail(
         "FROM chat_exchanges WHERE session_id = ? ORDER BY ts",
         (session_id,),
     )
-    focus_rows = query(
-        "SELECT event_type, payload FROM telemetry "
-        "WHERE session_id = ? AND event_type IN ('app_unfocused', 'app_focused') ORDER BY ts",
-        (session_id,),
-    )
-    window_switches = sum(1 for r in focus_rows if r["event_type"] == "app_unfocused")
-    suspicious_pastes = query(
-        "SELECT COUNT(*) as cnt FROM telemetry "
-        "WHERE session_id = ? AND event_type = 'edit_pasted' "
-        "AND json_extract(payload, '$.suspicious_paste') = 1",
-        (session_id,),
-    )
-    # protected_file_edit rows are already deduped per-file by the extension,
-    # so each row is a distinct tampered file. `source` is "editor" (typed in
-    # VS Code) or "external" (e.g. terminal/shell), useful for triage.
-    tamper_rows = query(
-        "SELECT payload FROM telemetry "
-        "WHERE session_id = ? AND event_type = 'protected_file_edit' ORDER BY ts",
-        (session_id,),
-    )
-    protected_file_edits = [json.loads(r["payload"]) for r in tamper_rows]
     grading_errors = query(
         "SELECT id, ts, user_message, stage, error_class, traceback FROM grading_errors WHERE session_id = ? ORDER BY ts",
         (session_id,),
     )
     return {
         "session": rows[0],
-        "grade": grades[0] if grades else None,
+        # The single structured report — score + summary, every rubric with its
+        # Good/Bad yardstick and strong/weak/missing subpoints, bonuses, and the
+        # telemetry catalogue. Definitions ship inside it; the page does no math.
+        # None for a legacy row graded before the three-layer rework.
+        "report": report,
+        # Flat grade row (track / total_score / band / graded_at, plus any legacy
+        # columns) for dashboards that only need the headline number.
+        "grade": grade,
         "chat_exchanges": exchanges,
-        "window_switches": window_switches,
-        "suspicious_pastes": suspicious_pastes[0]["cnt"] if suspicious_pastes else 0,
-        "protected_file_edits": protected_file_edits,
         "grading_errors": grading_errors,
     }
 

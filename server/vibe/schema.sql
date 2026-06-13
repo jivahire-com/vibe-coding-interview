@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     video_platform TEXT NOT NULL DEFAULT 'google_meet',
     scheduled_at INTEGER,
     panelist_emails TEXT,
+    -- 1 ⇒ AI chat assistant enabled (default "vibe coding"); 0 ⇒ "normal
+    -- coding" interview with no AI. SQLite has no boolean type, so this is an
+    -- INTEGER 0/1 like require_end_video and the *_chars counters above.
+    ai_assistance INTEGER NOT NULL DEFAULT 1,
     typed_chars INTEGER NOT NULL DEFAULT 0,
     pasted_chars INTEGER NOT NULL DEFAULT 0,
     ai_applied_chars INTEGER NOT NULL DEFAULT 0,
@@ -54,28 +58,19 @@ CREATE TABLE IF NOT EXISTS chat_exchanges (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_session_ts ON chat_exchanges(session_id, ts);
 
+-- Grades hold one structured report per session (GRADING_METRICS_MAP.md §5).
+-- `report_json` is the full report object the recruiter UI renders as-is — score
+-- and summary, every rubric with its Good/Bad yardstick and strong/weak/missing
+-- subpoints, bonuses, and the telemetry catalogue. `total_score`, `band` and
+-- `track` are flat for dashboard list queries; everything else lives in the JSON.
+-- The per-dimension breakdown columns were retired in the three-layer rework;
+-- legacy rows that still carry them are tolerated by the API (report_json NULL).
 CREATE TABLE IF NOT EXISTS grades (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id),
-    tests_passed INTEGER,
-    tests_total INTEGER,
-    traps_detected INTEGER,
-    traps_total INTEGER,
-    code_quality_score REAL,
-    code_quality_breakdown TEXT,
-    architectural_reasoning_score REAL,
-    architectural_reasoning_breakdown TEXT,
-    llm_communication_score REAL,
-    llm_communication_breakdown TEXT,
-    verification_discipline_score REAL,
-    verification_discipline_breakdown TEXT,
-    ai_judgment_score REAL,
-    ai_judgment_breakdown TEXT,
-    challenge_specific_score REAL,
-    challenge_specific_breakdown TEXT,
-    trap_attribution TEXT,
-    composite_breakdown TEXT,
+    track TEXT,
     total_score REAL,
-    grader_summary TEXT,
+    band TEXT,
+    report_json TEXT,
     raw_output TEXT,
     graded_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );

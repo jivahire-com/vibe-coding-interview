@@ -61,6 +61,9 @@ def _migrate() -> None:
         ("sessions", "video_uploaded_at", "INTEGER"),
         ("sessions", "video_duration_seconds", "INTEGER"),
         ("sessions", "require_end_video", "INTEGER NOT NULL DEFAULT 0"),
+        # 1 ⇒ AI chat enabled (default); 0 ⇒ normal coding (no AI). INTEGER 0/1
+        # to match the existing boolean-flag convention in this table.
+        ("sessions", "ai_assistance", "INTEGER NOT NULL DEFAULT 1"),
         ("sessions", "source_ref", "TEXT NOT NULL DEFAULT 'main'"),
         # Tenant tag supplied by the recruiter-backend proxy so admin queries can
         # be scoped to a single organization. NULL on legacy/direct sessions.
@@ -92,6 +95,13 @@ def _migrate() -> None:
         ("grades", "challenge_specific_breakdown", "TEXT"),
         ("grades", "trap_attribution", "TEXT"),
         ("grades", "composite_breakdown", "TEXT"),
+        # Three-layer rework (GRADING_METRICS_MAP.md): the grade is now one
+        # structured report. These columns carry it on pre-existing `grades`
+        # tables; fresh DBs get them from schema.sql. Legacy per-dimension
+        # columns above are left in place but no longer written.
+        ("grades", "track", "TEXT"),
+        ("grades", "band", "TEXT"),
+        ("grades", "report_json", "TEXT"),
     ]
     conn = _conn()
     for table, column, col_def in migrations:

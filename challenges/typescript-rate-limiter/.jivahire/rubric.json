@@ -29,10 +29,10 @@
   ],
 
   "tasks": [
-    {"id": "basic",      "points": 20, "test_tag": "basic"},
-    {"id": "refill",     "points": 25, "test_tag": "refill"},
-    {"id": "concurrent", "points": 25, "test_tag": "concurrent"},
-    {"id": "edge",       "points": 30, "test_tag": "edge"}
+    {"id": "basic",      "points": 20, "test_tag": "basic",      "description": "Core token acquire and deny behaviour."},
+    {"id": "refill",     "points": 25, "test_tag": "refill",     "description": "Token refill respects the capacity cap over time."},
+    {"id": "concurrent", "points": 25, "test_tag": "concurrent", "description": "Concurrent acquires stay correct and never hang."},
+    {"id": "edge",       "points": 30, "test_tag": "edge",       "description": "Invalid config and boundary inputs are validated."}
   ],
 
   "total_points": 100,

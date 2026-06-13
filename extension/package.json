@@ -2,7 +2,7 @@
   "name": "jivahire-vibe-coding-interview",
   "displayName": "JivaHire Vibe Coding Interview",
   "description": "AI-aware coding interview platform by JivaHire",
-  "version": "0.1.54",
+  "version": "0.1.56",
   "publisher": "jivahire",
   "engines": {
     "vscode": "^1.85.0"
@@ -143,7 +143,7 @@
           "name": "JivaHire Chat",
           "type": "webview",
           "visibility": "visible",
-          "when": "vibe.session.active"
+          "when": "vibe.session.active && vibe.aiAssistance"
         }
       ]
     }

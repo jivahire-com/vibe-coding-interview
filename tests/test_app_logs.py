@@ -67,7 +67,7 @@ async def _create_active_session(client, key: str = "LOG-001") -> str:
             json={
                 "session_key": key,
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
             },
             headers=_ADMIN,
         )

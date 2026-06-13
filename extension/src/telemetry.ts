@@ -11,10 +11,29 @@ interface TelemetryEvent {
   id: string;
 }
 
+// Tamper-evidence anchor for .jivahire/telemetry.jsonl. The ts + id of the
+// FIRST telemetry event of the session. Recorded once (the moment telemetry
+// starts) and shipped to the server via the Logger → POST /api/v1/logs →
+// app_logs channel, which the candidate cannot reach. The grader compares it
+// against the first line of the telemetry.jsonl committed to the candidate's
+// branch: if the candidate deletes the file mid-session, the extension
+// recreates it on the next event with a brand-new first-event id and a later
+// ts, so the recorded anchor no longer matches and the deletion is provable.
+interface TelemetryAnchor {
+  ts: number;
+  id: string;
+}
+
 // Kept for one-time migration of events stranded in globalState from the old
 // HTTP-POST extension. Delete this key and the constructor migration block in
 // a follow-up release once all active sessions have upgraded.
 const _LEGACY_BUFFER_KEY = "vibe.telemetry.buffer";
+
+// globalState key holding the session's TelemetryAnchor, so the anchor
+// survives a window reload / extension-host crash and is re-reported to the
+// server on every activation (a resumed session must still land it server-side
+// even if the original report's flush never made it out).
+const _ANCHOR_KEY = "vibe.telemetry.anchor";
 
 // Rubric Verification-Discipline window: edits a candidate makes to a file
 // within 90s of an AI apply count as "review" of that apply. Carrying the
@@ -145,6 +164,11 @@ export class TelemetryTracker implements vscode.Disposable {
    *  (length differs). UTF-16 code units, to match document.getText().length. */
   private _expectedJsonlChars: number = 0;
   private _expectedJsonlInitialized: boolean = false;
+  /** First-event tamper anchor (see TelemetryAnchor). Captured once, then
+   *  immutable for the life of the session; null until the first event is
+   *  written or an existing/stored anchor is adopted on construction. */
+  private _anchor: TelemetryAnchor | null = null;
+  private _anchorInitialized: boolean = false;
   // file → { block_id, until } for the most recent AI apply per file. Drives
   // post_apply_of attachment on subsequent typed/pasted edits within the 90s
   // verification window. Cleared on emit when the entry expires.
@@ -154,6 +178,10 @@ export class TelemetryTracker implements vscode.Disposable {
     this._context = context;
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     this._jsonlPath = ws ? path.join(ws, ".jivahire", "telemetry.jsonl") : null;
+
+    // Establish the tamper anchor BEFORE the migration replay below, so a
+    // stored/existing anchor wins over a migrated event becoming the "first".
+    this._initAnchor();
 
     // One-time migration: flush any events stranded in globalState from an old
     // extension version that used the HTTP-POST buffer. Append them to the new
@@ -250,12 +278,80 @@ export class TelemetryTracker implements vscode.Disposable {
         }
         this._expectedJsonlInitialized = true;
       }
+      // First event ever written this session → it is the tamper anchor.
+      // (_initAnchor already adopted a stored/existing one on construction, so
+      // this only fires when telemetry.jsonl genuinely starts empty.)
+      if (!this._anchorInitialized) {
+        this._anchorInitialized = true;
+        this._anchor = { ts: evt.ts, id: evt.id };
+        void this._context.globalState.update(_ANCHOR_KEY, this._anchor);
+        this._reportAnchor("first_event");
+      }
       const line = JSON.stringify(evt) + "\n";
       fs.appendFileSync(this._jsonlPath, line);
       this._expectedJsonlChars += line.length;
     } catch (err) {
       getLogger()?.warn("telemetry_write_failed", { error: String(err) });
     }
+  }
+
+  /**
+   * Adopt the session's tamper anchor on construction (resumed session) and
+   * re-report it to the server. Order of precedence:
+   *   1. A stored anchor in globalState — the authoritative session start.
+   *      If the file still exists but its first event no longer matches, the
+   *      file was deleted/rewritten while the extension was down — flagged.
+   *   2. Otherwise, the first event already on disk (e.g. an upgrade from a
+   *      pre-anchor build mid-session) — adopted and persisted.
+   *   3. Otherwise nothing: the anchor is captured on the first append.
+   */
+  private _initAnchor(): void {
+    if (!this._jsonlPath) return;
+    const stored = this._context.globalState.get<TelemetryAnchor>(_ANCHOR_KEY);
+    const onDisk = this._readFirstEventFromDisk();
+    if (stored && typeof stored.ts === "number" && typeof stored.id === "string") {
+      this._anchor = stored;
+      this._anchorInitialized = true;
+      if (onDisk && onDisk.id !== stored.id) {
+        getLogger()?.warn("telemetry_anchor_mismatch", {
+          expected_id: stored.id, expected_ts: stored.ts,
+          found_id: onDisk.id, found_ts: onDisk.ts,
+        });
+      }
+      this._reportAnchor("resume");
+    } else if (onDisk) {
+      this._anchor = onDisk;
+      this._anchorInitialized = true;
+      void this._context.globalState.update(_ANCHOR_KEY, this._anchor);
+      this._reportAnchor("adopted");
+    }
+  }
+
+  /** Read and parse the first event of telemetry.jsonl off disk, or null when
+   *  the file is absent, empty, or its first line isn't a valid event. */
+  private _readFirstEventFromDisk(): TelemetryAnchor | null {
+    if (!this._jsonlPath) return null;
+    try {
+      const content = fs.readFileSync(this._jsonlPath, "utf8");
+      const firstLine = content.split("\n", 1)[0]?.trim();
+      if (!firstLine) return null;
+      const evt = JSON.parse(firstLine) as { ts?: unknown; id?: unknown };
+      if (typeof evt.ts === "number" && typeof evt.id === "string") {
+        return { ts: evt.ts, id: evt.id };
+      }
+    } catch { /* missing / unreadable / malformed → no anchor on disk */ }
+    return null;
+  }
+
+  /** Ship the anchor to the server via the Logger (→ app_logs, out of the
+   *  candidate's reach). `origin` records how the anchor was established. */
+  private _reportAnchor(origin: string): void {
+    if (!this._anchor) return;
+    getLogger()?.info("telemetry_anchor", {
+      first_ts: this._anchor.ts,
+      first_id: this._anchor.id,
+      origin,
+    });
   }
 
   emit(event_type: string, payload: Record<string, unknown>): void {

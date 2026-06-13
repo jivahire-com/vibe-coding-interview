@@ -793,12 +793,12 @@ Click Apply ──▶ Diff editor opens
     const videoLinkCard = this.videoLink
       ? `<div class="card" style="border-color: #4caf50;">
           <div class="card-header" style="color: #4caf50;">
-            &#128247; Optional: Record a short solution explainer
+            &#128247; Required: Record a short solution explainer
           </div>
           <div style="padding: 10px 11px;">
             <p class="desc" style="padding: 0; margin: 0 0 8px;">
               Open this link in <strong>any browser</strong> (Chrome, Edge, Firefox, Safari) or on your phone to record a brief explainer.
-              The link expires soon &mdash; use it now if you can.
+              This recording is <strong>required</strong> &mdash; the link expires soon, so use it now.
             </p>
             <input class="video-link-input" type="text" readonly value="${escapeHtml(this.videoLink.url)}" />
             <div style="display: flex; gap: 6px; margin-top: 8px;">
@@ -811,6 +811,22 @@ Click Apply ──▶ Diff editor opens
                 <span class="btn-label">Copy link</span>
               </button>
             </div>
+          </div>
+        </div>`
+      : "";
+
+    // Normal coding interview (no AI): make the mode unmistakable on the brief
+    // the candidate works from. The onboarding screen is mode-agnostic (the key
+    // isn't entered yet), so this is the first place we know AI is off.
+    const noAiCard = !config.aiAssistance
+      ? `<div class="card" style="border-color:#e8c000;">
+          <div class="card-header" style="color:#e8c000;">&#129302; Normal coding interview &mdash; no AI</div>
+          <div style="padding:10px 11px;">
+            <p class="desc" style="padding:0;margin:0;">
+              This is a <strong>normal coding interview</strong>. The AI chat is
+              <strong>disabled</strong> &mdash; solve the challenge using only your
+              own knowledge and the starter code.
+            </p>
           </div>
         </div>`
       : "";
@@ -948,6 +964,8 @@ Click Apply ──▶ Diff editor opens
   ${videoLinkCard}
 
   ${meetCard}
+
+  ${noAiCard}
 
   <div class="card">
     <div class="card-header">Challenge</div>

@@ -968,3 +968,71 @@ describe('TelemetryTracker path normalization (Bug 8)', () => {
     }
   });
 });
+
+// ── Tamper anchor (telemetry.jsonl deletion detection) ──────────────────────
+//
+// The first telemetry event's {ts, id} is recorded as an immutable anchor in
+// globalState and shipped to the server, so the grader can prove the file was
+// deleted/recreated if its first line later stops matching.
+describe('TelemetryTracker tamper anchor', () => {
+  const ANCHOR_KEY = 'vibe.telemetry.anchor';
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: '/ws' } }];
+    (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error('ENOENT'); });
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.clearAllMocks();
+  });
+
+  test('first emit records the anchor (first event ts+id) to globalState', () => {
+    const ctx = makeMockContext();
+    const t = new TelemetryTracker(makeConfig(), ctx);
+    try {
+      t.emit('first', {});
+      const line = (fs.appendFileSync as jest.Mock).mock.calls[0]![1] as string;
+      const ev = JSON.parse(line.trimEnd());
+      expect(ctx.globalState.update).toHaveBeenCalledWith(
+        ANCHOR_KEY,
+        { ts: ev.ts, id: ev.id },
+      );
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('a stored anchor is preserved — later events never overwrite it', () => {
+    const stored = { ts: 1000, id: '1000.42.1' };
+    const ctx = makeMockContext({ [ANCHOR_KEY]: stored });
+    const t = new TelemetryTracker(makeConfig(), ctx);
+    try {
+      (ctx.globalState.update as jest.Mock).mockClear();
+      t.emit('later', {});
+      const anchorWrites = (ctx.globalState.update as jest.Mock).mock.calls
+        .filter((c: unknown[]) => c[0] === ANCHOR_KEY);
+      expect(anchorWrites).toHaveLength(0);
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('adopts the existing first line as the anchor on a resumed session', () => {
+    // No stored anchor, but telemetry.jsonl already has events on disk.
+    const firstLine = JSON.stringify({ ts: 777, event_type: 'file_open', payload: {}, id: '777.9.1' });
+    (fs.readFileSync as jest.Mock).mockReturnValue(firstLine + '\n' + 'second line\n');
+    const ctx = makeMockContext();
+    const t = new TelemetryTracker(makeConfig(), ctx);
+    try {
+      expect(ctx.globalState.update).toHaveBeenCalledWith(
+        ANCHOR_KEY,
+        { ts: 777, id: '777.9.1' },
+      );
+    } finally {
+      t.dispose();
+    }
+  });
+});

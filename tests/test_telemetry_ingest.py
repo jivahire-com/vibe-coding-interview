@@ -31,7 +31,7 @@ def _make_session() -> str:
     execute(
         "INSERT INTO sessions (id, session_key, candidate_email, challenge_id, status, branch_name) "
         "VALUES (?, ?, ?, ?, 'active', ?)",
-        (sid, f"key-{sid[:8]}", "c@test.com", "cpp-lru-cache", f"interview/{sid[:8]}"),
+        (sid, f"key-{sid[:8]}", "c@test.com", "cpp-thread-safe-cache", f"interview/{sid[:8]}"),
     )
     return sid
 

@@ -29,10 +29,10 @@
   ],
 
   "tasks": [
-    {"id": "basic",      "points": 20, "test_tag": "basic"},
-    {"id": "stale",      "points": 35, "test_tag": "stale"},
-    {"id": "race",       "points": 30, "test_tag": "race"},
-    {"id": "pagination", "points": 15, "test_tag": "pagination"}
+    {"id": "basic",      "points": 20, "test_tag": "basic",      "description": "Core search and result-rendering behaviour."},
+    {"id": "stale",      "points": 35, "test_tag": "stale",      "description": "Debounced search uses the latest query and page, not a stale snapshot."},
+    {"id": "race",       "points": 30, "test_tag": "race",       "description": "Out-of-order fetch responses do not clobber fresher results."},
+    {"id": "pagination", "points": 15, "test_tag": "pagination", "description": "Page count and navigation include the last partial page."}
   ],
 
   "total_points": 100,

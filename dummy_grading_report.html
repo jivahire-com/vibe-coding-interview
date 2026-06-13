@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grading Report — UI reference (cpp-thread-safe-cache)</title>
+  <!--
+    STATIC REFERENCE PAGE FOR THE UI DEV — fully self-contained.
+    - All data is inlined in the REPORT_DATA constant below (no fetch, no server).
+      Just open this file in a browser. In production, replace REPORT_DATA with
+      the object your grader API returns (same shape).
+    - Layout follows GRADING_METRICS_MAP.md section 5:
+        1. Overall score + recruiter summary at the very top.
+        2. Every rubric, always, in two labelled sections (Engineering, AI collaboration).
+           On the non-AI track the AI-collaboration rubrics render as N/A, never dropped.
+        3. All telemetry in one place at the bottom.
+      Each rubric shows its Good/Bad yardstick and its sub-points as
+      strong / weak / missing verdicts with a plain-English "what it checks".
+    - The track toggle (top right) swaps datasets so you can see the N/A state.
+    - Styling/markup is a starting reference — restyle freely; keep the
+      structure, the ordering, and the verdict / N-A semantics.
+  -->
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --card: #ffffff;
+      --ink: #1f2430;
+      --muted: #6b7280;
+      --line: #e4e7ec;
+      --accent: #2f6feb;
+
+      --strong-ink: #1a7f4b;  --strong-bg: #e7f6ee;
+      --weak-ink:   #8a5a00;  --weak-bg:   #fbeecb;
+      --missing-ink:#b42318;  --missing-bg:#fde7e5;
+      --na-ink:     #6b7280;  --na-bg:     #eceef1;
+
+      --band-strong-bg: #1a7f4b;
+      --band-mixed-bg:  #b7791f;
+      --band-weak-bg:   #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+    a { color: var(--accent); }
+    code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 0.85em; background: #eef1f5; padding: 1px 5px; border-radius: 4px; }
+
+    .topbar {
+      position: sticky; top: 0; z-index: 5;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      padding: 14px 24px;
+      background: #fff; border-bottom: 1px solid var(--line);
+    }
+    .topbar .brand { font-weight: 700; font-size: 1.05rem; }
+    .topbar .challenge { color: var(--muted); font-size: 0.9rem; }
+    .topbar .challenge code { background: #eef1f5; }
+    .topbar .spacer { flex: 1; }
+
+    .track-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .track-toggle button {
+      border: 0; background: #fff; color: var(--ink);
+      padding: 8px 14px; font-size: 0.88rem; cursor: pointer;
+    }
+    .track-toggle button + button { border-left: 1px solid var(--line); }
+    .track-toggle button[aria-selected="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+
+    main { max-width: 980px; margin: 0 auto; padding: 24px 20px 64px; }
+    .section-title { font-size: 1.15rem; font-weight: 700; margin: 30px 0 4px; }
+    .section-sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 14px; }
+
+    /* Overall */
+    .overall {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      padding: 22px; display: grid; grid-template-columns: auto 1fr; gap: 22px; align-items: start;
+    }
+    .score-dial {
+      width: 132px; text-align: center; padding: 16px 10px; border-radius: 12px;
+      background: #f8fafc; border: 1px solid var(--line);
+    }
+    .score-dial .num { font-size: 2.6rem; font-weight: 800; line-height: 1; }
+    .score-dial .den { color: var(--muted); font-size: 0.95rem; }
+    .band {
+      display: inline-block; margin-top: 10px; padding: 3px 12px; border-radius: 999px;
+      color: #fff; font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .band.strong { background: var(--band-strong-bg); }
+    .band.mixed  { background: var(--band-mixed-bg); }
+    .band.weak   { background: var(--band-weak-bg); }
+    .overall .track-label { color: var(--muted); font-size: 0.85rem; margin-bottom: 6px; }
+    .overall h1 { font-size: 1.1rem; margin: 0 0 8px; }
+    .overall ul.summary { margin: 0; padding-left: 1.15rem; font-size: 0.95rem; }
+    .overall ul.summary li { margin: 5px 0; }
+    .score-dial .dial-note { margin-top: 8px; font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* Legend */
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+      background: #fff; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px 16px; margin-top: 16px; font-size: 0.86rem;
+    }
+    .legend .legend-title { font-weight: 600; margin-right: 4px; }
+    .legend .item { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+
+    .pill {
+      display: inline-block; padding: 2px 9px; border-radius: 999px;
+      font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;
+    }
+    .pill.strong  { color: var(--strong-ink);  background: var(--strong-bg); }
+    .pill.weak    { color: var(--weak-ink);     background: var(--weak-bg); }
+    .pill.missing { color: var(--missing-ink);  background: var(--missing-bg); }
+    .pill.na      { color: var(--na-ink);       background: var(--na-bg); }
+
+    /* Rubric card */
+    .rubric { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 18px 8px; margin-bottom: 14px; }
+    .rubric.is-na { background: #fbfbfc; border-style: dashed; }
+    .rubric-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+    .rubric-head .title { font-size: 1.02rem; font-weight: 700; margin: 0; }
+    .rubric-head .label { color: var(--muted); font-size: 0.8rem; }
+    .rubric-score { text-align: right; white-space: nowrap; }
+    .rubric-score .val { font-size: 1.5rem; font-weight: 800; }
+    .rubric-score .val .den { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+    .rubric-score .weight { color: var(--muted); font-size: 0.78rem; }
+    .na-badge { display: inline-block; padding: 4px 12px; border-radius: 8px; background: var(--na-bg); color: var(--na-ink); font-weight: 700; font-size: 0.82rem; }
+
+    .yardstick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 6px; }
+    .yardstick .col { border-radius: 8px; padding: 9px 12px; font-size: 0.86rem; }
+    .yardstick .good { background: var(--strong-bg); }
+    .yardstick .bad  { background: var(--missing-bg); }
+    .yardstick .col .k { font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 2px; }
+    .yardstick .good .k { color: var(--strong-ink); }
+    .yardstick .bad .k  { color: var(--missing-ink); }
+
+    .na-reason { font-size: 0.86rem; color: var(--muted); font-style: italic; margin: 12px 0 4px; }
+
+    .subpoints { list-style: none; margin: 6px 0 4px; padding: 0; }
+    .subpoints li { display: grid; grid-template-columns: 92px 1fr; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); align-items: start; }
+    .subpoints li .sp-body .checks { font-weight: 600; font-size: 0.9rem; }
+    .subpoints li .sp-body .detail { color: var(--muted); font-size: 0.86rem; }
+    .subpoints li .sp-key { display: block; color: var(--muted); font-size: 0.72rem; margin-top: 4px; }
+
+    .note { margin: 8px 0 4px; padding: 9px 12px; background: #fff8e8; border: 1px solid #f3e2b3; border-radius: 8px; font-size: 0.84rem; color: #7a5a12; }
+
+    /* Bonuses */
+    .bonus { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }
+    .bonus-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .bonus-head .title { font-weight: 700; }
+    .bonus .lifts { color: var(--muted); font-size: 0.82rem; }
+    .bonus .note-plain { font-size: 0.88rem; margin: 8px 0; }
+
+    /* Telemetry */
+    details.telemetry { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 18px; margin-top: 8px; }
+    details.telemetry summary { cursor: pointer; font-weight: 700; padding: 12px 0; font-size: 1.02rem; }
+    .tele-group-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 14px 0 6px; font-weight: 700; }
+    table.tele { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    table.tele th, table.tele td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+    table.tele th { color: var(--muted); font-weight: 600; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.03em; border-top: 0; }
+    table.tele td.val { font-weight: 600; white-space: nowrap; }
+    table.tele tr.is-na td { color: var(--na-ink); }
+    table.tele td .src { color: var(--muted); }
+
+    footer.refnote { max-width: 980px; margin: 24px auto 0; padding: 0 20px; color: var(--muted); font-size: 0.8rem; }
+
+    @media (max-width: 720px) {
+      .overall { grid-template-columns: 1fr; }
+      .yardstick { grid-template-columns: 1fr; }
+      .subpoints li { grid-template-columns: 80px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">Grading Report</span>
+    <span class="challenge">challenge: <code id="challenge-name">—</code></span>
+    <span class="spacer"></span>
+    <div class="track-toggle" id="track-toggle" role="tablist" aria-label="Track">
+      <button data-track="vibe" role="tab" aria-selected="true">Vibe coding</button>
+      <button data-track="non_ai" role="tab" aria-selected="false">Non-AI coding</button>
+    </div>
+  </header>
+
+  <main id="report" aria-live="polite"></main>
+
+  <footer class="refnote">
+    Static reference page — all data is inlined in <code>REPORT_DATA</code> (no server needed). Layout follows
+    section 5 of <code>GRADING_METRICS_MAP.md</code>. Restyle freely; keep the ordering, the Good/Bad yardstick,
+    the strong / weak / missing verdicts, and the N/A semantics.
+  </footer>
+
+  <script>
+    /* ----------------------------------------------------------------------
+       STATIC DATA. Replace this whole object with your grader API response.
+       ---------------------------------------------------------------------- */
+    const REPORT_DATA = {
+      "meta": {
+        "challenge": "cpp-thread-safe-cache",
+        "candidate": "Sample Candidate",
+        "generated_at": "2026-06-12T10:30:00Z",
+        "schema_version": 1
+      },
+      "legend": {
+        "verdicts": [
+          { "key": "strong", "label": "Strong", "definition": "Done well." },
+          { "key": "weak", "label": "Weak", "definition": "Partially done, or with gaps." },
+          { "key": "missing", "label": "Missing", "definition": "Applies to this track, but not done." },
+          { "key": "na", "label": "N/A", "definition": "Does not apply to this track — not scored, not counted." }
+        ]
+      },
+      "reports": {
+        "vibe": {
+          "track": "vibe",
+          "track_label": "Vibe coding",
+          "overall": {
+            "score": 72,
+            "out_of": 100,
+            "band": "mixed",
+            "summary_points": [
+              "72 / 100 overall — a mixed result on the vibe-coding track.",
+              "What lifted it: working code (tests 85/100, the biggest contributor) and clear AI instruction (LLM communication 70/100).",
+              "What held it back: thin verification discipline (60/100 — no test run in the five minutes before submitting) and a left-in capacity-zero trap (traps 75/100).",
+              "Light design rationale (architectural reasoning 65/100): sound primitive and data-structure choices, but little stated ‘why’ before the first edit.",
+              "Bonuses earned: the debugger and product-sense bonuses are already reflected in the scores above."
+            ]
+          },
+          "sections": [
+            {
+              "id": "engineering",
+              "title": "Engineering",
+              "subtitle": "The core engineering set — judged on every submission, both tracks.",
+              "rubrics": [
+                {
+                  "key": "tests", "title": "Does the code work?", "label": "tests", "kind": "deterministic",
+                  "applies": true, "score": 85, "out_of": 100, "weight": 18,
+                  "good": "Passes every hidden check — basic get/put, LRU eviction, thread-safety under concurrency, and the edge cases.",
+                  "bad": "Tests fail — wrong results, data races, or breakage at the boundaries.",
+                  "subpoints": [
+                    { "key": "basic", "checks": "Basic get/put and LRU eviction behave correctly.", "verdict": "strong", "detail": "All 6 basic-tag tests pass." },
+                    { "key": "thread_safety", "checks": "No data races under concurrent access.", "verdict": "strong", "detail": "Clean under ThreadSanitizer across 4 threads." },
+                    { "key": "edge_cases", "checks": "Boundary conditions are handled.", "verdict": "weak", "detail": "1 of 2 edge tests fails — capacity-zero is not handled." }
+                  ]
+                },
+                {
+                  "key": "traps", "title": "Did they fix the planted bugs?", "label": "traps", "kind": "deterministic",
+                  "applies": true, "score": 75, "out_of": 100, "weight": 11,
+                  "good": "The deliberately planted bugs are caught and fixed.",
+                  "bad": "The planted bugs are left in the code.",
+                  "subpoints": [
+                    { "key": "race", "checks": "The data race on the shared map is fixed.", "verdict": "strong", "detail": "Guarded by a mutex; race-tag test passes." },
+                    { "key": "shared_lock_on_mutating_get", "checks": "get() takes a write lock since it mutates LRU order.", "verdict": "strong", "detail": "Switched from shared to unique lock on get()." },
+                    { "key": "off_by_one", "checks": "Eviction triggers at the right size, not one early/late.", "verdict": "strong", "detail": "Boundary corrected; off_by_one-tag test passes." },
+                    { "key": "capacity_zero", "checks": "A zero-capacity cache is handled safely.", "verdict": "missing", "detail": "Constructing with capacity 0 still divides by capacity — trap left in." }
+                  ]
+                },
+                {
+                  "key": "code_quality", "title": "Is the final code clean and correct?", "label": "code quality", "kind": "llm",
+                  "applies": true, "score": 70, "out_of": 100, "weight": 13,
+                  "good": "Correct, idiomatic C++, readable, handles edge cases, no new defects.",
+                  "bad": "Incorrect, awkward, unclear, misses edge cases, or introduces defects.",
+                  "subpoints": [
+                    { "key": "correctness", "checks": "Does it work — passes tests, fixes traps.", "verdict": "strong", "detail": "Core behaviour and three of four traps are correct." },
+                    { "key": "idiomatic", "checks": "Uses the language the normal way.", "verdict": "strong", "detail": "RAII lock guards and standard containers throughout." },
+                    { "key": "clarity", "checks": "Easy to read, well named.", "verdict": "weak", "detail": "Eviction helper is dense; a couple of single-letter names (l. 71, l. 88)." },
+                    { "key": "edge_cases", "checks": "Handles boundaries and failure.", "verdict": "weak", "detail": "Capacity-zero path is unguarded." },
+                    { "key": "no_ai_defects", "checks": "No new races, hallucinated APIs, leaked secrets, or needless abstractions.", "verdict": "strong", "detail": "No invented APIs or stray abstractions in the accepted AI edits." }
+                  ]
+                },
+                {
+                  "key": "architectural_reasoning", "title": "Did they make sound design decisions?", "label": "architectural reasoning", "kind": "llm",
+                  "applies": true, "score": 65, "out_of": 100, "weight": 9,
+                  "good": "Weighed trade-offs before coding, got this challenge’s core mechanism right (here, lock placement and primitive choice), thought about boundaries, kept it simple.",
+                  "bad": "No rationale, the core mechanism is unsafe or missing, ignores constraints, or over-engineered.",
+                  "subpoints": [
+                    { "key": "why_before_how", "checks": "Decided the approach before coding.", "verdict": "weak", "detail": "First lock design landed before any stated rationale in chat (prompts 1–2)." },
+                    { "key": "algorithm_choice", "checks": "Picked a sensible algorithm.", "verdict": "strong", "detail": "Hash map plus intrusive list for O(1) LRU." },
+                    { "key": "data_structure_choice", "checks": "Picked a sensible data structure.", "verdict": "strong", "detail": "std::unordered_map keyed to list iterators." },
+                    { "key": "core_mechanism_design", "checks": "Got the central hard part of this challenge right — here, lock placement.", "verdict": "strong", "detail": "Single mutex guards both map and list; get() upgraded to a write lock." },
+                    { "key": "edge_case_awareness", "checks": "Thought about boundaries.", "verdict": "weak", "detail": "Capacity-zero not considered in the design." },
+                    { "key": "constraint_driven", "checks": "Respected the stated limits.", "verdict": "strong", "detail": "Stayed within the header-only, C++17 constraint." },
+                    { "key": "not_over_engineered", "checks": "Kept it as simple as the problem needs.", "verdict": "weak", "detail": "A templated allocator hook adds surface the task never required." }
+                  ]
+                },
+                {
+                  "key": "challenge_specific", "title": "Did they handle this challenge’s specifics?", "label": "challenge-specific", "kind": "deterministic",
+                  "applies": true, "score": 80, "out_of": 100, "weight": 5,
+                  "good": "Reaches for the right synchronisation primitive (a mutex) and keeps locking const-correct.",
+                  "bad": "No synchronisation, or const inspection methods that won’t compile once a mutex is locked.",
+                  "subpoints": [
+                    { "key": "sync_primitive", "checks": "A real synchronisation primitive is present.", "verdict": "strong", "detail": "std::mutex used to guard shared state." },
+                    { "key": "const_correctness", "checks": "Locking stays const-correct.", "verdict": "strong", "detail": "mutable mutex plus const inspector methods compile and lock cleanly." }
+                  ]
+                },
+                {
+                  "key": "verification_discipline", "title": "Did they check their own work?", "label": "verification discipline", "kind": "deterministic",
+                  "applies": true, "score": 60, "out_of": 100, "weight": 12,
+                  "good": "Runs the tests as they go, reviews changes instead of trusting them blindly, and runs the tests once more before submitting.",
+                  "bad": "Never runs the tests, accepts code without checking, or submits untested.",
+                  "note": "Pre-submit floor applied: the score is capped at 6.0 because no test run landed in the five minutes before submitting.",
+                  "subpoints": [
+                    { "key": "test_after_apply_ratio", "checks": "Tests are run soon after accepting a change.", "verdict": "weak", "detail": "Only 2 of 6 applies were followed by a test within 90s." },
+                    { "key": "apply_then_edit_rate", "checks": "Accepted code is reviewed and edited, not trusted blindly.", "verdict": "strong", "detail": "7 of 18 applies were edited within 90s." },
+                    { "key": "self_authored_ratio", "checks": "A healthy share of the code is hand-written.", "verdict": "strong", "detail": "Typed/(typed+AI) = 0.52, inside the 0.40–0.70 band." },
+                    { "key": "incremental_apply_pattern", "checks": "Changes land in small steps, not one big paste.", "verdict": "weak", "detail": "Two large multi-block applies dominate the session." }
+                  ]
+                },
+                {
+                  "key": "developer_signal", "title": "Did they behave like a developer?", "label": "developer signal", "kind": "deterministic",
+                  "applies": true, "score": 75, "out_of": 100, "weight": 10, "verdict_label": "developer",
+                  "good": "Opens and reads the relevant files, and runs the tests.",
+                  "bad": "Minimal engagement — barely opens files and never runs tests.",
+                  "subpoints": [
+                    { "key": "files_explored", "checks": "Reads the relevant files.", "verdict": "strong", "detail": "Opened 7 files including the header and tests." },
+                    { "key": "ai_output_modified_ratio", "checks": "Reworks AI output rather than rubber-stamping it.", "verdict": "strong", "detail": "Edited 39% of accepted AI lines." },
+                    { "key": "prompt_specificity", "checks": "Prompts are specific, not vague.", "verdict": "weak", "detail": "Several prompts were broad (“fix the bug”) without context." },
+                    { "key": "test_runs", "checks": "Runs the test suite during the session.", "verdict": "strong", "detail": "Ran the suite 6 times." },
+                    { "key": "debugger_bonus", "checks": "Bonus — used the debugger to investigate.", "verdict": "strong", "detail": "Started the debugger twice; lifts this score (never a penalty if absent)." }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "ai_collaboration",
+              "title": "AI collaboration",
+              "subtitle": "How well the candidate worked with the AI — scored on the vibe-coding track only.",
+              "rubrics": [
+                {
+                  "key": "ai_judgment", "title": "Did they judge the AI’s output?", "label": "AI judgment", "kind": "deterministic",
+                  "applies": true, "score": 60, "out_of": 100, "weight": 7,
+                  "good": "Rejects wrong AI suggestions, edits AI code after accepting it, recovers from bad changes.",
+                  "bad": "Accepts everything the AI produces without question.",
+                  "subpoints": [
+                    { "key": "explicit_rejections", "checks": "Wrong AI suggestions are dismissed.", "verdict": "weak", "detail": "3 rejections — some clearly-wrong blocks were accepted then reworked instead." },
+                    { "key": "modify_after_apply", "checks": "Accepted AI code is edited, not trusted as-is.", "verdict": "strong", "detail": "7 of 18 applies edited within 90s." },
+                    { "key": "hand_fixed_traps", "checks": "Traps fixed by hand, not just by the AI.", "verdict": "weak", "detail": "1 of 3 fixed traps was hand-authored around the fix." },
+                    { "key": "recovery_events", "checks": "Recovers cleanly from bad changes.", "verdict": "missing", "detail": "No resets or large reverts recorded — nothing to recover from, neutral signal." }
+                  ]
+                },
+                {
+                  "key": "llm_communication", "title": "Did they instruct the AI clearly?", "label": "LLM communication", "kind": "llm",
+                  "applies": true, "score": 70, "out_of": 100, "weight": 15,
+                  "good": "Gives the AI the context it needs, states constraints, breaks work into focused prompts, and gives specific feedback when the AI is wrong.",
+                  "bad": "Vague one-liners like “fix the bugs” with no context and no follow-up.",
+                  "subpoints": [
+                    { "key": "context_framing", "checks": "Gave the AI the context it needed.", "verdict": "strong", "detail": "Pasted the header and the failing test into prompt 3." },
+                    { "key": "constraint_spec", "checks": "Stated the constraints.", "verdict": "weak", "detail": "Header-only / C++17 limits were never spelled out to the AI." },
+                    { "key": "decomposition", "checks": "Broke the work into focused prompts.", "verdict": "strong", "detail": "Separate prompts for locking, eviction, and tests (prompts 3, 5, 8)." },
+                    { "key": "iterative_refinement", "checks": "Built on previous answers instead of restarting.", "verdict": "strong", "detail": "Prompts 5–7 refined the same eviction design." },
+                    { "key": "debug_loop", "checks": "Gave specific feedback when the AI was wrong.", "verdict": "weak", "detail": "Re-prompted with “still broken” (prompt 6) without citing the failure." },
+                    { "key": "token_discipline", "checks": "Kept prompts efficient vs the budget.", "verdict": "strong", "detail": "8,400 tokens used against a 12,000 budget." }
+                  ]
+                }
+              ]
+            }
+          ],
+          "bonuses": [
+            {
+              "key": "debugger", "title": "Debugger usage", "attempted": true, "lifts": "developer signal",
+              "note": "Started the debugger twice to investigate the race. Counts as a bonus that lifts the developer-signal score — skipping it is never a penalty."
+            },
+            {
+              "key": "product_sense", "title": "Product-sense bonus", "attempted": true, "lifts": "architectural reasoning",
+              "note": "Added a NOTES.md and a bounded-eviction test for the ‘2 a.m. on-call’ scenario. Optional; lifts architectural reasoning, never subtracts.",
+              "subpoints": [
+                { "key": "real_need", "checks": "Identified a real user/operator need.", "verdict": "strong", "detail": "Targeted stale-answer risk for on-call engineers." },
+                { "key": "justified_choice", "checks": "Explained why this over alternatives.", "verdict": "weak", "detail": "NOTES.md states what, lightly covers why." },
+                { "key": "thread_safe", "checks": "Kept any new state safe under concurrency.", "verdict": "strong", "detail": "New counter guarded by the existing mutex." },
+                { "key": "proven_by_tests", "checks": "Showed the new behaviour works with tests.", "verdict": "strong", "detail": "Added one passing eviction-bound test." }
+              ]
+            }
+          ],
+          "telemetry": [
+            { "name": "Files explored", "source": "file_open {file}", "track": "both", "applies": true, "value": "7 files", "detail": "lru_cache.hpp, public_test.cpp, README.md, CMakeLists.txt, SETUP.md, +2" },
+            { "name": "Time on file", "source": "file_focus {file, ms}", "track": "both", "applies": true, "value": "14m 20s", "detail": "lru_cache.hpp 8m 10s; tests 4m 02s" },
+            { "name": "Typed chars", "source": "edit_typed {chars}", "track": "both", "applies": true, "value": "1,240 chars", "detail": "hand-written code" },
+            { "name": "Pasted chars", "source": "edit_pasted {chars, suspicious_paste}", "track": "both", "applies": true, "value": "320 chars", "detail": "no suspicious refocus-pastes" },
+            { "name": "Test run", "source": "test_run / terminal_command {kind:test}", "track": "both", "applies": true, "value": "6 runs", "detail": "last run 9 min before submit" },
+            { "name": "Build run", "source": "terminal_command {kind:build}", "track": "both", "applies": true, "value": "9 builds", "detail": "" },
+            { "name": "Install run", "source": "terminal_command {kind:install}", "track": "both", "applies": true, "value": "1 install", "detail": "" },
+            { "name": "Debugger", "source": "debug_session", "track": "both", "applies": true, "value": "2 sessions", "detail": "used to investigate the race" },
+            { "name": "Window switch", "source": "app_unfocused / app_focused {time_away_seconds}", "track": "both", "applies": true, "value": "4 switches", "detail": "max 95s away" },
+            { "name": "Protected-file edit", "source": "protected_file_edit", "track": "both", "applies": true, "value": "0", "detail": "no .jivahire/ edits" },
+            { "name": "Commits / reverts", "source": "auto_commit + git history", "track": "both", "applies": true, "value": "11 commits, 1 revert", "detail": "" },
+            { "name": "AI accepted", "source": "edit_ai_applied {chars, block_id}", "track": "vibe", "applies": true, "value": "18 applies", "detail": "1,190 AI chars accepted" },
+            { "name": "AI rejected", "source": "edit_ai_rejected {block_id}", "track": "vibe", "applies": true, "value": "3 rejected", "detail": "" },
+            { "name": "Post-apply edit", "source": "post_apply_of tag", "track": "vibe", "applies": true, "value": "7 edits", "detail": "within 90s of accepting" },
+            { "name": "Chat exchange", "source": "chat_exchanges {prompt_text, tokens, cost_usd}", "track": "vibe", "applies": true, "value": "12 prompts", "detail": "8,400 tokens, $0.06" }
+          ]
+        },
+        "non_ai": {
+          "track": "non_ai",
+          "track_label": "Non-AI coding",
+          "overall": {
+            "score": 73,
+            "out_of": 100,
+            "band": "mixed",
+            "summary_points": [
+              "73 / 100 overall — a mixed result on the non-AI track.",
+              "What lifted it: working code (tests 85/100) and clean synchronisation (challenge-specific 80/100).",
+              "What held it back: thin verification discipline (60/100 — no test run just before submitting) and a left-in capacity-zero trap (traps 75/100).",
+              "Light design rationale (architectural reasoning 65/100), read here from NOTES.md, comments and commits rather than a chat log.",
+              "The two AI-collaboration rubrics don’t apply to this track and are shown as N/A."
+            ]
+          },
+          "sections": [
+            {
+              "id": "engineering",
+              "title": "Engineering",
+              "subtitle": "The core engineering set — judged on every submission, both tracks.",
+              "rubrics": [
+                {
+                  "key": "tests", "title": "Does the code work?", "label": "tests", "kind": "deterministic",
+                  "applies": true, "score": 85, "out_of": 100, "weight": 22,
+                  "good": "Passes every hidden check — basic get/put, LRU eviction, thread-safety under concurrency, and the edge cases.",
+                  "bad": "Tests fail — wrong results, data races, or breakage at the boundaries.",
+                  "subpoints": [
+                    { "key": "basic", "checks": "Basic get/put and LRU eviction behave correctly.", "verdict": "strong", "detail": "All 6 basic-tag tests pass." },
+                    { "key": "thread_safety", "checks": "No data races under concurrent access.", "verdict": "strong", "detail": "Clean under ThreadSanitizer across 4 threads." },
+                    { "key": "edge_cases", "checks": "Boundary conditions are handled.", "verdict": "weak", "detail": "1 of 2 edge tests fails — capacity-zero is not handled." }
+                  ]
+                },
+                {
+                  "key": "traps", "title": "Did they fix the planted bugs?", "label": "traps", "kind": "deterministic",
+                  "applies": true, "score": 75, "out_of": 100, "weight": 14,
+                  "good": "The deliberately planted bugs are caught and fixed.",
+                  "bad": "The planted bugs are left in the code.",
+                  "subpoints": [
+                    { "key": "race", "checks": "The data race on the shared map is fixed.", "verdict": "strong", "detail": "Guarded by a mutex; race-tag test passes." },
+                    { "key": "shared_lock_on_mutating_get", "checks": "get() takes a write lock since it mutates LRU order.", "verdict": "strong", "detail": "Switched from shared to unique lock on get()." },
+                    { "key": "off_by_one", "checks": "Eviction triggers at the right size, not one early/late.", "verdict": "strong", "detail": "Boundary corrected; off_by_one-tag test passes." },
+                    { "key": "capacity_zero", "checks": "A zero-capacity cache is handled safely.", "verdict": "missing", "detail": "Constructing with capacity 0 still divides by capacity — trap left in." }
+                  ]
+                },
+                {
+                  "key": "code_quality", "title": "Is the final code clean and correct?", "label": "code quality", "kind": "llm",
+                  "applies": true, "score": 70, "out_of": 100, "weight": 17,
+                  "good": "Correct, idiomatic C++, readable, handles edge cases, no new defects.",
+                  "bad": "Incorrect, awkward, unclear, misses edge cases, or introduces defects.",
+                  "subpoints": [
+                    { "key": "correctness", "checks": "Does it work — passes tests, fixes traps.", "verdict": "strong", "detail": "Core behaviour and three of four traps are correct." },
+                    { "key": "idiomatic", "checks": "Uses the language the normal way.", "verdict": "strong", "detail": "RAII lock guards and standard containers throughout." },
+                    { "key": "clarity", "checks": "Easy to read, well named.", "verdict": "weak", "detail": "Eviction helper is dense; a couple of single-letter names (l. 71, l. 88)." },
+                    { "key": "edge_cases", "checks": "Handles boundaries and failure.", "verdict": "weak", "detail": "Capacity-zero path is unguarded." },
+                    { "key": "no_ai_defects", "checks": "No new races, hallucinated APIs, leaked secrets, or needless abstractions.", "verdict": "strong", "detail": "No invented APIs or stray abstractions." }
+                  ]
+                },
+                {
+                  "key": "architectural_reasoning", "title": "Did they make sound design decisions?", "label": "architectural reasoning", "kind": "llm",
+                  "applies": true, "score": 65, "out_of": 100, "weight": 14,
+                  "good": "Weighed trade-offs before coding, got this challenge’s core mechanism right (here, lock placement and primitive choice), thought about boundaries, kept it simple.",
+                  "bad": "No rationale, the core mechanism is unsafe or missing, ignores constraints, or over-engineered.",
+                  "note": "On the non-AI track the ‘why’ is read from NOTES.md, code comments, and commit messages instead of a chat log.",
+                  "subpoints": [
+                    { "key": "why_before_how", "checks": "Decided the approach before coding.", "verdict": "weak", "detail": "NOTES.md records the design after the fact; commits show code-first." },
+                    { "key": "algorithm_choice", "checks": "Picked a sensible algorithm.", "verdict": "strong", "detail": "Hash map plus intrusive list for O(1) LRU." },
+                    { "key": "data_structure_choice", "checks": "Picked a sensible data structure.", "verdict": "strong", "detail": "std::unordered_map keyed to list iterators." },
+                    { "key": "core_mechanism_design", "checks": "Got the central hard part of this challenge right — here, lock placement.", "verdict": "strong", "detail": "Single mutex guards both map and list; get() upgraded to a write lock." },
+                    { "key": "edge_case_awareness", "checks": "Thought about boundaries.", "verdict": "weak", "detail": "Capacity-zero not considered in the design." },
+                    { "key": "constraint_driven", "checks": "Respected the stated limits.", "verdict": "strong", "detail": "Stayed within the header-only, C++17 constraint." },
+                    { "key": "not_over_engineered", "checks": "Kept it as simple as the problem needs.", "verdict": "weak", "detail": "A templated allocator hook adds surface the task never required." }
+                  ]
+                },
+                {
+                  "key": "challenge_specific", "title": "Did they handle this challenge’s specifics?", "label": "challenge-specific", "kind": "deterministic",
+                  "applies": true, "score": 80, "out_of": 100, "weight": 9,
+                  "good": "Reaches for the right synchronisation primitive (a mutex) and keeps locking const-correct.",
+                  "bad": "No synchronisation, or const inspection methods that won’t compile once a mutex is locked.",
+                  "subpoints": [
+                    { "key": "sync_primitive", "checks": "A real synchronisation primitive is present.", "verdict": "strong", "detail": "std::mutex used to guard shared state." },
+                    { "key": "const_correctness", "checks": "Locking stays const-correct.", "verdict": "strong", "detail": "mutable mutex plus const inspector methods compile and lock cleanly." }
+                  ]
+                },
+                {
+                  "key": "verification_discipline", "title": "Did they check their own work?", "label": "verification discipline", "kind": "deterministic",
+                  "applies": true, "score": 60, "out_of": 100, "weight": 14,
+                  "good": "Runs the tests as they go, reviews changes instead of trusting them blindly, and runs the tests once more before submitting.",
+                  "bad": "Never runs the tests, accepts code without checking, or submits untested.",
+                  "note": "On the non-AI track the ‘tested right after a change’ signal is read from hand edits (edit_typed / edit_pasted) instead of AI applies. Pre-submit floor applied: capped at 6.0 because no test run landed in the five minutes before submitting.",
+                  "subpoints": [
+                    { "key": "test_after_edit_ratio", "checks": "Tests are run soon after a hand edit.", "verdict": "weak", "detail": "Only 3 of 9 edit bursts were followed by a test within 90s." },
+                    { "key": "review_before_commit", "checks": "Changes are reviewed before committing.", "verdict": "strong", "detail": "Most commits follow a focus-on-diff window." },
+                    { "key": "self_authored_ratio", "checks": "The work is genuinely hand-written.", "verdict": "strong", "detail": "100% hand-authored on this track." },
+                    { "key": "incremental_pattern", "checks": "Changes land in small steps.", "verdict": "weak", "detail": "Two large edit bursts dominate the session." }
+                  ]
+                },
+                {
+                  "key": "developer_signal", "title": "Did they behave like a developer?", "label": "developer signal", "kind": "deterministic",
+                  "applies": true, "score": 75, "out_of": 100, "weight": 10, "verdict_label": "developer",
+                  "good": "Opens and reads the relevant files, and runs the tests.",
+                  "bad": "Minimal engagement — barely opens files and never runs tests.",
+                  "note": "On the non-AI track, with no AI rework or prompt-specificity to measure, the score is computed from files explored and test runs (rescaled to the full range) plus the debugger bonus.",
+                  "subpoints": [
+                    { "key": "files_explored", "checks": "Reads the relevant files.", "verdict": "strong", "detail": "Opened 7 files including the header and tests." },
+                    { "key": "test_runs", "checks": "Runs the test suite during the session.", "verdict": "strong", "detail": "Ran the suite 6 times." },
+                    { "key": "debugger_bonus", "checks": "Bonus — used the debugger to investigate.", "verdict": "strong", "detail": "Started the debugger twice; lifts this score (never a penalty if absent)." }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "ai_collaboration",
+              "title": "AI collaboration",
+              "subtitle": "How well the candidate worked with the AI — does not apply to the non-AI track.",
+              "rubrics": [
+                {
+                  "key": "ai_judgment", "title": "Did they judge the AI’s output?", "label": "AI judgment", "kind": "deterministic",
+                  "applies": false, "score": null, "out_of": 100, "weight": null,
+                  "good": "Rejects wrong AI suggestions, edits AI code after accepting it, recovers from bad changes.",
+                  "bad": "Accepts everything the AI produces without question.",
+                  "na_reason": "No AI assistant was used on this track, so there is no AI output to judge.",
+                  "subpoints": [
+                    { "key": "explicit_rejections", "checks": "Wrong AI suggestions are dismissed.", "verdict": "na", "detail": "" },
+                    { "key": "modify_after_apply", "checks": "Accepted AI code is edited, not trusted as-is.", "verdict": "na", "detail": "" },
+                    { "key": "hand_fixed_traps", "checks": "Traps fixed by hand, not just by the AI.", "verdict": "na", "detail": "" },
+                    { "key": "recovery_events", "checks": "Recovers cleanly from bad changes.", "verdict": "na", "detail": "" }
+                  ]
+                },
+                {
+                  "key": "llm_communication", "title": "Did they instruct the AI clearly?", "label": "LLM communication", "kind": "llm",
+                  "applies": false, "score": null, "out_of": 100, "weight": null,
+                  "good": "Gives the AI the context it needs, states constraints, breaks work into focused prompts, and gives specific feedback when the AI is wrong.",
+                  "bad": "Vague one-liners like “fix the bugs” with no context and no follow-up.",
+                  "na_reason": "No AI assistant was used on this track, so there is no prompting to score.",
+                  "subpoints": [
+                    { "key": "context_framing", "checks": "Gave the AI the context it needed.", "verdict": "na", "detail": "" },
+                    { "key": "constraint_spec", "checks": "Stated the constraints.", "verdict": "na", "detail": "" },
+                    { "key": "decomposition", "checks": "Broke the work into focused prompts.", "verdict": "na", "detail": "" },
+                    { "key": "iterative_refinement", "checks": "Built on previous answers instead of restarting.", "verdict": "na", "detail": "" },
+                    { "key": "debug_loop", "checks": "Gave specific feedback when the AI was wrong.", "verdict": "na", "detail": "" },
+                    { "key": "token_discipline", "checks": "Kept prompts efficient vs the budget.", "verdict": "na", "detail": "" }
+                  ]
+                }
+              ]
+            }
+          ],
+          "bonuses": [
+            {
+              "key": "debugger", "title": "Debugger usage", "attempted": true, "lifts": "developer signal",
+              "note": "Started the debugger twice to investigate the race. Counts as a bonus that lifts the developer-signal score — skipping it is never a penalty."
+            },
+            {
+              "key": "product_sense", "title": "Product-sense bonus", "attempted": true, "lifts": "architectural reasoning",
+              "note": "Added a NOTES.md and a bounded-eviction test for the ‘2 a.m. on-call’ scenario. Optional; lifts architectural reasoning, never subtracts.",
+              "subpoints": [
+                { "key": "real_need", "checks": "Identified a real user/operator need.", "verdict": "strong", "detail": "Targeted stale-answer risk for on-call engineers." },
+                { "key": "justified_choice", "checks": "Explained why this over alternatives.", "verdict": "weak", "detail": "NOTES.md states what, lightly covers why." },
+                { "key": "thread_safe", "checks": "Kept any new state safe under concurrency.", "verdict": "strong", "detail": "New counter guarded by the existing mutex." },
+                { "key": "proven_by_tests", "checks": "Showed the new behaviour works with tests.", "verdict": "strong", "detail": "Added one passing eviction-bound test." }
+              ]
+            }
+          ],
+          "telemetry": [
+            { "name": "Files explored", "source": "file_open {file}", "track": "both", "applies": true, "value": "7 files", "detail": "lru_cache.hpp, public_test.cpp, README.md, CMakeLists.txt, SETUP.md, +2" },
+            { "name": "Time on file", "source": "file_focus {file, ms}", "track": "both", "applies": true, "value": "16m 05s", "detail": "lru_cache.hpp 9m 40s; tests 4m 30s" },
+            { "name": "Typed chars", "source": "edit_typed {chars}", "track": "both", "applies": true, "value": "2,980 chars", "detail": "all code hand-written" },
+            { "name": "Pasted chars", "source": "edit_pasted {chars, suspicious_paste}", "track": "both", "applies": true, "value": "150 chars", "detail": "no suspicious refocus-pastes" },
+            { "name": "Test run", "source": "test_run / terminal_command {kind:test}", "track": "both", "applies": true, "value": "6 runs", "detail": "last run 11 min before submit" },
+            { "name": "Build run", "source": "terminal_command {kind:build}", "track": "both", "applies": true, "value": "12 builds", "detail": "" },
+            { "name": "Install run", "source": "terminal_command {kind:install}", "track": "both", "applies": true, "value": "1 install", "detail": "" },
+            { "name": "Debugger", "source": "debug_session", "track": "both", "applies": true, "value": "2 sessions", "detail": "used to investigate the race" },
+            { "name": "Window switch", "source": "app_unfocused / app_focused {time_away_seconds}", "track": "both", "applies": true, "value": "3 switches", "detail": "max 60s away" },
+            { "name": "Protected-file edit", "source": "protected_file_edit", "track": "both", "applies": true, "value": "0", "detail": "no .jivahire/ edits" },
+            { "name": "Commits / reverts", "source": "auto_commit + git history", "track": "both", "applies": true, "value": "14 commits, 0 reverts", "detail": "" },
+            { "name": "AI accepted", "source": "edit_ai_applied {chars, block_id}", "track": "vibe", "applies": false, "value": "N/A", "detail": "no AI assistant on this track" },
+            { "name": "AI rejected", "source": "edit_ai_rejected {block_id}", "track": "vibe", "applies": false, "value": "N/A", "detail": "no AI assistant on this track" },
+            { "name": "Post-apply edit", "source": "post_apply_of tag", "track": "vibe", "applies": false, "value": "N/A", "detail": "no AI assistant on this track" },
+            { "name": "Chat exchange", "source": "chat_exchanges {prompt_text, tokens, cost_usd}", "track": "vibe", "applies": false, "value": "N/A", "detail": "no AI assistant on this track" }
+          ]
+        }
+      }
+    };
+
+    /* ----------------------------------------------------------------------
+       RENDERER. Generic — drive it entirely from REPORT_DATA above.
+       ---------------------------------------------------------------------- */
+    const VERDICT_LABEL = { strong: "Strong", weak: "Weak", missing: "Missing", na: "N/A" };
+    let currentTrack = "vibe";
+
+    const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    function pill(verdict) {
+      return `<span class="pill ${esc(verdict)}">${esc(VERDICT_LABEL[verdict] || verdict)}</span>`;
+    }
+
+    function legendHtml(legend) {
+      const items = legend.verdicts.map(v =>
+        `<span class="item">${pill(v.key)} ${esc(v.definition)}</span>`).join("");
+      return `<div class="legend"><span class="legend-title">How to read a verdict:</span>${items}</div>`;
+    }
+
+    function subpointsHtml(subpoints) {
+      if (!subpoints || !subpoints.length) return "";
+      const rows = subpoints.map(sp => `
+        <li>
+          <span>${pill(sp.verdict)}</span>
+          <span class="sp-body">
+            <span class="checks">${esc(sp.checks)}</span>
+            ${sp.detail ? `<span class="detail"> — ${esc(sp.detail)}</span>` : ""}
+            <span class="sp-key"><code>${esc(sp.key)}</code></span>
+          </span>
+        </li>`).join("");
+      return `<ul class="subpoints">${rows}</ul>`;
+    }
+
+    function rubricHtml(r) {
+      const isNa = r.applies === false;
+      // Scores arrive from the grader already on a 0-100 scale (r.score, with r.out_of = 100);
+      // the page prints them as-is — no arithmetic — so the overall total reads as their weighted average.
+      const scoreBlock = isNa
+        ? `<span class="na-badge">N/A</span><div class="weight">not counted</div>`
+        : `<div class="val">${esc(r.score)}<span class="den"> / ${esc(r.out_of)}</span></div>
+           <div class="weight">weight ${esc(r.weight)}%</div>`;
+
+      return `
+        <article class="rubric ${isNa ? "is-na" : ""}">
+          <div class="rubric-head">
+            <div>
+              <p class="title">${esc(r.title)}</p>
+              <span class="label"><code>${esc(r.label)}</code> · ${esc(r.kind === "llm" ? "LLM-judged" : "deterministic")}</span>
+            </div>
+            <div class="rubric-score">${scoreBlock}</div>
+          </div>
+          <div class="yardstick">
+            <div class="col good"><span class="k">Good</span>${esc(r.good)}</div>
+            <div class="col bad"><span class="k">Bad</span>${esc(r.bad)}</div>
+          </div>
+          ${isNa && r.na_reason ? `<p class="na-reason">${esc(r.na_reason)}</p>` : ""}
+          ${subpointsHtml(r.subpoints)}
+          ${r.note ? `<p class="note">${esc(r.note)}</p>` : ""}
+        </article>`;
+    }
+
+    function sectionHtml(sec) {
+      return `
+        <h2 class="section-title">${esc(sec.title)}</h2>
+        <p class="section-sub">${esc(sec.subtitle)}</p>
+        ${sec.rubrics.map(rubricHtml).join("")}`;
+    }
+
+    function bonusHtml(b) {
+      return `
+        <div class="bonus">
+          <div class="bonus-head">
+            <span class="title">${esc(b.title)}</span>
+            <span>${b.attempted ? pill("strong") : pill("na")} <span class="lifts">lifts ${esc(b.lifts)}</span></span>
+          </div>
+          <p class="note-plain">${esc(b.note)}</p>
+          ${subpointsHtml(b.subpoints)}
+        </div>`;
+    }
+
+    function telemetryHtml(rows) {
+      const groups = [
+        { key: "both", title: "Shared — both tracks" },
+        { key: "vibe", title: "AI collaboration — vibe coding only" }
+      ];
+      const body = groups.map(g => {
+        const rs = rows.filter(r => r.track === g.key);
+        if (!rs.length) return "";
+        const trs = rs.map(r => `
+          <tr class="${r.applies === false ? "is-na" : ""}">
+            <td>${esc(r.name)}<div class="src"><code>${esc(r.source)}</code></div></td>
+            <td class="val">${r.applies === false ? '<span class="pill na">N/A</span>' : esc(r.value)}</td>
+            <td>${esc(r.detail)}</td>
+          </tr>`).join("");
+        return `
+          <div class="tele-group-title">${esc(g.title)}</div>
+          <table class="tele">
+            <thead><tr><th>Signal</th><th>Value</th><th>Detail</th></tr></thead>
+            <tbody>${trs}</tbody>
+          </table>`;
+      }).join("");
+      return `<details class="telemetry" open><summary>Telemetry — the raw signals behind the scores</summary>${body}</details>`;
+    }
+
+    function render() {
+      const rep = REPORT_DATA.reports[currentTrack];
+      document.getElementById("challenge-name").textContent = REPORT_DATA.meta.challenge;
+      const o = rep.overall;
+      const html = `
+        <section class="overall">
+          <div class="score-dial">
+            <div class="num">${esc(o.score)}</div>
+            <div class="den">/ ${esc(o.out_of)}</div>
+            <span class="band ${esc(o.band)}">${esc(o.band)}</span>
+            <div class="dial-note">weighted average</div>
+          </div>
+          <div>
+            <div class="track-label">Track: ${esc(rep.track_label)}</div>
+            <h1>Why this score</h1>
+            <ul class="summary">${(o.summary_points || []).map(p => `<li>${esc(p)}</li>`).join("")}</ul>
+            ${legendHtml(REPORT_DATA.legend)}
+          </div>
+        </section>
+        ${rep.sections.map(sectionHtml).join("")}
+        <h2 class="section-title">Bonuses</h2>
+        <p class="section-sub">Optional credit that can only lift a score, never lower it.</p>
+        ${rep.bonuses.map(bonusHtml).join("")}
+        ${telemetryHtml(rep.telemetry)}`;
+      document.getElementById("report").innerHTML = html;
+
+      document.querySelectorAll("#track-toggle button").forEach(btn =>
+        btn.setAttribute("aria-selected", String(btn.dataset.track === currentTrack)));
+    }
+
+    document.getElementById("track-toggle").addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      currentTrack = btn.dataset.track;
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

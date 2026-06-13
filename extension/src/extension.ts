@@ -106,6 +106,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showInformationMessage("Enter a session key to start the interview first.");
         return;
       }
+      if (!config.aiAssistance) {
+        vscode.window.showInformationMessage(
+          "AI is not allowed for this interview — this is a normal coding interview. " +
+          "Solve it using your own knowledge and the starter code.",
+        );
+        return;
+      }
       chatProvider.setConfig(config);
       vscode.commands.executeCommand("workbench.view.extension.vibe-interview-panel");
     }),
@@ -163,6 +170,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       rejectAiChanges(blockId);
     }),
     vscode.commands.registerCommand("vibe.attachFileToChat", async (uri?: vscode.Uri) => {
+      const cfg = context.globalState.get<SessionConfig>(SESSION_KEY);
+      if (cfg && !cfg.aiAssistance) {
+        vscode.window.showInformationMessage(
+          "AI is not allowed for this interview — this is a normal coding interview.",
+        );
+        return;
+      }
       let target = uri;
       if (!target) {
         const editor = vscode.window.activeTextEditor;
@@ -357,12 +371,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     try { fs.unlinkSync(path.join(currentWs, ".jivahire_chat_log.json")); }
     catch { /* file not present — fine */ }
   }
-  chatProvider.setConfig(savedSession);
+  // Normal coding interview (no AI): leave the chat provider unconfigured so it
+  // renders nothing, and don't set the AI-on context flag — the chat view stays
+  // hidden (see the `when` clause on vibe.chat in package.json).
+  if (savedSession.aiAssistance) {
+    chatProvider.setConfig(savedSession);
+  }
   dashboardProvider.setConfig(savedSession);
   // Drives the `when: vibe.session.active` clause on the vibe.chat view in
   // package.json — without this context flag, the chat view stays hidden
   // and the candidate sees only the dashboard in the secondary sidebar.
   void vscode.commands.executeCommand("setContext", "vibe.session.active", true);
+  void vscode.commands.executeCommand("setContext", "vibe.aiAssistance", savedSession.aiAssistance === true);
   if (savedSession.meetLink) {
     void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
   }
@@ -643,9 +663,11 @@ function _scheduleTokenRefresh(
 }
 
 interface DepCheckResult {
-  label: string;
+  name: string;
+  minVersion?: string;
   check: string;
   ok: boolean;
+  install?: Dependency["install"];
 }
 
 // A dependency `check` is a server-supplied string from the challenge's
@@ -655,18 +677,32 @@ interface DepCheckResult {
 // onto the candidate's machine.
 const _SAFE_CHECK = /^[\w.+-]+( [\w.+-]+)*$/;
 
+// Pick the install hint for the candidate's OS, if the challenge provides one.
+function _installHint(install?: Dependency["install"]): string | undefined {
+  if (!install) return undefined;
+  if (process.platform === "darwin") return install.macos;
+  if (process.platform === "win32") return install.windows;
+  return install.debian;
+}
+
 function runDependencyChecks(deps: Dependency[]): DepCheckResult[] {
   return deps.map((dep) => {
     const check = (dep.check ?? "").trim();
+    const base = {
+      name: dep.name,
+      minVersion: dep.minVersion,
+      check,
+      install: dep.install,
+    };
     if (!_SAFE_CHECK.test(check)) {
-      return { label: dep.label, check, ok: false };
+      return { ...base, ok: false };
     }
     const [bin, ...args] = check.split(/\s+/);
     try {
       execFileSync(bin, args, { stdio: "pipe", shell: false, timeout: 5000 });
-      return { label: dep.label, check, ok: true };
+      return { ...base, ok: true };
     } catch {
-      return { label: dep.label, check, ok: false };
+      return { ...base, ok: false };
     }
   });
 }
@@ -682,12 +718,27 @@ async function confirmToolingAndStart(info: SessionPreflight): Promise<boolean> 
   const language = info.language && info.language !== "unknown" ? info.language : "unknown";
 
   const toolLines = results.length
-    ? results.map((r) => `${r.ok ? "✓" : "✗"}  ${r.label}   (${r.check})`).join("\n")
+    ? results
+        .map((r) => {
+          const ver = r.minVersion ? ` (≥ ${r.minVersion})` : "";
+          let line = `${r.ok ? "✓" : "✗"}  ${r.name}${ver}   (${r.check})`;
+          if (!r.ok) {
+            const hint = _installHint(r.install);
+            if (hint) line += `\n      install: ${hint}`;
+          }
+          return line;
+        })
+        .join("\n")
     : "No additional tooling required.";
+  const autoLine = info.autoFetched.length
+    ? `\n\nFetched automatically by the build (no install needed):\n${info.autoFetched
+        .map((s) => `• ${s}`)
+        .join("\n")}`
+    : "";
   const footer = anyMissing
     ? "Some tools are missing. Install them now, then click Continue — the timer starts only when you continue."
     : "The timer starts when you click Continue.";
-  const detail = `Challenge language: ${language}\n\n${toolLines}\n\n${footer}`;
+  const detail = `Challenge language: ${language}\n\n${toolLines}${autoLine}\n\n${footer}`;
 
   const message = anyMissing
     ? "Missing required tools for this challenge"

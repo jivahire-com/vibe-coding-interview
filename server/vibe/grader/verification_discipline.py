@@ -1,236 +1,159 @@
 """
-Verification Discipline (13% of composite, telemetry-derived, ungameable).
+Verification Discipline rubric (GRADING_METRICS_MAP.md §2A).
 
-Scores how thoroughly the candidate verified AI-generated code before moving on.
-Pure-deterministic — no LLM call. Signals come straight from the per-session
-telemetry stream populated by the VS Code extension.
+"Did they check their own work?" — runs the tests as they go, reviews changes
+instead of trusting them blindly, and runs the tests once more before submitting.
 
-Sub-signals per the rubric (GRADING_RUBRICS.md, "Verification Discipline"):
+Deterministic. A pure consumer of Layer-2 :class:`signals.Signals` — it does no
+telemetry derivation of its own. It applies its weighting to the relevant signal
+facts, maps each to a strong/weak/missing verdict, and emits one holistic 1-10
+score (capped at 6 unless a test ran in the 5 min before submitting).
 
-  - test_after_apply_ratio:  applies followed by a test_run within 90s
-  - apply_then_edit_rate:    applies with a follow-up edit carrying
-                              post_apply_of=<block_id> before the next commit
-  - self_authored_ratio:     typed_chars / (typed_chars + ai_applied_chars),
-                              healthy band 0.40–0.70
-  - incremental_apply_pattern: smaller applies and at least one test between
-                              consecutive applies score higher
-  - pre_submit_test_run:     boolean floor — at least one test_run in the
-                              5 min before submission caps the score at 6 if
-                              missing.
+On the vibe track the signals are AI-apply-keyed; on the non-AI track they fall
+back to the hand-edit cadence (`test_after_edit`, `incremental_edit`,
+self-authored = 100%).
 """
 
 from __future__ import annotations
 
-import json
-import statistics
 from typing import Any
 
-from vibe.db import query
+from vibe.grader.rubric_common import subpoint
+from vibe.grader.signals import Signals
 
-# Window (ms) inside which a follow-up test_run "covers" an AI apply.
-_TEST_AFTER_APPLY_WINDOW_MS = 90_000
-# Window (ms) before submitted_at in which a test_run satisfies the floor.
-_PRE_SUBMIT_TEST_WINDOW_MS = 5 * 60_000
+_PRE_SUBMIT_FLOOR_CAP = 6.0
 
-# Weights for the sub-scores → composite (sum to 1.0).
-_WEIGHTS = {
+_WEIGHTS_VIBE = {
     "test_after_apply_ratio": 0.40,
     "apply_then_edit_rate": 0.25,
     "self_authored_ratio": 0.20,
     "incremental_apply_pattern": 0.15,
 }
-
-# Hard cap when pre_submit_test_run is missing (rubric: "Required floor for any
-# score >= 7").
-_PRE_SUBMIT_FLOOR_CAP = 6.0
-
-
-def compute(session_id: str, submitted_at_s: int | None) -> dict[str, Any]:
-    """Return {score: float 1-10, breakdown: {...}} for this session.
-
-    `submitted_at_s` is in **seconds** (matches the sessions.submitted_at column
-    populated by submit.py). Telemetry events use millisecond timestamps; the
-    pre-submit floor check converts internally.
-    """
-    events = _load_events(session_id)
-    counters = _load_counters(session_id)
-    submitted_at_ms = (submitted_at_s * 1000) if submitted_at_s is not None else None
-
-    signals: dict[str, dict[str, Any]] = {
-        "test_after_apply_ratio": _score_test_after_apply(events),
-        "apply_then_edit_rate": _score_apply_then_edit(events),
-        "self_authored_ratio": _score_self_authored(counters),
-        "incremental_apply_pattern": _score_incremental(events),
-        "pre_submit_test_run": _score_pre_submit(events, submitted_at_ms),
-    }
-
-    raw = sum(signals[k]["score"] * w for k, w in _WEIGHTS.items())
-    floor_applied = not signals["pre_submit_test_run"]["passed"]
-    final = min(raw, _PRE_SUBMIT_FLOOR_CAP) if floor_applied else raw
-
-    return {
-        "score": round(float(final), 2),
-        "breakdown": {
-            "signals": signals,
-            "weights": _WEIGHTS,
-            "raw_weighted": round(float(raw), 2),
-            "pre_submit_floor_applied": floor_applied,
-            "pre_submit_floor_cap": _PRE_SUBMIT_FLOOR_CAP,
-        },
-    }
+_WEIGHTS_NON_AI = {
+    "test_after_edit_ratio": 0.50,
+    "self_authored_ratio": 0.25,
+    "incremental_pattern": 0.25,
+}
 
 
-# ─── Loaders ──────────────────────────────────────────────────────────────────
+def score(signals: Signals) -> dict[str, Any]:
+    if signals.ai_assistance:
+        subs, weighted = _vibe_subpoints(signals)
+    else:
+        subs, weighted = _non_ai_subpoints(signals)
 
-
-def _load_events(session_id: str) -> list[dict[str, Any]]:
-    """Pull all telemetry events for the session, oldest first.
-
-    payload is parsed into a dict here so downstream code doesn't have to
-    handle JSON strings.
-    """
-    rows = query(
-        "SELECT ts, event_type, payload FROM telemetry "
-        "WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
+    floor_applied = not signals.pre_submit_test_run.get("passed", True)
+    final = min(weighted, _PRE_SUBMIT_FLOOR_CAP) if floor_applied else weighted
+    note = (
+        "Pre-submit floor applied: capped at 6.0 because no test run landed in "
+        "the five minutes before submitting."
+        if floor_applied else None
     )
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        try:
-            payload = json.loads(r["payload"]) if r["payload"] else {}
-        except Exception:
-            payload = {}
-        out.append({"ts": r["ts"], "event_type": r["event_type"], "payload": payload})
-    return out
+    return {"score": round(float(final), 2), "subpoints": subs, "note": note}
 
 
-def _load_counters(session_id: str) -> dict[str, int]:
-    """Per-session typed/pasted/ai_applied character counters from sessions."""
-    rows = query(
-        "SELECT typed_chars, pasted_chars, ai_applied_chars "
-        "FROM sessions WHERE id=?",
-        (session_id,),
+# ─── Vibe-track subpoints (AI-apply-keyed) ───────────────────────────────────
+
+
+def _vibe_subpoints(s: Signals) -> tuple[list[dict[str, Any]], float]:
+    taa = s.test_after_apply
+    ate = s.apply_then_edit
+    inc = s.incremental_apply
+
+    sc_taa = _band_test_after(taa.get("ratio"))
+    sc_ate = _band_apply_then_edit(ate.get("rate"))
+    sc_self = _band_self_authored(s.self_authored_ratio)
+    sc_inc = _band_incremental(inc.get("mean_chars"), inc.get("between_rate"))
+
+    weighted = (
+        sc_taa * _WEIGHTS_VIBE["test_after_apply_ratio"]
+        + sc_ate * _WEIGHTS_VIBE["apply_then_edit_rate"]
+        + sc_self * _WEIGHTS_VIBE["self_authored_ratio"]
+        + sc_inc * _WEIGHTS_VIBE["incremental_apply_pattern"]
     )
-    if not rows:
-        return {"typed_chars": 0, "pasted_chars": 0, "ai_applied_chars": 0}
-    r = rows[0]
-    return {
-        "typed_chars": int(r.get("typed_chars") or 0),
-        "pasted_chars": int(r.get("pasted_chars") or 0),
-        "ai_applied_chars": int(r.get("ai_applied_chars") or 0),
-    }
+    subs = [
+        subpoint("test_after_apply_ratio", "Tests are run soon after accepting a change.",
+                 sc_taa, _taa_detail(taa)),
+        subpoint("apply_then_edit_rate", "Accepted code is reviewed and edited, not trusted blindly.",
+                 sc_ate, _ate_detail(ate)),
+        subpoint("self_authored_ratio", "A healthy share of the code is hand-written.",
+                 sc_self, _self_detail(s.self_authored_ratio)),
+        subpoint("incremental_apply_pattern", "Changes land in small steps, not one big paste.",
+                 sc_inc, _inc_detail(inc)),
+    ]
+    return subs, weighted
 
 
-# ─── Per-signal scorers ──────────────────────────────────────────────────────
+def _non_ai_subpoints(s: Signals) -> tuple[list[dict[str, Any]], float]:
+    tae = s.test_after_edit
+    inc = s.incremental_edit
+
+    sc_tae = _band_test_after(tae.get("ratio"), neutral=5.0)
+    sc_self = 9.0  # 100% hand-authored on this track
+    sc_inc = _band_incremental_edit(inc.get("mean_chars"))
+
+    weighted = (
+        sc_tae * _WEIGHTS_NON_AI["test_after_edit_ratio"]
+        + sc_self * _WEIGHTS_NON_AI["self_authored_ratio"]
+        + sc_inc * _WEIGHTS_NON_AI["incremental_pattern"]
+    )
+    subs = [
+        subpoint("test_after_edit_ratio", "Tests are run soon after a hand edit.",
+                 sc_tae, _tae_detail(tae)),
+        subpoint("self_authored_ratio", "The work is genuinely hand-written.",
+                 sc_self, "100% hand-authored on this track."),
+        subpoint("incremental_pattern", "Changes land in small steps.",
+                 sc_inc, _ince_detail(inc)),
+    ]
+    return subs, weighted
 
 
-def _score_test_after_apply(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per rubric: applies followed by a test_run within 90s.
+# ─── Banding (the rubric's judgment) ─────────────────────────────────────────
 
-    >0.80 → 9.5, 0.50–0.80 → 7, 0.30–0.50 → 5, (0, 0.30] → 3, 0 → 1.
-    No applies → 7 (neutral, candidate didn't use AI so there's nothing to verify).
-    """
-    applies = [e for e in events if e["event_type"] == "edit_ai_applied"]
-    if not applies:
-        return {"score": 7.0, "ratio": None, "applies": 0, "covered": 0,
-                "reason": "no AI applies in session — neutral score"}
-    covered = 0
-    test_runs = [e["ts"] for e in events if e["event_type"] == "test_run"]
-    for a in applies:
-        window_end = a["ts"] + _TEST_AFTER_APPLY_WINDOW_MS
-        if any(a["ts"] <= t <= window_end for t in test_runs):
-            covered += 1
-    ratio = covered / len(applies)
+
+def _band_test_after(ratio: float | None, *, neutral: float = 7.0) -> float:
+    if ratio is None:
+        return neutral
     if ratio > 0.80:
-        score = 9.5
-    elif ratio > 0.50:
-        score = 7.0
-    elif ratio > 0.30:
-        score = 5.0
-    elif ratio > 0:
-        score = 3.0
-    else:
-        score = 1.0
-    return {"score": score, "ratio": round(ratio, 3),
-            "applies": len(applies), "covered": covered}
+        return 9.5
+    if ratio > 0.50:
+        return 7.0
+    if ratio > 0.30:
+        return 5.0
+    if ratio > 0:
+        return 3.0
+    return 1.0
 
 
-def _score_apply_then_edit(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per rubric: apply followed by edit carrying post_apply_of=<block_id>.
-
-    Looks for edit_typed / edit_pasted events whose payload.post_apply_of
-    matches the block_id of any prior edit_ai_applied.
-    """
-    applies = [e for e in events if e["event_type"] == "edit_ai_applied"]
-    if not applies:
-        return {"score": 7.0, "rate": None, "applies": 0, "reviewed": 0,
-                "reason": "no AI applies — neutral"}
-    apply_block_ids = {
-        e["payload"].get("block_id") for e in applies if e["payload"].get("block_id")
-    }
-    reviewed_block_ids: set[str] = set()
-    for e in events:
-        if e["event_type"] not in ("edit_typed", "edit_pasted"):
-            continue
-        block_id = e["payload"].get("post_apply_of")
-        if block_id and block_id in apply_block_ids:
-            reviewed_block_ids.add(block_id)
-    reviewed = len(reviewed_block_ids)
-    applies_with_id = max(1, len(apply_block_ids))  # avoid div-by-zero
-    rate = reviewed / applies_with_id
+def _band_apply_then_edit(rate: float | None) -> float:
+    if rate is None:
+        return 7.0
     if rate > 0.50:
-        score = 9.0
-    elif rate > 0.25:
-        score = 7.0
-    elif rate > 0.10:
-        score = 5.0
-    elif rate > 0:
-        score = 3.0
-    else:
-        score = 2.0  # never edited any AI-applied block
-    return {"score": score, "rate": round(rate, 3),
-            "applies": len(apply_block_ids), "reviewed": reviewed}
+        return 9.0
+    if rate > 0.25:
+        return 7.0
+    if rate > 0.10:
+        return 5.0
+    if rate > 0:
+        return 3.0
+    return 2.0
 
 
-def _score_self_authored(counters: dict[str, int]) -> dict[str, Any]:
-    """typed / (typed + ai_applied) chars. Healthy band 0.40–0.70."""
-    typed = counters["typed_chars"]
-    ai_applied = counters["ai_applied_chars"]
-    total = typed + ai_applied
-    if total == 0:
-        return {"score": 5.0, "ratio": None, "typed_chars": 0,
-                "ai_applied_chars": 0, "reason": "no edits — neutral"}
-    ratio = typed / total
+def _band_self_authored(ratio: float | None) -> float:
+    if ratio is None:
+        return 5.0
     if 0.40 <= ratio <= 0.70:
-        score = 9.0
-    elif 0.30 <= ratio < 0.40 or 0.70 < ratio <= 0.85:
-        score = 7.0
-    elif 0.20 <= ratio < 0.30 or 0.85 < ratio <= 0.95:
-        score = 5.0
-    else:
-        score = 3.0
-    return {"score": score, "ratio": round(ratio, 3),
-            "typed_chars": typed, "ai_applied_chars": ai_applied}
+        return 9.0
+    if 0.30 <= ratio < 0.40 or 0.70 < ratio <= 0.85:
+        return 7.0
+    if 0.20 <= ratio < 0.30 or 0.85 < ratio <= 0.95:
+        return 5.0
+    return 3.0
 
 
-def _score_incremental(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Smaller applies + at least one test_run between consecutive applies → higher.
-
-    Combines two heuristics:
-      1. Mean bytes per apply — smaller = more incremental.
-      2. Fraction of consecutive apply-pairs with ≥1 test_run between them.
-
-    The bytes-per-apply heuristic is the primary anchor; the test-between
-    fraction is a small bonus that lifts the score by up to +1.
-    """
-    applies = [e for e in events if e["event_type"] == "edit_ai_applied"]
-    if not applies:
-        return {"score": 7.0, "applies": 0, "mean_chars": None,
-                "test_between_rate": None, "reason": "no AI applies — neutral"}
-    sizes = [int(e["payload"].get("chars") or 0) for e in applies]
-    sizes = [s for s in sizes if s > 0] or [0]
-    mean_chars = statistics.mean(sizes)
-
+def _band_incremental(mean_chars: float | None, between_rate: float | None) -> float:
+    if mean_chars is None:
+        return 7.0
     if mean_chars < 200:
         base = 8.0
     elif mean_chars < 500:
@@ -238,44 +161,58 @@ def _score_incremental(events: list[dict[str, Any]]) -> dict[str, Any]:
     elif mean_chars < 2000:
         base = 5.0
     else:
-        base = 3.0  # massive blocks
-
-    test_ts = sorted(e["ts"] for e in events if e["event_type"] == "test_run")
-    pairs = list(zip(applies, applies[1:]))
-    if pairs:
-        with_test_between = sum(
-            1 for a, b in pairs if any(a["ts"] < t < b["ts"] for t in test_ts)
-        )
-        between_rate = with_test_between / len(pairs)
-    else:
-        between_rate = 0.0
-    bonus = round(between_rate, 2)  # 0.0–1.0 lift
-
-    score = min(10.0, base + bonus)
-    return {
-        "score": round(score, 2),
-        "applies": len(applies),
-        "mean_chars": round(mean_chars, 1),
-        "test_between_rate": round(between_rate, 3),
-    }
+        base = 3.0
+    return min(10.0, base + round(between_rate or 0.0, 2))
 
 
-def _score_pre_submit(
-    events: list[dict[str, Any]], submitted_at_ms: int | None
-) -> dict[str, Any]:
-    """Boolean floor: any test_run in the 5 min before submission."""
-    if submitted_at_ms is None:
-        # No submission timestamp recorded — treat as not-yet-applicable.
-        # Composite still uses the other signals; the floor isn't tripped.
-        return {"passed": True, "score": 7.0, "reason": "no submitted_at — floor not enforced"}
-    window_start = submitted_at_ms - _PRE_SUBMIT_TEST_WINDOW_MS
-    passed = any(
-        e["event_type"] == "test_run" and window_start <= e["ts"] <= submitted_at_ms
-        for e in events
-    )
-    return {
-        "passed": passed,
-        "score": 10.0 if passed else 1.0,
-        "window_start_ms": window_start,
-        "submitted_at_ms": submitted_at_ms,
-    }
+def _band_incremental_edit(mean_chars: float | None) -> float:
+    if mean_chars is None:
+        return 7.0
+    if mean_chars < 400:
+        return 8.0
+    if mean_chars < 1200:
+        return 6.0
+    if mean_chars < 3000:
+        return 5.0
+    return 3.0
+
+
+# ─── Evidence strings ────────────────────────────────────────────────────────
+
+
+def _taa_detail(taa: dict[str, Any]) -> str:
+    if taa.get("ratio") is None:
+        return "No AI applies in this session — nothing to verify."
+    return f"{taa['covered']} of {taa['applies']} applies were followed by a test within 90s."
+
+
+def _ate_detail(ate: dict[str, Any]) -> str:
+    if ate.get("rate") is None:
+        return "No AI applies in this session."
+    return f"{ate['reviewed']} of {ate['applies']} applied blocks were edited within 90s."
+
+
+def _self_detail(ratio: float | None) -> str:
+    if ratio is None:
+        return "No edits recorded."
+    band = "inside the 0.40–0.70 band" if 0.40 <= ratio <= 0.70 else "outside the 0.40–0.70 band"
+    return f"Typed/(typed+AI) = {ratio:.2f}, {band}."
+
+
+def _inc_detail(inc: dict[str, Any]) -> str:
+    if inc.get("mean_chars") is None:
+        return "No AI applies in this session."
+    return (f"Mean {inc['mean_chars']:.0f} chars/apply across {inc['applies']} applies; "
+            f"test-between rate {inc.get('between_rate') or 0:.2f}.")
+
+
+def _tae_detail(tae: dict[str, Any]) -> str:
+    if tae.get("ratio") is None:
+        return "No hand-edit bursts recorded."
+    return f"{tae['covered']} of {tae['bursts']} edit bursts were followed by a test within 90s."
+
+
+def _ince_detail(inc: dict[str, Any]) -> str:
+    if inc.get("mean_chars") is None:
+        return "No hand-edit bursts recorded."
+    return f"Mean {inc['mean_chars']:.0f} chars across {inc['bursts']} edit bursts."

@@ -31,7 +31,7 @@ def _clean():
 def _seed_session(sid: str) -> str:
     execute(
         "INSERT INTO sessions (id, session_key, candidate_email, challenge_id, branch_name, status) "
-        "VALUES (?, ?, 'c@test.com', 'cpp-lru-cache', ?, 'submitted')",
+        "VALUES (?, ?, 'c@test.com', 'cpp-thread-safe-cache', ?, 'submitted')",
         (sid, f"KEY-{sid}", f"interview/{sid}"),
     )
     return sid

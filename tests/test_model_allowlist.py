@@ -55,7 +55,7 @@ async def active_session(client):
         respx.post(_GH_REFS).mock(return_value=Response(201))
         r = await client.post(
             "/api/v1/sessions",
-            json={"session_key": "ML-001", "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"},
+            json={"session_key": "ML-001", "candidate_email": "c@test.com", "challenge_id": "cpp-thread-safe-cache"},
             headers=_ADMIN,
         )
         assert r.status_code == 201

@@ -144,16 +144,18 @@ def test_floor_constant_is_near_zero_not_zero():
     assert 0 < engagement.NEAR_ZERO < 1
 
 
-# ─── runner summary surfaces the no-show note ────────────────────────────────
+# ─── runner flooring gate surfaces the no-show note ──────────────────────────
 
 
-def test_signals_reason_prefers_no_show_note():
-    bd = {"no_show": True, "reason": engagement.NO_SHOW_NOTE,
-          "signals": {"pre_submit_test_run": {"score": 1.0, "reason": "x"}}}
-    assert runner._signals_reason(bd) == engagement.NO_SHOW_NOTE
-
-
-def test_criteria_reason_prefers_no_show_note():
-    bd = {"no_show": True, "reason": engagement.NO_SHOW_NOTE,
-          "criteria": {"edge_cases": {"score": 3.0, "reasoning": "y"}}}
-    assert runner._criteria_reason(bd) == engagement.NO_SHOW_NOTE
+def test_no_show_floors_non_objective_dims_and_records_note():
+    note = engagement.NO_SHOW_NOTE
+    dims = {
+        "tests": {"score": 9.0, "subpoints": []},            # objective — excluded
+        "code_quality": {"score": 8.0, "subpoints": []},      # non-objective — floored
+        "verification_discipline": {"score": 7.0, "subpoints": []},
+    }
+    runner._floor_dims(dims, ["code_quality", "verification_discipline"], note, key="no_show")
+    assert dims["tests"]["score"] == 9.0
+    assert dims["code_quality"]["score"] <= engagement.NEAR_ZERO
+    assert dims["code_quality"]["note"] == note
+    assert dims["code_quality"]["no_show"] is True

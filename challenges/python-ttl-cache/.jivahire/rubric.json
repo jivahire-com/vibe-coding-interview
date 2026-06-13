@@ -23,10 +23,10 @@
     "Monotonic time source (time.monotonic vs time.time for TTL comparisons)"
   ],
   "tasks": [
-    {"id": "basic",         "points": 25, "test_tag": "basic"},
-    {"id": "thread_safety", "points": 30, "test_tag": "thread"},
-    {"id": "edge_cases",    "points": 20, "test_tag": "edge"},
-    {"id": "ttl_expiry",    "points": 25, "test_tag": "ttl"}
+    {"id": "basic",         "points": 25, "test_tag": "basic",  "description": "Core get/put and LRU eviction behaviour."},
+    {"id": "thread_safety", "points": 30, "test_tag": "thread", "description": "Concurrent get/put do not corrupt cache state."},
+    {"id": "edge_cases",    "points": 20, "test_tag": "edge",   "description": "Boundary handling such as capacity=0 and unhashable keys."},
+    {"id": "ttl_expiry",    "points": 25, "test_tag": "ttl",    "description": "Expired entries are not returned from get()."}
   ],
   "composite_weights": {
     "test_score":  0.25,

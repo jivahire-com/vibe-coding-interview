@@ -388,7 +388,7 @@ describe('ChatViewProvider streamChat error handling', () => {
     server.on('request', (_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'partial' } }] }) + '\n');
-      res.write('data: ' + JSON.stringify({ error: { message: 'budget exhausted' } }) + '\n');
+      res.write('data: ' + JSON.stringify({ error: 'budget_exhausted_midstream', code: 402 }) + '\n');
       res.write('data: [DONE]\n');
       res.end();
     });
@@ -409,7 +409,7 @@ describe('ChatViewProvider streamChat error handling', () => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       // Server delivers ONE delta chunk, then the budget error before [DONE]
       res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'half-' } }] }) + '\n');
-      res.write('data: ' + JSON.stringify({ error: { message: 'budget exhausted' } }) + '\n');
+      res.write('data: ' + JSON.stringify({ error: 'budget_exhausted_midstream', code: 402 }) + '\n');
       res.write('data: [DONE]\n');
       res.end();
     });
@@ -421,6 +421,35 @@ describe('ChatViewProvider streamChat error handling', () => {
     // provider stays flagged as budget-exhausted across renders.
     expect((provider as any).messages).toEqual([]);
     expect((provider as any).budgetExhausted).toBe(true);
+  });
+
+  // ── Upstream error chunk (non-402) surfaces a real error, not "budget" ──
+
+  // The proxy already sent a 200 + SSE headers when an upstream call fails
+  // (e.g. oversized prompt), so it reports the failure in-band as an error
+  // chunk with a non-402 code. That must show the real message and restore the
+  // prompt — NOT be misclassified as budget exhaustion, and NOT logged as a
+  // phantom (empty) assistant turn the way a silent stream-close used to be.
+  test('upstream error chunk (code 502) surfaces message and does not flag budget', async () => {
+    server.on('request', (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: ' + JSON.stringify({
+        error: 'upstream_error', code: 502, message: 'The AI service rejected the request.',
+      }) + '\n');
+      res.write('data: [DONE]\n');
+      res.end();
+    });
+
+    await setupSend('please solve the bugs');
+
+    expect((provider as any).budgetExhausted).toBe(false);
+    expect((provider as any).messages).toEqual([]); // no phantom empty turn
+    const arg = (vscode.window.showErrorMessage as jest.Mock).mock.calls[0][0] as string;
+    expect(arg).toMatch(/rejected the request/);
+    const restoreCall = (view.webview.postMessage as jest.Mock).mock.calls
+      .map((c: unknown[]) => c[0] as { command: string; text?: string })
+      .find((m) => m.command === 'restorePrompt');
+    expect(restoreCall).toEqual({ command: 'restorePrompt', text: 'please solve the bugs' });
   });
 
   // ── Review-Bug 12: malformed SSE chunks are logged, not silently dropped ──
@@ -457,7 +486,7 @@ describe('ChatViewProvider streamChat error handling', () => {
   test('Bug A: budget-exhausted mid-stream sends restorePrompt with original text', async () => {
     server.on('request', (_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      res.write('data: ' + JSON.stringify({ error: { message: 'budget exhausted' } }) + '\n');
+      res.write('data: ' + JSON.stringify({ error: 'budget_exhausted_midstream', code: 402 }) + '\n');
       res.write('data: [DONE]\n');
       res.end();
     });

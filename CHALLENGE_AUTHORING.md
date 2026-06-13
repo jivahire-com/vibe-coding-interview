@@ -298,6 +298,7 @@ When `GRADING_RUBRICS.md` changes:
 | `tasks[].id` | string | yes | Unique within the challenge |
 | `tasks[].points` | int | yes | Relative weight (used in rubric display; actual scoring via `composite_weights`) |
 | `tasks[].test_tag` | string | yes | Must match a tag used in the hidden test file |
+| `tasks[].description` | string | no | One short sentence describing what this test group checks; surfaced in the recruiter view's challenge tests/traps list. Falls back to a humanised `id` if omitted |
 | `composite_weights` | object | no | Override default weights; merges with defaults and is normalised to sum to 1.0 |
 | `total_points` | int | yes | Sum of `tasks[].points`; for display only |
 | `expected_tokens` | int | no | Optional; informational only. Token usage is now factored into the code/prompt/AI evaluators directly, not a standalone score |
@@ -337,9 +338,9 @@ When `GRADING_RUBRICS.md` changes:
   ],
 
   "tasks": [
-    {"id": "basic",   "points": 30, "test_tag": "basic"},
-    {"id": "<<REPLACE: task_id>>", "points": 40, "test_tag": "<<REPLACE: tag>>"},
-    {"id": "edge",    "points": 30, "test_tag": "edge"}
+    {"id": "basic",   "points": 30, "test_tag": "basic", "description": "<<REPLACE: one short sentence on what this test group checks.>>"},
+    {"id": "<<REPLACE: task_id>>", "points": 40, "test_tag": "<<REPLACE: tag>>", "description": "<<REPLACE: short sentence.>>"},
+    {"id": "edge",    "points": 30, "test_tag": "edge", "description": "<<REPLACE: short sentence.>>"}
   ],
 
   "total_points": 100,
@@ -365,7 +366,8 @@ When `GRADING_RUBRICS.md` changes:
 |---|---|---|---|
 | `traps` | object[] | yes | Array of trap definitions |
 | `traps[].id` | string | yes | Unique slug; shown in grader logs |
-| `traps[].description` | string | yes | What the bug is and where; grader narrative and recruiter view |
+| `traps[].description` | string | yes | What the bug is and where; full grader narrative |
+| `traps[].summary` | string | no | One short sentence for the recruiter view's challenge tests/traps list. Falls back to `description` if omitted |
 | `traps[].detection_tag` | string | yes | Tag used by the hidden test that fails if this trap is NOT fixed |
 | `traps[].severity` | int | yes | `1` minor, `2` moderate, `3` critical — weighted scoring |
 | `traps[].points` | int | no | Legacy display field; not used in scoring formula |
@@ -378,18 +380,21 @@ When `GRADING_RUBRICS.md` changes:
     {
       "id": "<<REPLACE: severity-1-trap-id>>",
       "description": "<<REPLACE: Minor / cosmetic issue — e.g. missing const qualifier on a method that does not mutate state.>>",
+      "summary": "<<REPLACE: one short sentence for the recruiter list.>>",
       "detection_tag": "<<REPLACE: matching-test-tag>>",
       "severity": 1
     },
     {
       "id": "<<REPLACE: severity-2-trap-id>>",
       "description": "<<REPLACE: Moderate bug — e.g. off-by-one in the eviction loop uses > capacity instead of >= capacity; cache grows one entry beyond limit before evicting.>>",
+      "summary": "<<REPLACE: one short sentence for the recruiter list.>>",
       "detection_tag": "<<REPLACE: matching-test-tag>>",
       "severity": 2
     },
     {
       "id": "<<REPLACE: severity-3-trap-id>>",
       "description": "<<REPLACE: Critical bug — e.g. capacity=0 check (0 > 0) is false; first put inserts an entry instead of being a no-op, silently corrupting invariants.>>",
+      "summary": "<<REPLACE: one short sentence for the recruiter list.>>",
       "detection_tag": "<<REPLACE: matching-test-tag>>",
       "severity": 3
     }
@@ -1337,7 +1342,7 @@ Complete §11.C, then add a §11.X appendix for the new language following the s
 - Grader implementation: [server/vibe/grader/](server/vibe/grader/)
 - Token measurement: [scripts/measure_repo_tokens.py](scripts/measure_repo_tokens.py)
 - Reference challenge (Python): [challenges/python-ttl-cache/](challenges/python-ttl-cache/)
-- Reference challenge (C++): [challenges/cpp-lru-cache/](challenges/cpp-lru-cache/)
+- Reference challenge (C++): [challenges/cpp-thread-safe-cache/](challenges/cpp-thread-safe-cache/)
 
 ---
 

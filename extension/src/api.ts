@@ -9,10 +9,14 @@ export interface ModelPricing {
 
 /** A toolchain dependency the candidate needs for the assigned challenge.
  *  `check` is a `<tool> <flag>` command the extension runs (without a shell)
- *  to verify the tool is installed. Sourced from the challenge's metadata.json. */
+ *  to verify the tool is installed. `minVersion` and per-OS `install` hints are
+ *  display-only. Sourced from the challenge's metadata.json (the server
+ *  normalizes both the flat and nested metadata shapes into this form). */
 export interface Dependency {
-  label: string;
+  name: string;
+  minVersion?: string;
   check: string;
+  install?: { macos?: string; debian?: string; windows?: string };
 }
 
 /** Read-only challenge info for the pre-clone confirmation dialog. Fetched
@@ -23,6 +27,9 @@ export interface SessionPreflight {
   title: string;
   language: string;
   dependencies: Dependency[];
+  /** Tooling the build fetches automatically (e.g. "Catch2 v3 …"). Informational
+   *  only — no install check is run for these. */
+  autoFetched: string[];
 }
 
 export interface SessionConfig {
@@ -72,6 +79,13 @@ export interface SessionConfig {
    * runs out — the recorder only opens post-submit.
    */
   requireEndVideo?: boolean;
+  /**
+   * Whether this interview includes the AI chat assistant. True (default) is
+   * the normal "vibe coding" experience. False is a normal coding interview —
+   * the AI chat is disabled and the LLM proxy refuses chat. Defaults to true
+   * when the server omits the field, so older servers keep AI on.
+   */
+  aiAssistance: boolean;
 }
 
 /** Default pricing fallback when the server omits the pricing table.
@@ -141,6 +155,9 @@ export async function validateSession(
     ? res.scheduled_at
     : undefined;
   const requireEndVideo = res.require_end_video === true;
+  // Default to AI-on when the server omits the field (older servers), so the
+  // chat experience is unchanged unless the server explicitly disables it.
+  const aiAssistance = res.ai_assistance !== false;
 
   return {
     sessionId: res.session_id,
@@ -166,6 +183,7 @@ export async function validateSession(
     videoPlatform,
     scheduledAt,
     requireEndVideo,
+    aiAssistance,
   };
 }
 
@@ -186,19 +204,38 @@ export async function preflightSession(
   const rawDeps = Array.isArray(res.dependencies) ? res.dependencies : [];
   const dependencies: Dependency[] = rawDeps
     .filter(
-      (d: unknown): d is { label: string; check: string } =>
+      (d: unknown): d is Record<string, unknown> =>
         !!d &&
         typeof d === "object" &&
-        typeof (d as { label?: unknown }).label === "string" &&
+        // The server emits `name`; tolerate a legacy `label` just in case.
+        (typeof (d as { name?: unknown }).name === "string" ||
+          typeof (d as { label?: unknown }).label === "string") &&
         typeof (d as { check?: unknown }).check === "string"
     )
-    .map((d: { label: string; check: string }) => ({ label: d.label, check: d.check }));
+    .map((d: Record<string, unknown>) => {
+      const rawInstall = d.install;
+      const install =
+        rawInstall && typeof rawInstall === "object"
+          ? (rawInstall as Dependency["install"])
+          : undefined;
+      return {
+        name: (d.name ?? d.label) as string,
+        minVersion: typeof d.min_version === "string" ? d.min_version : undefined,
+        check: d.check as string,
+        install,
+      };
+    });
+
+  const autoFetched = Array.isArray(res.auto_fetched)
+    ? res.auto_fetched.filter((s: unknown): s is string => typeof s === "string")
+    : [];
 
   return {
     challengeId: typeof res.challenge_id === "string" ? res.challenge_id : "",
     title: typeof res.title === "string" ? res.title : (res.challenge_id ?? ""),
     language: typeof res.language === "string" ? res.language : "unknown",
     dependencies,
+    autoFetched,
   };
 }
 

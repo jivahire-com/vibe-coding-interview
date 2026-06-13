@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient, Response
 _db_fd, _db_path = tempfile.mkstemp(suffix=".db")
 os.environ.update({
     "OPENAI_API_KEY": "sk-test",
-    "GITHUB_CHALLENGES_REPO": "test-org/cpp-lru-cache",
+    "GITHUB_CHALLENGES_REPO": "test-org/cpp-thread-safe-cache",
     "GITHUB_CHALLENGES_OWNER": "",
     "ADMIN_TOKEN": "admin-secret",
     "DB_PATH": _db_path,
@@ -33,7 +33,7 @@ import vibe.auth as _auth  # noqa: E402
 bootstrap()
 
 _ADMIN = {"X-Admin-Token": "admin-secret"}
-_CHALLENGE = "cpp-lru-cache"
+_CHALLENGE = "cpp-thread-safe-cache"
 # Derive the repo from settings rather than hardcoding: pydantic reads the env
 # once at import time, so whichever test module imports vibe.config first fixes
 # the value. repo_for_challenge() reflects whatever that ended up being.

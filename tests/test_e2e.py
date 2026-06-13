@@ -52,7 +52,7 @@ def _mock_github():
 async def _create_session(client, key: str) -> str:
     r = await client.post(
         "/api/v1/sessions",
-        json={"session_key": key, "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"},
+        json={"session_key": key, "candidate_email": "c@test.com", "challenge_id": "cpp-thread-safe-cache"},
         headers=_ADMIN,
     )
     assert r.status_code == 201
@@ -109,7 +109,7 @@ async def test_admin_invites_alias(client):
         _mock_github()
         r = await client.post(
             "/api/v1/admin/invites",
-            json={"session_key": "INV-001", "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"},
+            json={"session_key": "INV-001", "candidate_email": "c@test.com", "challenge_id": "cpp-thread-safe-cache"},
             headers=_ADMIN,
         )
     assert r.status_code == 201
@@ -128,7 +128,7 @@ async def test_create_session_with_meet_link_round_trip(client):
             json={
                 "session_key": "PANEL-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": meet_link,
             },
             headers=_ADMIN,
@@ -170,7 +170,7 @@ async def test_create_session_rejects_non_https_meet_link(client):
         json={
             "session_key": "BAD-001",
             "candidate_email": "c@test.com",
-            "challenge_id": "cpp-lru-cache",
+            "challenge_id": "cpp-thread-safe-cache",
             "meet_link": "http://meet.google.com/abc",
         },
         headers=_ADMIN,
@@ -204,7 +204,7 @@ async def test_panel_session_round_trip_with_schedule_and_panelists(client, monk
             json={
                 "session_key": "PANEL-002",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
                 "scheduled_at": scheduled,
                 "panelist_emails": ["lead@x.com", "Lead@x.com", "  hm@x.com  "],
@@ -243,7 +243,7 @@ async def test_panel_session_rejects_invalid_panelist_email(client):
         json={
             "session_key": "BAD-PANEL-001",
             "candidate_email": "c@test.com",
-            "challenge_id": "cpp-lru-cache",
+            "challenge_id": "cpp-thread-safe-cache",
             "meet_link": "https://meet.google.com/abc",
             "panelist_emails": ["valid@x.com", "not-an-email"],
         },
@@ -260,7 +260,7 @@ async def test_panel_session_rejects_scheduled_at_in_millis(client):
         json={
             "session_key": "BAD-SCHED-001",
             "candidate_email": "c@test.com",
-            "challenge_id": "cpp-lru-cache",
+            "challenge_id": "cpp-thread-safe-cache",
             "scheduled_at": 1_800_000_000_000,  # 2027 in milliseconds
         },
         headers=_ADMIN,
@@ -292,7 +292,7 @@ async def test_validate_session_rejects_future_scheduled_panel(client):
             json={
                 "session_key": "EARLY-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
                 "scheduled_at": future,
             },
@@ -326,7 +326,7 @@ async def test_validate_session_allows_past_scheduled_panel(client):
             json={
                 "session_key": "ONTIME-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
                 "scheduled_at": past,
             },
@@ -353,7 +353,7 @@ async def test_validate_session_allows_future_scheduled_async(client):
             json={
                 "session_key": "ASYNC-FUT-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "scheduled_at": future,
             },
             headers=_ADMIN,
@@ -374,7 +374,7 @@ async def test_validate_session_allows_panel_without_schedule(client):
             json={
                 "session_key": "PANEL-NOSCHED-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
             },
             headers=_ADMIN,
@@ -406,7 +406,7 @@ async def test_validate_session_blocks_panelists_only_future_schedule(client, mo
             json={
                 "session_key": "PANELISTS-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "panelist_emails": ["lead@x.com"],
                 "scheduled_at": future,
             },
@@ -429,7 +429,7 @@ def test_build_ics_generates_valid_vevent():
         session_id="abc123",
         scheduled_at=1_800_000_000,  # 2027-01-15 08:00:00 UTC
         max_minutes=60,
-        challenge_id="cpp-lru-cache",
+        challenge_id="cpp-thread-safe-cache",
         meet_link="https://meet.google.com/xyz",
         organizer_email="ops@jivahire.com",
         attendee_emails=["c@test.com", "lead@x.com"],
@@ -479,7 +479,7 @@ async def test_job_claim_atomicity():
     from vibe.jobs import claim_job
     execute(
         "INSERT INTO sessions (id, session_key, candidate_email, challenge_id, branch_name, status) "
-        "VALUES ('s1', 'K-001', 'x@x.com', 'cpp-lru-cache', 'interview/s1', 'submitted')"
+        "VALUES ('s1', 'K-001', 'x@x.com', 'cpp-thread-safe-cache', 'interview/s1', 'submitted')"
     )
     execute("INSERT INTO jobs (kind, session_id) VALUES ('grade', 's1')")
 
@@ -580,7 +580,7 @@ async def test_validate_session_require_end_video_false_for_panel_default(client
             json={
                 "session_key": "VID-PANEL-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
             },
             headers=_ADMIN,
@@ -599,7 +599,7 @@ async def test_validate_session_require_end_video_true_for_panel_override(client
             json={
                 "session_key": "VID-PANEL-002",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
                 "require_end_video": True,
             },
@@ -637,7 +637,7 @@ async def test_submit_skips_video_upload_for_panel_default(client, monkeypatch):
             json={
                 "session_key": "SUB-PANEL-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
             },
             headers=_ADMIN,
@@ -662,7 +662,7 @@ async def test_submit_includes_video_upload_for_panel_when_override(client, monk
             json={
                 "session_key": "SUB-PANEL-002",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
                 "require_end_video": True,
             },
@@ -698,7 +698,7 @@ async def test_invite_email_mentions_end_video_when_required(client, monkeypatch
             json={
                 "session_key": "MAIL-PANEL-001",
                 "candidate_email": "c@test.com",
-                "challenge_id": "cpp-lru-cache",
+                "challenge_id": "cpp-thread-safe-cache",
                 "meet_link": "https://meet.google.com/abc-defg-hij",
             },
             headers=_ADMIN,
@@ -710,7 +710,7 @@ async def test_invite_email_mentions_end_video_when_required(client, monkeypatch
 # ── org scoping (recruiter-backend proxy passes org_id) ───────────────────────
 
 async def _create_session_org(client, key: str, org_id: str | None) -> str:
-    body = {"session_key": key, "candidate_email": "c@test.com", "challenge_id": "cpp-lru-cache"}
+    body = {"session_key": key, "candidate_email": "c@test.com", "challenge_id": "cpp-thread-safe-cache"}
     if org_id is not None:
         body["org_id"] = org_id
     r = await client.post("/api/v1/sessions", json=body, headers=_ADMIN)
@@ -758,12 +758,12 @@ async def test_list_sessions_search_filter(client):
         _mock_github()
         await client.post(
             "/api/v1/sessions",
-            json={"session_key": "ALPHA-1", "candidate_email": "alice@acme.com", "challenge_id": "cpp-lru-cache"},
+            json={"session_key": "ALPHA-1", "candidate_email": "alice@acme.com", "challenge_id": "cpp-thread-safe-cache"},
             headers=_ADMIN,
         )
         await client.post(
             "/api/v1/sessions",
-            json={"session_key": "BETA-1", "candidate_email": "bob@globex.com", "challenge_id": "cpp-lru-cache"},
+            json={"session_key": "BETA-1", "candidate_email": "bob@globex.com", "challenge_id": "cpp-thread-safe-cache"},
             headers=_ADMIN,
         )
 

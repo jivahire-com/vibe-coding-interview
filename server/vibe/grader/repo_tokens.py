@@ -10,11 +10,21 @@ from vibe.config import settings
 _EXCLUDED_DIRS = {
     ".git", ".jivahire", "node_modules", "dist", "build", "target",
     "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache", ".tox",
+    # CMake out-of-source build trees: these hold FetchContent-vendored
+    # dependency *source* (e.g. Catch2 under _deps/) and generated text that
+    # the binary-extension filter below does NOT catch. A single `build-tsan/`
+    # dir blew the chat context past 3M tokens (model cap is 200k), which made
+    # every chat request fail upstream with a 400 and surfaced as empty output.
+    "_deps", "CMakeFiles", "cmake-build-debug", "cmake-build-release",
 }
 _EXCLUDED_EXTS = {
     ".lock", ".so", ".dll", ".exe", ".o", ".a", ".bin",
     ".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".pdf",
 }
+# Skip any single file larger than this. A challenge's source is tiny; a file
+# this big is a generated/vendored artifact that would bloat the context dump
+# without helping the model answer.
+_MAX_FILE_BYTES = 256 * 1024
 _CACHE_FILENAME = "token_counts.json"
 # Small fixed corrections to isolate the repo dump from system/ping overhead
 _SYSTEM_OVERHEAD_TOKENS = 6
@@ -97,11 +107,21 @@ def _iter_files(challenge_dir: Path):
         if file_path == cache_path:
             continue
         rel_parts = file_path.relative_to(challenge_dir).parts
-        if any(part in _EXCLUDED_DIRS for part in rel_parts):
+        # Exclude named build/cache dirs plus any out-of-source CMake build
+        # tree (`build`, `build-tsan`, `build-asan`, `build_debug`, …).
+        if any(
+            part in _EXCLUDED_DIRS or part.startswith("build-") or part.startswith("build_")
+            for part in rel_parts
+        ):
             continue
         name = file_path.name
         if name.endswith(".tar.gz"):
             continue
         if file_path.suffix.lower() in _EXCLUDED_EXTS:
+            continue
+        try:
+            if file_path.stat().st_size > _MAX_FILE_BYTES:
+                continue
+        except OSError:
             continue
         yield file_path

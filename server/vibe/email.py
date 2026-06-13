@@ -103,6 +103,7 @@ async def send_invite(
     scheduled_at: int | None = None,
     session_id: str | None = None,
     require_end_video: bool = False,
+    ai_assistance: bool = True,
 ) -> None:
     if not settings.sendgrid_api_key:
         log.info("SendGrid key not set — skipping invite email to %s", to_email)
@@ -110,6 +111,36 @@ async def send_invite(
 
     subject = "Your JivaHire Coding Interview Invitation"
     vsix_url = f"{settings.app_public_url}/jivahire-vibe-coding-interview.vsix"
+
+    # AI assistance: a normal coding interview (ai_assistance=False) has no AI
+    # chat, so we drop the "AI Budget" line and add a short note instead of
+    # implying an assistant the candidate won't have.
+    if ai_assistance:
+        ai_budget_text_line = f"AI Budget:    ${budget_usd:.2f}\n"
+        ai_budget_html_row = (
+            '  <tr><td style="padding:4px 12px 4px 0;color:#6b7280">AI Budget</td>'
+            f"<td>${budget_usd:.2f}</td></tr>"
+        )
+        ai_note_text_block = ""
+        ai_note_html_block = ""
+    else:
+        ai_budget_text_line = ""
+        ai_budget_html_row = ""
+        ai_note_text_block = """
+────────────────────────────────────────
+NORMAL CODING INTERVIEW (NO AI)
+────────────────────────────────────────
+This is a normal coding interview — there is NO AI assistant.
+Solve the challenge using only your own knowledge and the
+starter code. The AI chat is disabled in the extension.
+
+"""
+        ai_note_html_block = """
+<h3 style="margin-top:28px;color:#111827">Normal coding interview (no AI)</h3>
+<p>This is a <strong>normal coding interview</strong> &mdash; there is
+<strong>no AI assistant</strong>. Solve the challenge using only your own
+knowledge and the starter code. The AI chat is disabled in the extension.</p>
+"""
 
     # Scheduled-at block (rendered when the recruiter pinned a start time).
     scheduled_text_block = ""
@@ -194,8 +225,7 @@ Save this email — you'll need the session key below to start.
 Session Key:  {session_key}
 Challenge:    {challenge_id}
 Time Limit:   {max_minutes} minutes
-AI Budget:    ${budget_usd:.2f}
-{scheduled_text_block}{meet_text_block}{end_video_text_block}
+{ai_budget_text_line}{scheduled_text_block}{meet_text_block}{end_video_text_block}{ai_note_text_block}
 ────────────────────────────────────────
 STEP 1 — Install VS Code (skip if you already have it)
 ────────────────────────────────────────
@@ -262,10 +292,11 @@ Save this email &mdash; you'll need the session key below to start.</p>
       <td><code style="background:#f3f4f6;padding:4px 8px;border-radius:4px;font-size:1.1em">{session_key}</code></td></tr>
   <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Challenge</td><td>{challenge_id}</td></tr>
   <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Time Limit</td><td>{max_minutes} minutes</td></tr>
-  <tr><td style="padding:4px 12px 4px 0;color:#6b7280">AI Budget</td><td>${budget_usd:.2f}</td></tr>{scheduled_html_block}
+{ai_budget_html_row}{scheduled_html_block}
 </table>
 {meet_html_block}
 {end_video_html_block}
+{ai_note_html_block}
 <h3 style="margin-top:28px;color:#111827">Step 1 &mdash; Install VS Code</h3>
 <p>Skip this step if you already have it. Otherwise, download and install
 from <a href="https://code.visualstudio.com">code.visualstudio.com</a>

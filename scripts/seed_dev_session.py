@@ -21,7 +21,7 @@ execute(
     "INSERT INTO sessions "
     "(id, session_key, candidate_email, challenge_id, branch_name, llm_budget_usd, max_minutes) "
     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-    (session_id, SESSION_KEY, "dev@example.com", "cpp-lru-cache", branch, 2.00, 90),
+    (session_id, SESSION_KEY, "dev@example.com", "cpp-thread-safe-cache", branch, 2.00, 60),
 )
 print(f"Created dev session.")
 print(f"  SESSION_KEY={SESSION_KEY}")
