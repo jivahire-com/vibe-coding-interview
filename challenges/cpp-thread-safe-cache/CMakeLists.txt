@@ -12,10 +12,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-find_package(Threads REQUIRED)
-
 file(GLOB TEST_SOURCES tests/*.cpp)
 
 add_executable(tests ${TEST_SOURCES})
 target_include_directories(tests PRIVATE include)
-target_link_libraries(tests PRIVATE Catch2::Catch2WithMain Threads::Threads)
+target_link_libraries(tests PRIVATE Catch2::Catch2WithMain)
