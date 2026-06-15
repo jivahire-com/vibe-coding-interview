@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
-import { validateSession, preflightSession, refreshGithubToken, SessionConfig, Dependency, SessionPreflight } from "./api";
+import { validateSession, preflightSession, refreshGithubToken, invalidateSession, SessionConfig, Dependency, SessionPreflight } from "./api";
 import { Timer } from "./timer";
 import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
@@ -387,7 +387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
   }
   try {
-    _startSessionServices(savedSession, context, chatProvider);
+    _startSessionServices(savedSession, context, chatProvider, timer);
   } catch (err: unknown) {
     // Surface the failure instead of silently losing the auto-commit timer
     // and status bar buttons. activate() doesn't catch synchronous throws
@@ -464,6 +464,7 @@ function _startSessionServices(
   config: SessionConfig,
   context: vscode.ExtensionContext,
   chatProvider: ChatViewProvider,
+  timer: Timer,
 ): void {
   // Always-visible action buttons. The dashboard webview lives in the activity
   // bar sidebar, so it's hidden whenever the candidate switches to the File
@@ -592,7 +593,72 @@ function _startSessionServices(
   _stopAutoCommit = stop;
   context.subscriptions.push({ dispose: stop });
 
+  // ── Interview-integrity canary ────────────────────────────────────────────
+  // The candidate branch ships a `.jivahire/telemetry.jsonl` marker (planted by
+  // the server at branch creation). Deleting it — or the whole `.jivahire`
+  // folder — is a hard tamper signal: the session is invalidated immediately,
+  // on the FIRST deletion, with no grace and no restore.
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (ws) {
+    const canaryAbs = path.join(ws, ".jivahire", "telemetry.jsonl");
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(ws, ".jivahire/**"),
+      true,  // ignoreCreate
+      true,  // ignoreChange
+      false, // watch deletes
+    );
+    let handling = false;
+    watcher.onDidDelete(async () => {
+      // Act only when the marker itself is actually gone — unrelated churn
+      // inside `.jivahire/` must be ignored.
+      if (handling || fs.existsSync(canaryAbs)) return;
+      handling = true;
+      watcher.dispose();  // one-shot — the session is ending now
+      tracker.emit("integrity_marker_deleted", {});
+      await _endSessionForTamper(config, context, timer);
+    });
+    context.subscriptions.push(watcher);
+  }
+
   _scheduleTokenRefresh(config, context);
+}
+
+/**
+ * End a session invalidated for tampering: report it to the server
+ * (best-effort), stop every session timer/service, clear local session state,
+ * and tell the candidate. Mirrors the submit→DONE cleanup in activate().
+ */
+async function _endSessionForTamper(
+  config: SessionConfig,
+  context: vscode.ExtensionContext,
+  timer: Timer,
+): Promise<void> {
+  try {
+    await invalidateSession(
+      config,
+      "Candidate deleted the interview integrity file (.jivahire/telemetry.jsonl).",
+    );
+  } catch (e) {
+    getLogger()?.errorFromException("invalidate_session_failed", e);
+  }
+  timer.stop();
+  _stopAutoCommit?.();
+  _stopTokenRefresh?.();
+  await context.globalState.update(SESSION_KEY, undefined);
+  await context.globalState.update(OPENED_WS_KEY, undefined);
+  await vscode.commands.executeCommand("setContext", "vibe.session.active", false);
+  await vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", false);
+  await vscode.window.showErrorMessage(
+    "Interview session invalidated",
+    {
+      modal: true,
+      detail:
+        "Your interview session has been invalidated and ended because the interview " +
+        "integrity file (.jivahire/telemetry.jsonl) was deleted.\n\n" +
+        "Contact your recruiter if you believe this is a mistake.",
+    },
+    "OK",
+  );
 }
 
 /**

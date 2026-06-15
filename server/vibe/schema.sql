@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     typed_chars INTEGER NOT NULL DEFAULT 0,
     pasted_chars INTEGER NOT NULL DEFAULT 0,
     ai_applied_chars INTEGER NOT NULL DEFAULT 0,
+    -- Anti-tamper: set when the candidate deletes the .jivahire integrity
+    -- marker (after being warned). status flips to 'invalidated' and the
+    -- session is ended without grading; the reason is stored for the recruiter.
+    invalidated_at INTEGER,
+    invalidation_reason TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_key ON sessions(session_key);

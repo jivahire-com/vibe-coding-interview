@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 import httpx
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from vibe.auth import check_rate_limit, get_session
 from vibe.budget import pricing_for
@@ -480,7 +481,9 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
 
     if session["status"] == "pending":
         await _create_github_branch(
-            repo, session["branch_name"], source_ref=session.get("source_ref") or "main"
+            repo, session["branch_name"],
+            source_ref=session.get("source_ref") or "main",
+            session_id=session["id"],
         )
         execute(
             "UPDATE sessions SET status='active', started_at=? WHERE id=?",
@@ -553,6 +556,35 @@ async def refresh_github_token(session: dict = Depends(get_session)):
     }
 
 
+class InvalidateRequest(BaseModel):
+    reason: str = "Interview integrity violation"
+
+
+@router.post("/invalidate")
+def invalidate_session(req: InvalidateRequest, session: dict = Depends(get_session)):
+    """Invalidate and end an active session after a tamper signal.
+
+    Called by the extension when the candidate deletes the `.jivahire/`
+    integrity marker after being warned. The session is ended without grading
+    (the auto-submit sweep only touches 'active' rows and we never enqueue),
+    and the reason is stored for the recruiter. Idempotent: a session that is
+    already invalidated/submitted/graded is left as-is.
+    """
+    if session["status"] != "active":
+        return {"status": session["status"], "message": "Session already ended."}
+    reason = (req.reason or "").strip()[:500] or "Interview integrity violation"
+    execute(
+        "UPDATE sessions SET status='invalidated', invalidated_at=?, "
+        "invalidation_reason=? WHERE id=?",
+        (int(time.time()), reason, session["id"]),
+    )
+    log.warning(
+        "session_invalidated",
+        extra={"context": {"challenge_id": session.get("challenge_id"), "reason": reason}},
+    )
+    return {"status": "invalidated", "message": "Session invalidated and ended."}
+
+
 def _parse_report(grade: dict[str, Any] | None) -> dict[str, Any] | None:
     """The grade's structured report (GRADING_METRICS_MAP.md §5), parsed from
     `report_json`. Returns None for a legacy row that predates the three-layer
@@ -613,9 +645,11 @@ def get_session_detail(
     }
 
 
-async def _create_github_branch(repo: str, branch_name: str, source_ref: str = "main") -> None:
+async def _create_github_branch(
+    repo: str, branch_name: str, source_ref: str = "main", session_id: str = ""
+) -> None:
     # Mint a fresh installation token for this single branch-creation call.
-    # The token lives ~1hr but we throw it away after the two HTTP calls below
+    # The token lives ~1hr but we throw it away after the HTTP calls below
     # — no caching server-side, since each session creates exactly one branch
     # and the cost of minting is one extra request to GitHub.
     #
@@ -628,19 +662,96 @@ async def _create_github_branch(repo: str, branch_name: str, source_ref: str = "
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    base = f"https://api.github.com/repos/{repo}"
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
-            f"https://api.github.com/repos/{repo}/git/ref/heads/{source_ref}",
-            headers=headers,
+            f"{base}/git/ref/heads/{source_ref}", headers=headers
         )
         if r.status_code != 200:
             raise HTTPException(502, f"GitHub: could not get '{source_ref}' SHA: {r.text}")
         sha = r.json()["object"]["sha"]
 
         r = await client.post(
-            f"https://api.github.com/repos/{repo}/git/refs",
+            f"{base}/git/refs",
             headers=headers,
             json={"ref": f"refs/heads/{branch_name}", "sha": sha},
         )
-        if r.status_code not in (201, 422):  # 422 = branch already exists
+        if r.status_code == 422:  # branch already exists — already provisioned
+            return
+        if r.status_code != 201:
             raise HTTPException(502, f"GitHub: could not create branch: {r.text}")
+
+        # Provision the freshly-cut candidate branch with a single commit that:
+        #   (1) strips the `.jivahire/` answer key (rubric, traps, hidden tests)
+        #       so it can never reach the candidate's clone — fail closed; and
+        #   (2) plants the `.jivahire/telemetry.jsonl` integrity marker the
+        #       extension watches for tamper detection.
+        # This is the enforcement point for the CLAUDE.md rule that `.jivahire/`
+        # must be stripped before the candidate branch is usable.
+        await _provision_candidate_branch(client, base, headers, branch_name, sha, session_id)
+
+
+# A single JSONL line. The candidate sees a plausible "telemetry" file; the
+# extension restores-and-warns on first deletion and invalidates on the next.
+def _integrity_marker(session_id: str) -> str:
+    return json.dumps({
+        "type": "session_init",
+        "session_id": session_id,
+        "notice": (
+            "JivaHire interview integrity marker. Do NOT delete this file or the "
+            ".jivahire/ directory — deleting it will invalidate your interview session."
+        ),
+    }) + "\n"
+
+
+async def _provision_candidate_branch(client, base, headers, branch_name, sha, session_id):
+    # Resolve the branch's tree, then build a new tree that removes every
+    # `.jivahire/` blob and adds our marker. Any failure here is fatal: a branch
+    # that might still carry the answer key must not be handed to a candidate.
+    rc = await client.get(f"{base}/git/commits/{sha}", headers=headers)
+    if rc.status_code != 200:
+        raise HTTPException(502, f"GitHub: could not read base commit: {rc.text}")
+    tree_sha = rc.json()["tree"]["sha"]
+
+    rt = await client.get(
+        f"{base}/git/trees/{tree_sha}", headers=headers, params={"recursive": "1"}
+    )
+    if rt.status_code != 200:
+        raise HTTPException(502, f"GitHub: could not read base tree: {rt.text}")
+
+    new_tree: list[dict] = []
+    for entry in rt.json().get("tree", []):
+        if entry.get("type") == "blob" and entry["path"].startswith(".jivahire/"):
+            # sha=None deletes the path in a tree built on `base_tree`.
+            new_tree.append({
+                "path": entry["path"], "mode": entry["mode"],
+                "type": "blob", "sha": None,
+            })
+    new_tree.append({
+        "path": ".jivahire/telemetry.jsonl", "mode": "100644",
+        "type": "blob", "content": _integrity_marker(session_id),
+    })
+
+    ct = await client.post(
+        f"{base}/git/trees", headers=headers,
+        json={"base_tree": tree_sha, "tree": new_tree},
+    )
+    if ct.status_code != 201:
+        raise HTTPException(502, f"GitHub: could not create candidate tree: {ct.text}")
+
+    cc = await client.post(
+        f"{base}/git/commits", headers=headers,
+        json={
+            "message": "chore: provision candidate workspace (strip answer key, add integrity marker)",
+            "tree": ct.json()["sha"], "parents": [sha],
+        },
+    )
+    if cc.status_code != 201:
+        raise HTTPException(502, f"GitHub: could not create candidate commit: {cc.text}")
+
+    rp = await client.patch(
+        f"{base}/git/refs/heads/{branch_name}", headers=headers,
+        json={"sha": cc.json()["sha"], "force": True},
+    )
+    if rp.status_code != 200:
+        raise HTTPException(502, f"GitHub: could not update candidate branch: {rp.text}")

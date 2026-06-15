@@ -311,6 +311,23 @@ export async function submitSession(config: SessionConfig): Promise<SubmitRespon
   )) as SubmitResponse;
 }
 
+/**
+ * Report an interview-integrity violation (the candidate deleted the
+ * `.jivahire/` tamper marker after being warned). The server flips the session
+ * to `invalidated` and ends it without grading. Best-effort: the extension ends
+ * the session locally regardless of whether this call succeeds.
+ */
+export async function invalidateSession(
+  config: SessionConfig,
+  reason: string
+): Promise<void> {
+  await post(
+    `${config.llmProxyUrl}/api/v1/invalidate`,
+    JSON.stringify({ reason }),
+    config.sessionKey
+  );
+}
+
 export interface VideoInitResponse {
   upload_url: string;
   s3_key: string;
