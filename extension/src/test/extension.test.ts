@@ -35,7 +35,8 @@ const mockedExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSy
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CLONE_DIR = '/home/testuser/vibe-aabbccdd';
+// Full session id (see helpers.ts) — the clone dir is keyed on the whole id.
+const CLONE_DIR = '/home/testuser/vibe-aabbccdd-1122-3344-5566-778899aabbcc';
 
 const ALL_COMMANDS = [
   'vibe.enterSessionKey',

@@ -976,6 +976,7 @@ describe('TelemetryTracker path normalization (Bug 8)', () => {
 // deleted/recreated if its first line later stops matching.
 describe('TelemetryTracker tamper anchor', () => {
   const ANCHOR_KEY = 'vibe.telemetry.anchor';
+  const SESSION_ID = 'aabbccdd-1122-3344-5566-778899aabbcc'; // matches makeConfig()
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -998,15 +999,15 @@ describe('TelemetryTracker tamper anchor', () => {
       const ev = JSON.parse(line.trimEnd());
       expect(ctx.globalState.update).toHaveBeenCalledWith(
         ANCHOR_KEY,
-        { ts: ev.ts, id: ev.id },
+        { ts: ev.ts, id: ev.id, sessionId: SESSION_ID },
       );
     } finally {
       t.dispose();
     }
   });
 
-  test('a stored anchor is preserved — later events never overwrite it', () => {
-    const stored = { ts: 1000, id: '1000.42.1' };
+  test('a stored anchor for this session is preserved — later events never overwrite it', () => {
+    const stored = { ts: 1000, id: '1000.42.1', sessionId: SESSION_ID };
     const ctx = makeMockContext({ [ANCHOR_KEY]: stored });
     const t = new TelemetryTracker(makeConfig(), ctx);
     try {
@@ -1029,7 +1030,53 @@ describe('TelemetryTracker tamper anchor', () => {
     try {
       expect(ctx.globalState.update).toHaveBeenCalledWith(
         ANCHOR_KEY,
-        { ts: 777, id: '777.9.1' },
+        { ts: 777, id: '777.9.1', sessionId: SESSION_ID },
+      );
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('skips the session_init marker and adopts the first REAL event on resume', () => {
+    // Production files always begin with the provisioned `session_init`
+    // integrity marker (no ts/id). The tracker must look past it and anchor to
+    // the first real event — otherwise a resumed session re-captures a later
+    // event as the anchor and the grader flags a false "telemetry tampered".
+    const marker = JSON.stringify({ type: 'session_init', session_id: SESSION_ID, notice: 'do not delete' });
+    const firstReal = JSON.stringify({ ts: 777, event_type: 'file_open', payload: {}, id: '777.9.1' });
+    (fs.readFileSync as jest.Mock).mockReturnValue(marker + '\n' + firstReal + '\n');
+    const ctx = makeMockContext();
+    const t = new TelemetryTracker(makeConfig(), ctx);
+    try {
+      expect(ctx.globalState.update).toHaveBeenCalledWith(
+        ANCHOR_KEY,
+        { ts: 777, id: '777.9.1', sessionId: SESSION_ID },
+      );
+    } finally {
+      t.dispose();
+    }
+  });
+
+  test('a stored anchor from a DIFFERENT session is discarded, not re-reported', () => {
+    // Regression: globalState outlives an interview, so a prior session's anchor
+    // lingers. The new session must NOT adopt it (that re-reported a stale
+    // first-event id and the grader flagged a false tamper). With no on-disk
+    // file, the new session captures its own fresh anchor on the first emit.
+    const stale = { ts: 1000, id: '1000.42.1', sessionId: 'OTHER-SESSION-9999' };
+    const ctx = makeMockContext({ [ANCHOR_KEY]: stale });
+    const t = new TelemetryTracker(makeConfig(), ctx);
+    try {
+      // Construction must not adopt or re-persist the foreign anchor.
+      expect(ctx.globalState.update).not.toHaveBeenCalledWith(ANCHOR_KEY, stale);
+
+      t.emit('first', {});
+      const line = (fs.appendFileSync as jest.Mock).mock.calls[0]![1] as string;
+      const ev = JSON.parse(line.trimEnd());
+      // Fresh anchor for THIS session — never the stale id.
+      expect(ev.id).not.toBe('1000.42.1');
+      expect(ctx.globalState.update).toHaveBeenCalledWith(
+        ANCHOR_KEY,
+        { ts: ev.ts, id: ev.id, sessionId: SESSION_ID },
       );
     } finally {
       t.dispose();

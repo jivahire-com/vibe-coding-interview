@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     pasted_chars INTEGER NOT NULL DEFAULT 0,
     ai_applied_chars INTEGER NOT NULL DEFAULT 0,
     -- Anti-tamper: set when the candidate deletes the .jivahire integrity
-    -- marker (after being warned). status flips to 'invalidated' and the
-    -- session is ended without grading; the reason is stored for the recruiter.
+    -- marker. The session stays active (the candidate keeps working) but is
+    -- flagged for the recruiter; the reason is stored for the dashboard.
     invalidated_at INTEGER,
     invalidation_reason TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))

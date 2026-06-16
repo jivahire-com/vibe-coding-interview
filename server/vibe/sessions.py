@@ -219,7 +219,9 @@ def list_sessions(
         "s.llm_spent_usd, s.llm_budget_usd, s.max_minutes, "
         "s.typed_chars, s.pasted_chars, s.ai_applied_chars, "
         "s.meet_link, s.video_platform, s.scheduled_at, s.panelist_emails, "
+        "s.ai_assistance, "
         "s.created_at, s.started_at, s.submitted_at, s.org_id, "
+        "s.invalidated_at, s.invalidation_reason, "
         "g.total_score "
         "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
         f"{where}ORDER BY s.created_at DESC "
@@ -233,8 +235,18 @@ def list_sessions(
         sql += "LIMIT -1 OFFSET ?"
         page_params.append(offset)
     rows = query(sql, tuple(page_params))
+    sessions = []
+    for r in rows:
+        d = dict(r)
+        # `ai_assisted`: the invite-time AI-assistance toggle set by the recruiter
+        # (sessions.ai_assistance, default enabled), not whether AI was actually used.
+        d["ai_assisted"] = bool(d.get("ai_assistance", 1))
+        # `is_panel`: a panel interview carries a meet link or panelist emails —
+        # same definition the start/validate path uses (see is_panel in validate-session).
+        d["is_panel"] = bool(d.get("meet_link")) or bool(d.get("panelist_emails"))
+        sessions.append(d)
     return {
-        "sessions": [dict(r) for r in rows],
+        "sessions": sessions,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -253,6 +265,11 @@ def list_challenges(x_admin_token: str = Header(None)):
         )
     except FileNotFoundError:
         entries = []
+
+    # Only cpp-thread-safe-cache is offered to recruiters right now. Other
+    # challenge dirs remain on disk (grading/existing sessions still need them)
+    # but are filtered out of this listing.
+    entries = [d for d in entries if d == "cpp-thread-safe-cache"]
 
     items: list[dict] = []
     for cid in entries:
@@ -562,27 +579,40 @@ class InvalidateRequest(BaseModel):
 
 @router.post("/invalidate")
 def invalidate_session(req: InvalidateRequest, session: dict = Depends(get_session)):
-    """Invalidate and end an active session after a tamper signal.
+    """Flag an active session as integrity-violated WITHOUT ending it.
 
     Called by the extension when the candidate deletes the `.jivahire/`
-    integrity marker after being warned. The session is ended without grading
-    (the auto-submit sweep only touches 'active' rows and we never enqueue),
-    and the reason is stored for the recruiter. Idempotent: a session that is
-    already invalidated/submitted/graded is left as-is.
+    integrity marker. The candidate keeps working — the session stays
+    `active`, so the timer, AI chat, auto-commit, submit and grading all
+    continue as normal — but `invalidated_at`/`invalidation_reason` are
+    stamped so the recruiter dashboard can surface the tamper. Idempotent:
+    the first flag wins (its reason/timestamp are preserved on re-deletion);
+    submitted/graded sessions are left untouched.
     """
     if session["status"] != "active":
-        return {"status": session["status"], "message": "Session already ended."}
+        return {"status": session["status"], "message": "Session is not active."}
+    if session.get("invalidated_at"):
+        return {
+            "status": session["status"],
+            "invalidated_at": session["invalidated_at"],
+            "invalidation_reason": session.get("invalidation_reason"),
+            "message": "Session already flagged as invalid.",
+        }
     reason = (req.reason or "").strip()[:500] or "Interview integrity violation"
     execute(
-        "UPDATE sessions SET status='invalidated', invalidated_at=?, "
-        "invalidation_reason=? WHERE id=?",
+        "UPDATE sessions SET invalidated_at=?, invalidation_reason=? WHERE id=?",
         (int(time.time()), reason, session["id"]),
     )
     log.warning(
         "session_invalidated",
         extra={"context": {"challenge_id": session.get("challenge_id"), "reason": reason}},
     )
-    return {"status": "invalidated", "message": "Session invalidated and ended."}
+    return {
+        "status": session["status"],
+        "invalidated": True,
+        "invalidation_reason": reason,
+        "message": "Session flagged as invalid; candidate may continue.",
+    }
 
 
 def _parse_report(grade: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -598,6 +628,42 @@ def _parse_report(grade: dict[str, Any] | None) -> dict[str, Any] | None:
         return json.loads(raw) if isinstance(raw, str) else raw
     except (ValueError, TypeError):
         return None
+
+
+def _file_time_breakdown(session_id: str) -> list[dict[str, Any]]:
+    """Per-file wall-clock the candidate spent with each file focused.
+
+    Mirrors the grader's `files_explored_detail` (signals._file_time_detail) so
+    the dashboard sees the same numbers before a session is graded: every file
+    that was ever opened appears (0 ms if it was opened but never focused), and
+    `file_focus {file, ms}` durations are summed per file. Sorted by time desc,
+    then path, so the busiest file leads.
+    """
+    rows = query(
+        "SELECT event_type, payload FROM telemetry "
+        "WHERE session_id = ? AND event_type IN ('file_open', 'file_focus')",
+        (session_id,),
+    )
+    file_time_ms: dict[str, int] = {}
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"])
+        except (ValueError, TypeError):
+            continue
+        f = payload.get("file")
+        if not f:
+            continue
+        if r["event_type"] == "file_open":
+            file_time_ms.setdefault(f, 0)
+            continue
+        ms = payload.get("ms")
+        if not isinstance(ms, (int, float)) or ms <= 0:
+            continue
+        file_time_ms[f] = file_time_ms.get(f, 0) + int(ms)
+    return [
+        {"file": f, "ms": ms}
+        for f, ms in sorted(file_time_ms.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 @router.get("/sessions/{session_id}")
@@ -642,11 +708,16 @@ def get_session_detail(
         "grade": grade,
         "chat_exchanges": exchanges,
         "grading_errors": grading_errors,
+        # Per-file time-on-file [{file, ms}, …] derived live from telemetry
+        # file_open/file_focus events — available even before grading. Same
+        # shape and ordering as the report's files_explored_detail.
+        "file_time": _file_time_breakdown(session_id),
     }
 
 
 async def _create_github_branch(
-    repo: str, branch_name: str, source_ref: str = "main", session_id: str = ""
+    repo: str, branch_name: str, source_ref: str = "main", session_id: str = "",
+    provision: bool = True,
 ) -> None:
     # Mint a fresh installation token for this single branch-creation call.
     # The token lives ~1hr but we throw it away after the HTTP calls below
@@ -656,6 +727,14 @@ async def _create_github_branch(
     # `source_ref` is the branch the new branch is cut from. Defaults to "main"
     # (the original challenge); recruiter-authored `variant/*` branches let a
     # candidate be assigned an edited copy of the challenge instead.
+    #
+    # `provision` controls the post-create commit. Candidate `interview/*`
+    # branches set it True: the `.jivahire/` answer key is stripped and the
+    # telemetry integrity marker planted. Recruiter `variant/*` branches set it
+    # False: the variant is a faithful copy of `source_ref` that KEEPS the
+    # `.jivahire/` files (incl. metadata.json) so they're carried into the
+    # candidate branch later cut from it. Those files stay read-only — the
+    # recruiter editor blocks reads/writes under `.jivahire/` (see repo_files).
     branch_token = await mint_installation_token(repo)
     headers = {
         "Authorization": f"Bearer {branch_token.token}",
@@ -681,18 +760,28 @@ async def _create_github_branch(
         if r.status_code != 201:
             raise HTTPException(502, f"GitHub: could not create branch: {r.text}")
 
+        if not provision:
+            # Variant branch: leave it as an exact copy of `source_ref`, keeping
+            # the `.jivahire/` files intact. No strip, no integrity marker — a
+            # candidate is never handed a variant directly; the interview branch
+            # cut from it at validate time is what gets provisioned.
+            return
+
         # Provision the freshly-cut candidate branch with a single commit that:
-        #   (1) strips the `.jivahire/` answer key (rubric, traps, hidden tests)
-        #       so it can never reach the candidate's clone — fail closed; and
+        #   (1) strips the `.jivahire/` answer key (rubric, traps) so it can
+        #       never reach the candidate's clone — fail closed — while keeping
+        #       `.jivahire/metadata.json` (candidate-safe requirements); and
         #   (2) plants the `.jivahire/telemetry.jsonl` integrity marker the
         #       extension watches for tamper detection.
-        # This is the enforcement point for the CLAUDE.md rule that `.jivahire/`
-        # must be stripped before the candidate branch is usable.
+        # This is the enforcement point for the CLAUDE.md rule that the
+        # `.jivahire/` answer key must be stripped before the candidate branch
+        # is usable.
         await _provision_candidate_branch(client, base, headers, branch_name, sha, session_id)
 
 
 # A single JSONL line. The candidate sees a plausible "telemetry" file; the
-# extension restores-and-warns on first deletion and invalidates on the next.
+# extension watches it and, if it's deleted, flags the session as invalid
+# (with a stored reason for the recruiter) while letting the candidate continue.
 def _integrity_marker(session_id: str) -> str:
     return json.dumps({
         "type": "session_init",
@@ -705,9 +794,12 @@ def _integrity_marker(session_id: str) -> str:
 
 
 async def _provision_candidate_branch(client, base, headers, branch_name, sha, session_id):
-    # Resolve the branch's tree, then build a new tree that removes every
-    # `.jivahire/` blob and adds our marker. Any failure here is fatal: a branch
-    # that might still carry the answer key must not be handed to a candidate.
+    # Resolve the branch's tree, then build a new tree that strips the answer
+    # key (rubric, traps, and any other `.jivahire/` files) while KEEPING
+    # `.jivahire/metadata.json` so the extension can read the challenge
+    # requirements from the candidate's own clone. `telemetry.jsonl` is replaced
+    # with our integrity marker. Any failure here is fatal: a branch that might
+    # still carry the answer key must not be handed to a candidate.
     rc = await client.get(f"{base}/git/commits/{sha}", headers=headers)
     if rc.status_code != 200:
         raise HTTPException(502, f"GitHub: could not read base commit: {rc.text}")
@@ -719,12 +811,17 @@ async def _provision_candidate_branch(client, base, headers, branch_name, sha, s
     if rt.status_code != 200:
         raise HTTPException(502, f"GitHub: could not read base tree: {rt.text}")
 
+    # `metadata.json` is candidate-safe (requirements/language only) and is kept.
+    # `telemetry.jsonl` is left to the explicit append below so we never emit two
+    # tree entries for the same path.
+    keep = {".jivahire/metadata.json", ".jivahire/telemetry.jsonl"}
     new_tree: list[dict] = []
     for entry in rt.json().get("tree", []):
-        if entry.get("type") == "blob" and entry["path"].startswith(".jivahire/"):
+        path = entry["path"]
+        if entry.get("type") == "blob" and path.startswith(".jivahire/") and path not in keep:
             # sha=None deletes the path in a tree built on `base_tree`.
             new_tree.append({
-                "path": entry["path"], "mode": entry["mode"],
+                "path": path, "mode": entry["mode"],
                 "type": "blob", "sha": None,
             })
     new_tree.append({

@@ -41,9 +41,10 @@ document.addEventListener('alpine:init', () => {
     filesCurrentPath: '',
     filesContent: '',          // live buffer for the open file
     filesSha: null,
-    // Per-file edit buffer, keyed by path: { content, original, sha }. Holds
-    // every file touched this session so switching files never loses edits.
-    // A file is "unsaved" when content !== original.
+    filesCurrentReadOnly: false,  // open file is .jivahire/ (viewable, not editable)
+    // Per-file edit buffer, keyed by path: { content, original, sha, readOnly }.
+    // Holds every file touched this session so switching files never loses edits.
+    // A file is "unsaved" when content !== original (read-only files never are).
     filesEdits: {},
     filesVariantName: 'variant/',
     filesSaving: false,
@@ -438,6 +439,7 @@ document.addEventListener('alpine:init', () => {
       this.filesCurrentPath = '';
       this.filesContent = '';
       this.filesSha = null;
+      this.filesCurrentReadOnly = false;
       this.filesEdits = {};
       this.filesSaveMsg = '';
     },
@@ -445,7 +447,9 @@ document.addEventListener('alpine:init', () => {
     // Paths with unsaved changes. Reads filesContent for the open file so its
     // dirty state stays live as the user types.
     get unsavedFiles() {
-      return Object.keys(this.filesEdits).filter((p) => this.isFileDirty(p));
+      return Object.keys(this.filesEdits).filter(
+        (p) => !this.filesEdits[p].readOnly && this.isFileDirty(p)
+      );
     },
 
     isFileDirty(path) {
@@ -501,15 +505,17 @@ document.addEventListener('alpine:init', () => {
         this.filesCurrentPath = path;
         this.filesContent = cached.content;
         this.filesSha = cached.sha;
+        this.filesCurrentReadOnly = !!cached.readOnly;
         return;
       }
       try {
         const q = `path=${encodeURIComponent(path)}&ref=${encodeURIComponent(this.filesBranch)}`;
         const r = await this._get(`/api/v1/admin/repos/${encodeURIComponent(this.filesChallengeId)}/file?${q}`);
-        this.filesEdits[path] = { content: r.content, original: r.content, sha: r.sha };
+        this.filesEdits[path] = { content: r.content, original: r.content, sha: r.sha, readOnly: !!r.read_only };
         this.filesCurrentPath = r.path;
         this.filesContent = r.content;
         this.filesSha = r.sha;
+        this.filesCurrentReadOnly = !!r.read_only;
       } catch (e) {
         this.filesError = e.message;
       }
@@ -541,6 +547,7 @@ document.addEventListener('alpine:init', () => {
       this.filesError = '';
       this.filesSaveMsg = '';
       if (!this.filesCurrentPath) { this.filesError = 'Open a file first.'; return; }
+      if (this.filesCurrentReadOnly) { this.filesError = 'This file is read-only and cannot be edited.'; return; }
       const branch = this._resolveVariantBranch();
       if (!branch) { this.filesError = 'Enter a variant branch name (e.g. variant/my-edit).'; return; }
       this._stashActive();
@@ -749,6 +756,13 @@ document.addEventListener('alpine:init', () => {
         html += `<div class="gr-banner">
           <span class="gr-banner-title">Candidate did not engage</span>
           The behavioural and judgment dimensions were floored because the candidate did not attempt the challenge. See the per-rubric notes below.
+        </div>`;
+      }
+      if (meta.build_failed) {
+        html += `<div class="gr-banner">
+          <span class="gr-banner-title">⚠ Code did not compile</span>
+          The submission failed to build, so the hidden test suite could not run — the tests dimension scored 0.
+          ${meta.build_error ? `<pre class="gr-build-error">${e(meta.build_error)}</pre>` : ''}
         </div>`;
       }
       return html;

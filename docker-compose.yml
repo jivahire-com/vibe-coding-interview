@@ -19,6 +19,11 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
+    # Default Docker seccomp profile + `personality` allowed, so the grader's
+    # `setarch -R` can disable ASLR for ThreadSanitizer (otherwise it dies with
+    # EPERM and every test reports failed). All other syscalls stay filtered.
+    security_opt:
+      - seccomp=./worker/seccomp.json
     volumes:
       - ./data:/app/data
     env_file: .env

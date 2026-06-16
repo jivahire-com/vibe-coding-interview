@@ -354,9 +354,25 @@ export async function gitCommitAndPushAsync(
     await run(["remote", "set-url", "origin", authedUrl]);
     try {
       if (!needPushOnly) {
+        await run(["add", "-A"]);
+        // Safety guard: never let an auto-commit push a mass deletion. If the
+        // working tree has been emptied (wrong folder opened, an incomplete
+        // checkout, a stale clone dir) `git add -A` stages the removal of every
+        // challenge file, and committing+pushing that permanently wipes the
+        // candidate's branch — which is exactly what the grader then clones.
+        // Abort if the commit would leave nothing behind but the `.jivahire/`
+        // integrity marker. A real candidate always keeps source files, so this
+        // only trips on a degraded workspace.
+        if (!allowEmpty && (await _wouldWipeWorkspace(run))) {
+          getLogger()?.warn("auto_commit_skipped_wipe_guard", {
+            message:
+              "Auto-commit aborted: working tree retains no challenge files " +
+              "(only .jivahire/ remains). Refusing to push a mass deletion.",
+          });
+          return;
+        }
         const commitArgs = ["commit", "-m", message];
         if (allowEmpty) commitArgs.push("--allow-empty");
-        await run(["add", "-A"]);
         await run(commitArgs);
       }
       await run(["push"]);
@@ -367,6 +383,34 @@ export async function gitCommitAndPushAsync(
   } finally {
     releaseLock();
   }
+}
+
+/**
+ * True iff the staged index (after `git add -A`) would delete tracked files AND
+ * leave behind only `.jivahire/` integrity-marker paths — i.e. the commit would
+ * erase the entire challenge. Used to veto a destructive auto-commit. Fails open
+ * (returns false) if git can't answer (e.g. no HEAD yet) so we never block a
+ * legitimate commit on an ambiguous state.
+ */
+async function _wouldWipeWorkspace(
+  run: (args: string[]) => Promise<{ stdout: string; stderr: string }>,
+): Promise<boolean> {
+  let deletions = 0;
+  try {
+    const { stdout } = await run(["diff", "--cached", "--name-only", "--diff-filter=D"]);
+    deletions = stdout.split("\n").filter((l) => l.trim()).length;
+  } catch {
+    return false;
+  }
+  if (deletions === 0) return false; // not deleting anything → never a wipe
+  let remaining: string[];
+  try {
+    const { stdout } = await run(["ls-files"]);
+    remaining = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return false;
+  }
+  return remaining.every((p) => p.startsWith(".jivahire/"));
 }
 
 /**

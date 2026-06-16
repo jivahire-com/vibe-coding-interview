@@ -99,22 +99,31 @@ def _recorded_anchor(session_id: str) -> dict[str, Any] | None:
     rows = query(
         "SELECT context FROM app_logs "
         "WHERE session_id=? AND source='extension' AND message=? "
-        "ORDER BY ts ASC LIMIT 1",
+        "ORDER BY ts ASC",
         (session_id, _ANCHOR_MESSAGE),
     )
-    if not rows:
-        return None
-    raw = rows[0].get("context")
-    if not raw:
-        return None
-    try:
-        ctx = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    ts, fid = ctx.get("first_ts"), ctx.get("first_id")
-    if not isinstance(ts, int) or not isinstance(fid, str):
-        return None
-    return {"ts": ts, "id": fid}
+    for row in rows:
+        raw = row.get("context")
+        if not raw:
+            continue
+        try:
+            ctx = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        # Only a genuine first-event anchor is trustworthy. `origin == "resume"`
+        # is a re-report from the extension's persisted globalState and can carry
+        # a STALE value from an earlier session on the same machine; matching the
+        # file against it would falsely flag an untampered submission. When the
+        # only anchor we have is a resume re-report, fail open (treat as no
+        # anchor) — consistent with this module's rule that a penalty is applied
+        # only on provable deletion, never on an ambiguous source.
+        if ctx.get("origin") == "resume":
+            continue
+        ts, fid = ctx.get("first_ts"), ctx.get("first_id")
+        if not isinstance(ts, int) or not isinstance(fid, str):
+            continue
+        return {"ts": ts, "id": fid}
+    return None
 
 
 def _file_first_event(jsonl_file: Path) -> dict[str, Any] | None:
@@ -126,10 +135,16 @@ def _file_first_event(jsonl_file: Path) -> dict[str, Any] | None:
                 if not raw:
                     continue
                 evt = json.loads(raw)
+                # The branch is provisioned with a `session_init` integrity
+                # marker as line 1 (sessions._integrity_marker). It carries no
+                # ts/id and is NOT a telemetry event — skip it so the first
+                # *real* event is what gets compared against the anchor.
+                if evt.get("type") == "session_init":
+                    continue
                 ts, eid = evt.get("ts"), evt.get("id")
                 if isinstance(ts, int) and isinstance(eid, str):
                     return {"ts": ts, "id": eid}
-                return None  # first non-blank line isn't a valid event
+                return None  # first real line isn't a valid event
     except (OSError, json.JSONDecodeError):
         return None
     return None

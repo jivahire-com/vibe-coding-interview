@@ -24,6 +24,16 @@ interface TelemetryAnchor {
   id: string;
 }
 
+// What actually gets persisted under _ANCHOR_KEY. The owning `sessionId` scopes
+// the anchor to the session that produced it: a later session must NOT adopt a
+// previous session's anchor (globalState outlives a single interview), or it
+// would re-report a stale first-event id under the new session and the grader
+// would flag a false "telemetry tampered". sessionId is optional only so a
+// pre-fix stored record (no sessionId) is treated as foreign and discarded.
+interface StoredAnchor extends TelemetryAnchor {
+  sessionId?: string;
+}
+
 // Kept for one-time migration of events stranded in globalState from the old
 // HTTP-POST extension. Delete this key and the constructor migration block in
 // a follow-up release once all active sessions have upgraded.
@@ -169,6 +179,9 @@ export class TelemetryTracker implements vscode.Disposable {
    *  written or an existing/stored anchor is adopted on construction. */
   private _anchor: TelemetryAnchor | null = null;
   private _anchorInitialized: boolean = false;
+  /** Session that owns this tracker's anchor. Persisted alongside the anchor so
+   *  a different session never adopts it (see StoredAnchor). */
+  private _sessionId: string;
   // file → { block_id, until } for the most recent AI apply per file. Drives
   // post_apply_of attachment on subsequent typed/pasted edits within the 90s
   // verification window. Cleared on emit when the entry expires.
@@ -176,6 +189,7 @@ export class TelemetryTracker implements vscode.Disposable {
 
   constructor(config: SessionConfig, context: vscode.ExtensionContext) {
     this._context = context;
+    this._sessionId = config.sessionId;
     const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     this._jsonlPath = ws ? path.join(ws, ".jivahire", "telemetry.jsonl") : null;
 
@@ -284,7 +298,7 @@ export class TelemetryTracker implements vscode.Disposable {
       if (!this._anchorInitialized) {
         this._anchorInitialized = true;
         this._anchor = { ts: evt.ts, id: evt.id };
-        void this._context.globalState.update(_ANCHOR_KEY, this._anchor);
+        this._persistAnchor();
         this._reportAnchor("first_event");
       }
       const line = JSON.stringify(evt) + "\n";
@@ -307,10 +321,17 @@ export class TelemetryTracker implements vscode.Disposable {
    */
   private _initAnchor(): void {
     if (!this._jsonlPath) return;
-    const stored = this._context.globalState.get<TelemetryAnchor>(_ANCHOR_KEY);
+    const stored = this._context.globalState.get<StoredAnchor>(_ANCHOR_KEY);
     const onDisk = this._readFirstEventFromDisk();
-    if (stored && typeof stored.ts === "number" && typeof stored.id === "string") {
-      this._anchor = stored;
+    // Only a stored anchor belonging to THIS session may be adopted. A record
+    // left over from a previous session (or a pre-fix record with no sessionId)
+    // is foreign — ignore it and capture a fresh anchor below, so we never
+    // re-report a stale first-event id under a new session.
+    const storedIsOurs =
+      stored && typeof stored.ts === "number" && typeof stored.id === "string" &&
+      stored.sessionId === this._sessionId;
+    if (storedIsOurs) {
+      this._anchor = { ts: stored.ts, id: stored.id };
       this._anchorInitialized = true;
       if (onDisk && onDisk.id !== stored.id) {
         getLogger()?.warn("telemetry_anchor_mismatch", {
@@ -322,9 +343,17 @@ export class TelemetryTracker implements vscode.Disposable {
     } else if (onDisk) {
       this._anchor = onDisk;
       this._anchorInitialized = true;
-      void this._context.globalState.update(_ANCHOR_KEY, this._anchor);
+      this._persistAnchor();
       this._reportAnchor("adopted");
     }
+  }
+
+  /** Persist the current in-memory anchor to globalState, stamped with the
+   *  owning session id so a later session won't adopt it (see StoredAnchor). */
+  private _persistAnchor(): void {
+    if (!this._anchor) return;
+    const record: StoredAnchor = { ...this._anchor, sessionId: this._sessionId };
+    void this._context.globalState.update(_ANCHOR_KEY, record);
   }
 
   /** Read and parse the first event of telemetry.jsonl off disk, or null when
@@ -333,11 +362,22 @@ export class TelemetryTracker implements vscode.Disposable {
     if (!this._jsonlPath) return null;
     try {
       const content = fs.readFileSync(this._jsonlPath, "utf8");
-      const firstLine = content.split("\n", 1)[0]?.trim();
-      if (!firstLine) return null;
-      const evt = JSON.parse(firstLine) as { ts?: unknown; id?: unknown };
-      if (typeof evt.ts === "number" && typeof evt.id === "string") {
-        return { ts: evt.ts, id: evt.id };
+      for (const raw of content.split("\n")) {
+        const line = raw.trim();
+        if (!line) continue;
+        const evt = JSON.parse(line) as { ts?: unknown; id?: unknown; type?: unknown };
+        // The branch is provisioned with a `session_init` integrity marker as
+        // line 1 (server: sessions._integrity_marker). It carries no ts/id and
+        // is NOT a telemetry event — skip it so we anchor to the first REAL
+        // event, which is exactly what the grader compares against. Without
+        // this skip the marker is read as "the first line", this returns null,
+        // and a resumed session whose globalState anchor was lost re-captures a
+        // LATER event as a brand-new anchor → the server flags a false tamper.
+        if (evt.type === "session_init") continue;
+        if (typeof evt.ts === "number" && typeof evt.id === "string") {
+          return { ts: evt.ts, id: evt.id };
+        }
+        return null; // first real line isn't a valid event
       }
     } catch { /* missing / unreadable / malformed → no anchor on disk */ }
     return null;

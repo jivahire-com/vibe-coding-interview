@@ -826,6 +826,13 @@ select.input { cursor: pointer; }
   color: var(--gr-missing-ink); font-size: 0.86rem;
 }
 .grade-report .gr-banner .gr-banner-title { font-weight: 700; display: block; margin-bottom: 2px; }
+.grade-report .gr-banner .gr-build-error {
+  margin: 8px 0 0; padding: 8px 10px; border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06); border: 1px solid var(--gr-missing-ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem;
+  line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+  max-height: 220px; overflow: auto;
+}
 
 /* Legend */
 .grade-report .gr-legend {

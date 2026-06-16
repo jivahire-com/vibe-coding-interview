@@ -514,6 +514,7 @@
                @click="openFile(f.path)">
             <span class="dirty-dot" x-show="isFileDirty(f.path)" title="Unsaved changes">●</span>
             <span x-text="f.path"></span>
+            <span x-show="f.read_only" title="Read-only" style="margin-left:auto;opacity:0.6">🔒</span>
           </div>
         </template>
       </div>
@@ -529,8 +530,9 @@
               <strong class="font-mono" style="font-size:13px" x-text="filesCurrentPath"></strong>
               <span class="text-sm text-muted" x-text="'@ ' + filesBranch"></span>
               <span x-show="isFileDirty(filesCurrentPath)" class="badge" style="background:var(--border-warn,#f59e0b);color:#fff">unsaved</span>
+              <span x-show="filesCurrentReadOnly" class="badge" style="background:var(--vscode-descriptionForeground,#6b7280);color:#fff">read-only</span>
             </div>
-            <textarea class="input" x-model="filesContent" spellcheck="false"
+            <textarea class="input" x-model="filesContent" spellcheck="false" :readonly="filesCurrentReadOnly"
                       style="width:100%;min-height:380px;font-family:monospace;font-size:12.5px;white-space:pre;overflow:auto"></textarea>
             <div class="input-row" style="margin-top:12px;align-items:end">
               <div class="field" style="margin-bottom:0">
@@ -538,7 +540,7 @@
                 <input type="text" class="input" placeholder="variant/my-edit" x-model="filesVariantName" />
               </div>
               <div style="margin-bottom:0;display:flex;gap:8px">
-                <button class="btn btn-ghost" @click="saveFile()" :disabled="filesSaving">
+                <button class="btn btn-ghost" @click="saveFile()" :disabled="filesSaving || filesCurrentReadOnly">
                   <span x-text="filesSaving ? 'Saving…' : 'Save this file'"></span>
                 </button>
                 <button class="btn btn-primary" @click="saveAllFiles()" :disabled="filesSaving || unsavedFiles.length === 0">
@@ -548,7 +550,7 @@
             </div>
             <p x-show="filesSaveMsg" class="text-sm" style="margin-top:8px;color:var(--text-good,#16a34a)" x-text="filesSaveMsg"></p>
             <p class="input-hint" style="margin-top:6px;font-size:11px;color:var(--vscode-descriptionForeground);">
-              <strong>Save this file</strong> commits only the open file; <strong>Save all</strong> commits every file marked ●. Both go to the <code>variant/…</code> branch above — the original <code>main</code> is never modified. The <code>.jivahire/</code> answer-key directory is hidden and cannot be edited.
+              <strong>Save this file</strong> commits only the open file; <strong>Save all</strong> commits every file marked ●. Both go to the <code>variant/…</code> branch above — the original <code>main</code> is never modified. The <code>.jivahire/</code> answer-key files (🔒) are viewable but read-only and cannot be edited.
             </p>
           </div>
         </template>

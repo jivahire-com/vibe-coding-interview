@@ -130,14 +130,19 @@ def run(session_id: str) -> None:
         challenge_dir = Path(settings.challenges_dir) / session["challenge_id"]
 
         # ── 3. Build + run hidden tests ───────────────────────────────────
+        # Every backend returns an EMPTY tag_results when the project fails to
+        # build/compile (and a populated one — pass or fail per tag — otherwise).
+        # So "tags were expected but none ran" is the build-failure signal.
+        tags: list[str] = []
         try:
             metadata, rubric, tags = _load_challenge_config(challenge_dir)
             hidden_test = challenge_dir / metadata["hidden_test_file"]
             backend = _GRADER_BACKENDS[metadata["grader"]]
             tag_results, raw_output = backend.build_and_test(clone_dir, hidden_test, tags)
+            build_failed = bool(tags) and not tag_results
         except Exception:
             _record_error(session_id, "build")
-            tag_results, raw_output, rubric = {}, "", {}
+            tag_results, raw_output, rubric, build_failed = {}, "", {}, True
 
         # ── 4. Traps + attribution ────────────────────────────────────────
         try:
@@ -168,7 +173,7 @@ def run(session_id: str) -> None:
 
         # ── 6. RUBRICS (Layer 3) — pure consumers ─────────────────────────
         dims: dict[str, dict[str, Any]] = {}
-        dims["tests"] = _tests_rubric(tag_results)
+        dims["tests"] = _tests_rubric(tag_results, build_failed, tags)
         dims["traps"] = _traps_rubric(detected_traps, missed_traps, traps_detected_w, traps_total_w)
 
         try:
@@ -250,7 +255,9 @@ def run(session_id: str) -> None:
                       "candidate": session.get("candidate_email") or "",
                       "ai_assistance": ai_assistance,
                       "no_show": not engagement["attended"],
-                      "telemetry_tampered": telemetry_tampered},
+                      "telemetry_tampered": telemetry_tampered,
+                      "build_failed": build_failed,
+                      "build_error": _build_error_excerpt(raw_output) if build_failed else ""},
                 bonuses=bonuses,
                 telemetry_extra={"commits": commits, "protected_file_edits": protected},
             )
@@ -282,10 +289,23 @@ def run(session_id: str) -> None:
 # ─── Deterministic rubrics (tests, traps) ────────────────────────────────────
 
 
-def _tests_rubric(tag_results: dict[str, bool]) -> dict[str, Any]:
+def _tests_rubric(tag_results: dict[str, bool], build_failed: bool = False,
+                  tags: list[str] | None = None) -> dict[str, Any]:
     total = len(tag_results)
     passed = sum(1 for v in tag_results.values() if v)
     score = (passed / total * 10) if total else 0.0
+    if build_failed:
+        # The code never compiled, so no test ran. List every expected tag as
+        # "not run" so the report is explicit instead of looking like an empty
+        # rubric, and say plainly that the build failed.
+        subs = [
+            {"key": tag, "checks": f"The '{tag}' hidden test tag passes.",
+             "verdict": "missing", "detail": "Not run — your code did not compile."}
+            for tag in sorted(tags or [])
+        ]
+        note = ("Your code did not compile, so the hidden test suite could not be built — "
+                "every test scored 0. See the build log for the compiler errors.")
+        return {"score": 0.0, "subpoints": subs, "note": note}
     subs = [
         {"key": tag, "checks": f"The '{tag}' hidden test tag passes.",
          "verdict": "strong" if ok else "missing",
@@ -294,6 +314,13 @@ def _tests_rubric(tag_results: dict[str, bool]) -> dict[str, Any]:
     ]
     note = None if total else "No hidden tests configured (build may have failed)."
     return {"score": round(score, 2), "subpoints": subs, "note": note}
+
+
+def _build_error_excerpt(raw_output: str, limit: int = 2000) -> str:
+    """Tail of the build log — the part holding the compiler errors — for the UI."""
+    if not raw_output:
+        return ""
+    return raw_output[-limit:].strip()
 
 
 def _traps_rubric(detected, missed, detected_w, total_w) -> dict[str, Any]:

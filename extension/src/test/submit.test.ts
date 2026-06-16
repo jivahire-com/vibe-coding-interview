@@ -414,6 +414,48 @@ describe('gitCommitAndPushAsync (Bug #6: must not block main thread)', () => {
     const lastArg = (setUrlCalls[setUrlCalls.length - 1][1] as string[])[3];
     expect(lastArg).not.toContain('tok');
   });
+
+  test('wipe guard: aborts (no commit, no push) when the only surviving file is the .jivahire/ marker', async () => {
+    // Simulates a degraded workspace: `git add -A` has staged the deletion of
+    // every challenge file and the index retains only the integrity marker.
+    // The auto-commit must refuse to commit/push so it can't wipe the branch.
+    const config = makeConfig({ repoUrl: 'https://github.com/org/repo', githubToken: 'tok' });
+    let commitCount = 0;
+    let pushCount = 0;
+    mockExecFileAsync.mockImplementation(
+      (_bin: string, args: string[], _opts: unknown, cb: (e: Error | null, r: { stdout: string; stderr: string }) => void) => {
+        if (args[0] === 'status' && args[1] === '--porcelain') cb(null, { stdout: ' D CMakeLists.txt\n', stderr: '' });
+        else if (args[0] === 'diff' && args.includes('--diff-filter=D')) {
+          cb(null, { stdout: 'CMakeLists.txt\nREADME.md\ninclude/lru_cache.hpp\n', stderr: '' });
+        } else if (args[0] === 'ls-files') cb(null, { stdout: '.jivahire/telemetry.jsonl\n', stderr: '' });
+        else if (args[0] === 'commit') { commitCount++; cb(null, { stdout: '', stderr: '' }); }
+        else if (args[0] === 'push') { pushCount++; cb(null, { stdout: '', stderr: '' }); }
+        else cb(null, { stdout: '', stderr: '' });
+      },
+    );
+    await gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', false);
+    expect(commitCount).toBe(0);
+    expect(pushCount).toBe(0);
+  });
+
+  test('wipe guard: still commits when real challenge files survive alongside the marker', async () => {
+    const config = makeConfig({ repoUrl: 'https://github.com/org/repo', githubToken: 'tok' });
+    let commitCount = 0;
+    let pushCount = 0;
+    mockExecFileAsync.mockImplementation(
+      (_bin: string, args: string[], _opts: unknown, cb: (e: Error | null, r: { stdout: string; stderr: string }) => void) => {
+        if (args[0] === 'status' && args[1] === '--porcelain') cb(null, { stdout: ' M src/main.cpp\n', stderr: '' });
+        else if (args[0] === 'diff' && args.includes('--diff-filter=D')) cb(null, { stdout: '', stderr: '' });
+        else if (args[0] === 'ls-files') cb(null, { stdout: 'CMakeLists.txt\nsrc/main.cpp\n.jivahire/telemetry.jsonl\n', stderr: '' });
+        else if (args[0] === 'commit') { commitCount++; cb(null, { stdout: '', stderr: '' }); }
+        else if (args[0] === 'push') { pushCount++; cb(null, { stdout: '', stderr: '' }); }
+        else cb(null, { stdout: '', stderr: '' });
+      },
+    );
+    await gitCommitAndPushAsync('/tmp/ws', config, 'auto: ts', false);
+    expect(commitCount).toBe(1);
+    expect(pushCount).toBe(1);
+  });
 });
 
 // ── Bug A: confirm modal must show time-remaining context and avoid

@@ -45,6 +45,13 @@ def ingest(session_id: str, clone_dir: Path) -> None:
                     extra={"context": {"session_id": session_id, "lineno": lineno, "error": str(exc)}},
                 )
                 continue
+            # Line 1 is the provisioned `session_init` integrity marker (no
+            # ts/event_type). It is not a telemetry event; skip it so
+            # apply_events() — which indexes e["ts"]/e["event_type"] — does not
+            # raise KeyError and roll back the ENTIRE ingest (which would drop
+            # every real event for the session).
+            if not (isinstance(evt.get("ts"), int) and isinstance(evt.get("event_type"), str)):
+                continue
             events.append(evt)
 
     # Idempotency: clear prior rows (including any from an old-extension POST)

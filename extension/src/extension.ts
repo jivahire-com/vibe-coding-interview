@@ -252,7 +252,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   logger.setSession(savedSession);
   logger.info("session_restored", { sessionId: savedSession.sessionId, challengeId: savedSession.challengeId });
 
-  const cloneDir = path.join(os.homedir(), `vibe-${savedSession.sessionId.slice(0, 8)}`);
+  // Full session id — must match the key used when the dir was first cloned in
+  // promptForSession (previously both used `slice(0, 8)`, which risked cross-
+  // session collisions).
+  const cloneDir = path.join(os.homedir(), `vibe-${savedSession.sessionId}`);
   const cloneDirExists = fs.existsSync(cloneDir);
   const currentWs = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const previouslyAccepted = context.globalState.get<string>(OPENED_WS_KEY);
@@ -387,7 +390,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", true);
   }
   try {
-    _startSessionServices(savedSession, context, chatProvider, timer);
+    _startSessionServices(savedSession, context, chatProvider);
   } catch (err: unknown) {
     // Surface the failure instead of silently losing the auto-commit timer
     // and status bar buttons. activate() doesn't catch synchronous throws
@@ -401,6 +404,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
   }
   vscode.commands.executeCommand("vibe.dashboard.focus");
+}
+
+/**
+ * True iff `dir` is a healthy git checkout of `branch` that still has challenge
+ * files on disk (not just the `.jivahire/` integrity marker). Decides whether an
+ * existing `~/vibe-<id>` directory can be reused or must be re-cloned — adopting
+ * a degraded/empty dir is how a candidate branch gets wiped by the next
+ * `git add -A` auto-commit.
+ */
+function _isHealthyCheckout(dir: string, branch: string): boolean {
+  try {
+    if (!fs.existsSync(path.join(dir, ".git"))) return false;
+    const onDisk = fs.readdirSync(dir).filter((n) => n !== ".git" && n !== ".jivahire");
+    if (onDisk.length === 0) return false; // emptied checkout — only the marker remains
+    const head = execFileSync("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"], {
+      stdio: "pipe",
+      shell: false,
+    })
+      .toString()
+      .trim();
+    return head === branch;
+  } catch {
+    return false;
+  }
 }
 
 function _gitClone(session: SessionConfig, cloneDir: string): void {
@@ -464,7 +491,6 @@ function _startSessionServices(
   config: SessionConfig,
   context: vscode.ExtensionContext,
   chatProvider: ChatViewProvider,
-  timer: Timer,
 ): void {
   // Always-visible action buttons. The dashboard webview lives in the activity
   // bar sidebar, so it's hidden whenever the candidate switches to the File
@@ -596,26 +622,34 @@ function _startSessionServices(
   // ── Interview-integrity canary ────────────────────────────────────────────
   // The candidate branch ships a `.jivahire/telemetry.jsonl` marker (planted by
   // the server at branch creation). Deleting it — or the whole `.jivahire`
-  // folder — is a hard tamper signal: the session is invalidated immediately,
-  // on the FIRST deletion, with no grace and no restore.
+  // folder — is a tamper signal: the session is FLAGGED as invalid (with a
+  // stored reason the recruiter sees), but the candidate is allowed to keep
+  // working. We also warn the candidate up front not to delete it.
   const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (ws) {
     const canaryAbs = path.join(ws, ".jivahire", "telemetry.jsonl");
+    // Up-front warning: there's no OS hook to intercept the delete itself, so
+    // we tell the candidate before it can happen what the consequence is.
+    void vscode.window.showWarningMessage(
+      "Do not delete the .jivahire/telemetry.jsonl file or the .jivahire folder — " +
+      "doing so will mark your interview session as invalid (you can keep working, " +
+      "but the recruiter will see it was flagged).",
+    );
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(ws, ".jivahire/**"),
       true,  // ignoreCreate
       true,  // ignoreChange
       false, // watch deletes
     );
-    let handling = false;
+    let flagged = false;
     watcher.onDidDelete(async () => {
       // Act only when the marker itself is actually gone — unrelated churn
-      // inside `.jivahire/` must be ignored.
-      if (handling || fs.existsSync(canaryAbs)) return;
-      handling = true;
-      watcher.dispose();  // one-shot — the session is ending now
+      // inside `.jivahire/` must be ignored. Flag once; the server is
+      // idempotent, but a re-fire shouldn't re-nag the candidate.
+      if (flagged || fs.existsSync(canaryAbs)) return;
+      flagged = true;
       tracker.emit("integrity_marker_deleted", {});
-      await _endSessionForTamper(config, context, timer);
+      await _flagSessionTampered(config);
     });
     context.subscriptions.push(watcher);
   }
@@ -624,15 +658,13 @@ function _startSessionServices(
 }
 
 /**
- * End a session invalidated for tampering: report it to the server
- * (best-effort), stop every session timer/service, clear local session state,
- * and tell the candidate. Mirrors the submit→DONE cleanup in activate().
+ * Flag a session as integrity-violated after the candidate deleted the
+ * `.jivahire/telemetry.jsonl` marker. Reports it to the server (best-effort)
+ * so the recruiter dashboard shows the tamper with a stored reason, then tells
+ * the candidate — but does NOT end the session: the timer, AI chat,
+ * auto-commit and submit all keep running so the candidate can continue.
  */
-async function _endSessionForTamper(
-  config: SessionConfig,
-  context: vscode.ExtensionContext,
-  timer: Timer,
-): Promise<void> {
+async function _flagSessionTampered(config: SessionConfig): Promise<void> {
   try {
     await invalidateSession(
       config,
@@ -641,21 +673,14 @@ async function _endSessionForTamper(
   } catch (e) {
     getLogger()?.errorFromException("invalidate_session_failed", e);
   }
-  timer.stop();
-  _stopAutoCommit?.();
-  _stopTokenRefresh?.();
-  await context.globalState.update(SESSION_KEY, undefined);
-  await context.globalState.update(OPENED_WS_KEY, undefined);
-  await vscode.commands.executeCommand("setContext", "vibe.session.active", false);
-  await vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", false);
-  await vscode.window.showErrorMessage(
-    "Interview session invalidated",
+  await vscode.window.showWarningMessage(
+    "Interview session marked invalid",
     {
       modal: true,
       detail:
-        "Your interview session has been invalidated and ended because the interview " +
-        "integrity file (.jivahire/telemetry.jsonl) was deleted.\n\n" +
-        "Contact your recruiter if you believe this is a mistake.",
+        "The interview integrity file (.jivahire/telemetry.jsonl) was deleted, so this " +
+        "session has been marked invalid for the recruiter. You can keep working and " +
+        "submit as normal.\n\nContact your recruiter if you believe this is a mistake.",
     },
     "OK",
   );
@@ -860,11 +885,22 @@ async function promptForSession(
     await context.globalState.update(SESSION_KEY, config);
     await context.globalState.update(SERVER_URL_KEY, serverUrl);
 
-    const cloneDir = path.join(os.homedir(), `vibe-${config.sessionId.slice(0, 8)}`);
-    if (!fs.existsSync(cloneDir)) {
+    // Key the clone dir on the FULL session id. The old `slice(0, 8)` risked two
+    // sessions colliding on the same `~/vibe-<8hex>` path, and the existence
+    // check below would then silently adopt the wrong session's directory.
+    const cloneDir = path.join(os.homedir(), `vibe-${config.sessionId}`);
+    // Only reuse an existing dir if it's a healthy checkout of this branch with
+    // challenge files still on disk. A degraded leftover (emptied checkout,
+    // wrong branch, not a repo) must NOT be opened: the auto-commit would push
+    // its emptiness over the candidate branch. The path is namespaced to this
+    // session id, so replacing it can't touch another session's work.
+    if (!_isHealthyCheckout(cloneDir, config.branch)) {
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: "JivaHire: Cloning challenge…", cancellable: false },
         async () => {
+          if (fs.existsSync(cloneDir)) {
+            fs.rmSync(cloneDir, { recursive: true, force: true });
+          }
           _gitClone(config, cloneDir);
         }
       );

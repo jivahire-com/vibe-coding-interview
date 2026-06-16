@@ -11,7 +11,7 @@ log = logging.getLogger("vibe.auth")
 _rate_limits: dict[str, list[float]] = defaultdict(list)
 _lock = threading.Lock()
 
-RATE_LIMIT_MAX = 5
+RATE_LIMIT_MAX = 50
 RATE_LIMIT_WINDOW = 3600
 
 
@@ -21,7 +21,7 @@ def check_rate_limit(ip: str) -> None:
         _rate_limits[ip] = [t for t in _rate_limits[ip] if now - t < RATE_LIMIT_WINDOW]
         if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
             log.warning("rate_limit_hit", extra={"context": {"ip": ip, "max": RATE_LIMIT_MAX}})
-            raise HTTPException(429, "Rate limit: 5 attempts per hour per IP")
+            raise HTTPException(429, "Rate limit: 50 attempts per hour per IP")
         _rate_limits[ip].append(now)
 
 

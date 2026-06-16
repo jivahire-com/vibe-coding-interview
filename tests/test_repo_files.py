@@ -55,15 +55,44 @@ async def client():
         yield c
 
 
-# ── .jivahire/ is blocked on read and write ─────────────────────────────────
+# ── .jivahire/ is readable but read-only (write-blocked) ────────────────────
 
-async def test_get_protected_file_is_403(client):
-    r = await client.get(
-        f"{_BASE}/{_CHALLENGE}/file",
-        params={"path": ".jivahire/hidden_tests.py"},
-        headers=_ADMIN,
-    )
-    assert r.status_code == 403
+async def test_get_protected_file_is_readable_and_flagged_read_only(client):
+    import base64
+    content_b64 = base64.b64encode(b'{"secret": "rubric"}').decode("ascii")
+    with respx.mock:
+        respx.get(path=f"/repos/{_REPO}/contents/.jivahire/rubric.json").mock(
+            return_value=Response(200, json={
+                "type": "file", "sha": "a4", "content": content_b64,
+            })
+        )
+        r = await client.get(
+            f"{_BASE}/{_CHALLENGE}/file",
+            params={"path": ".jivahire/rubric.json"},
+            headers=_ADMIN,
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["content"] == '{"secret": "rubric"}'
+    assert body["read_only"] is True
+
+
+async def test_get_regular_file_is_not_read_only(client):
+    import base64
+    content_b64 = base64.b64encode(b"int main() {}").decode("ascii")
+    with respx.mock:
+        respx.get(path=f"/repos/{_REPO}/contents/src/cache.cpp").mock(
+            return_value=Response(200, json={
+                "type": "file", "sha": "a1", "content": content_b64,
+            })
+        )
+        r = await client.get(
+            f"{_BASE}/{_CHALLENGE}/file",
+            params={"path": "src/cache.cpp"},
+            headers=_ADMIN,
+        )
+    assert r.status_code == 200
+    assert r.json()["read_only"] is False
 
 
 async def test_save_protected_file_is_403(client):
@@ -75,7 +104,7 @@ async def test_save_protected_file_is_403(client):
     assert r.status_code == 403
 
 
-async def test_tree_filters_out_jivahire(client):
+async def test_tree_includes_jivahire_as_read_only(client):
     tree = {"tree": [
         {"path": "src/cache.cpp", "type": "blob", "sha": "a1"},
         {"path": "README.md", "type": "blob", "sha": "a2"},
@@ -89,9 +118,14 @@ async def test_tree_filters_out_jivahire(client):
         )
         r = await client.get(f"{_BASE}/{_CHALLENGE}/tree", headers=_ADMIN)
     assert r.status_code == 200
-    paths = [f["path"] for f in r.json()["files"]]
-    assert paths == ["README.md", "src/cache.cpp"]
-    assert not any(p.startswith(".jivahire") for p in paths)
+    files = {f["path"]: f["read_only"] for f in r.json()["files"]}
+    # Blobs (incl. .jivahire/ ones) are listed; the .jivahire tree entry is not.
+    assert files == {
+        "README.md": False,
+        "src/cache.cpp": False,
+        ".jivahire/hidden_tests.py": True,
+        ".jivahire/rubric.json": True,
+    }
 
 
 # ── branch namespace rules ──────────────────────────────────────────────────

@@ -313,9 +313,10 @@ export async function submitSession(config: SessionConfig): Promise<SubmitRespon
 
 /**
  * Report an interview-integrity violation (the candidate deleted the
- * `.jivahire/` tamper marker after being warned). The server flips the session
- * to `invalidated` and ends it without grading. Best-effort: the extension ends
- * the session locally regardless of whether this call succeeds.
+ * `.jivahire/` tamper marker). The server stamps `invalidated_at` /
+ * `invalidation_reason` so the recruiter dashboard surfaces the tamper, but
+ * keeps the session `active` — the candidate continues working. Best-effort:
+ * the extension warns the candidate regardless of whether this call succeeds.
  */
 export async function invalidateSession(
   config: SessionConfig,

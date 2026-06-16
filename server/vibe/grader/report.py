@@ -36,6 +36,35 @@ CONFIG = _config()
 
 TRACK_LABEL = {"vibe": "Vibe coding", "non_ai": "Non-AI coding"}
 
+# Overall-score bands — the single source of truth for the 0-100 verdict scale.
+# Ordered high→low; `min` is inclusive, `max` is the inclusive display ceiling.
+# `_band()` resolves a score to a key; the legend/score-ranges in the report JSON
+# are derived from this same list, so the API and any UI never drift apart.
+_BANDS = [
+    {"key": "outstanding", "label": "Outstanding", "min": 90, "max": 100},
+    {"key": "good",        "label": "Good",        "min": 70, "max": 89.99},
+    {"key": "acceptable",  "label": "Acceptable",  "min": 50, "max": 69.99},
+    {"key": "weak",        "label": "Weak",        "min": 30, "max": 49.99},
+    {"key": "reject",      "label": "Reject",      "min": 0,  "max": 29.99},
+]
+_BAND_LABEL = {b["key"]: b["label"] for b in _BANDS}
+
+
+def _band_legend() -> list[dict[str, Any]]:
+    """Score-ranges legend (ascending, Reject→Outstanding) for the report JSON."""
+    out = []
+    for b in reversed(_BANDS):
+        out.append({
+            "key": b["key"],
+            "label": b["label"],
+            "min": b["min"],
+            "max": b["max"],
+            "range": f"{b['min']} – {b['max']}",
+            "definition": f"Overall score {b['min']} – {b['max']}.",
+        })
+    return out
+
+
 _LEGEND = {
     "verdicts": [
         {"key": "strong", "label": "Strong", "definition": "Done well."},
@@ -43,7 +72,8 @@ _LEGEND = {
         {"key": "missing", "label": "Missing", "definition": "Applies to this track, but not done."},
         {"key": "na", "label": "N/A",
          "definition": "Does not apply to this track — not scored, not counted."},
-    ]
+    ],
+    "bands": _band_legend(),
 }
 
 _SECTIONS = {
@@ -160,12 +190,11 @@ def _weighted_total(scored: list[dict[str, Any]]) -> int:
     return round(sum(e["score"] * e["weight"] for e in scored) / denom)
 
 
-def _band(total: int) -> str:
-    if total >= 75:
-        return "strong"
-    if total >= 50:
-        return "mixed"
-    return "weak"
+def _band(total: float) -> str:
+    for b in _BANDS:  # high→low; first whose floor the score clears wins
+        if total >= b["min"]:
+            return b["key"]
+    return _BANDS[-1]["key"]
 
 
 def _contribution(e: dict[str, Any]) -> float:
@@ -178,7 +207,9 @@ def _gap(e: dict[str, Any]) -> float:
 
 def _summary_points(total, band, track, scored, bonuses) -> list[str]:
     label = TRACK_LABEL.get(track, track)
-    points = [f"{total} / 100 overall — a {band} result on the {label.lower()} track."]
+    band_label = _BAND_LABEL.get(band, band)
+    article = "an" if band_label[:1].lower() in "aeiou" else "a"
+    points = [f"{total} / 100 overall — {article} {band_label} result on the {label.lower()} track."]
     if scored:
         lifters = sorted(scored, key=_contribution, reverse=True)[:2]
         gaps = sorted(scored, key=_gap, reverse=True)[:2]

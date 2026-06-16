@@ -57,9 +57,19 @@ def test_x10_done_once_and_weighted_total():
 
 
 def test_band_thresholds():
-    assert _build("vibe", _dims(8.0))["overall"]["band"] == "strong"   # 80
-    assert _build("vibe", _dims(6.0))["overall"]["band"] == "mixed"    # 60
-    assert _build("vibe", _dims(3.0))["overall"]["band"] == "weak"     # 30
+    assert _build("vibe", _dims(9.0))["overall"]["band"] == "outstanding"  # 90
+    assert _build("vibe", _dims(8.0))["overall"]["band"] == "good"         # 80
+    assert _build("vibe", _dims(6.0))["overall"]["band"] == "acceptable"   # 60
+    assert _build("vibe", _dims(4.0))["overall"]["band"] == "weak"         # 40
+    assert _build("vibe", _dims(2.0))["overall"]["band"] == "reject"       # 20
+
+
+def test_band_legend_has_five_ranges():
+    bands = _build("vibe", _dims(7.0))["legend"]["bands"]
+    assert [b["key"] for b in bands] == ["reject", "weak", "acceptable", "good", "outstanding"]
+    # every band carries a numeric range the UI can render verbatim
+    for b in bands:
+        assert b["min"] is not None and b["max"] is not None and b["range"]
 
 
 def test_non_ai_marks_ai_rubrics_na_and_excludes_from_total():
