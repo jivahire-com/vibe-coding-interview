@@ -107,7 +107,10 @@ def test_telemetry_catalogue_marks_vibe_rows_na_on_non_ai():
     assert all(t["applies"] is True for t in both_rows)
 
 
-def test_summary_points_present():
+def test_overall_factor_present():
     rep = _build("vibe", _dims(7.0))
-    pts = rep["overall"]["summary_points"]
-    assert pts and "70 / 100" in pts[0]
+    factors = rep["overall"]["factors"]
+    overall = next(f for f in factors if f["key"] == "overall")
+    assert overall is factors[0]                      # leads the list
+    assert overall["summary"] == "70/100 — Good"
+    assert overall["status"] == "good"                # 70 ≥ pass line

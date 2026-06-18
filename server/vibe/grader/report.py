@@ -119,7 +119,7 @@ def build_report(
 
     total = _weighted_total(scored)
     band = _band(total)
-    summary = _summary_points(total, band, track, scored, bonuses or [])
+    factors = _factors(track, dims, signals, meta, total=total, band=band, scored=scored)
 
     section_list = []
     for sec_id, items in sections.items():
@@ -137,7 +137,7 @@ def build_report(
         "legend": _LEGEND,
         "track": track,
         "track_label": TRACK_LABEL.get(track, track),
-        "overall": {"score": total, "out_of": 100, "band": band, "summary_points": summary},
+        "overall": {"score": total, "out_of": 100, "band": band, "factors": factors},
         "sections": section_list,
         "bonuses": bonuses or [],
         "telemetry": _telemetry_catalogue(signals, track, telemetry_extra or {}),
@@ -205,38 +205,151 @@ def _gap(e: dict[str, Any]) -> float:
     return (e["weight"] or 0) - _contribution(e)
 
 
-def _summary_points(total, band, track, scored, bonuses) -> list[str]:
-    label = TRACK_LABEL.get(track, track)
+# ─── Recruiter factors (overall.factors) ─────────────────────────────────────
+#
+# Plain-language, recruiter-facing checks shown at the top of the report. Each is
+# a single card with a green/red flag (`status`), a short headline (`summary`),
+# and a one-line plain-English `description`. A non-technical recruiter should be
+# able to skim these and decide whether to move the candidate forward.
+#
+# `status` is "good" (green) or "bad" (red). The review-alerts card carries an
+# `items` list so multiple alerts can each render on their own line.
+
+# A 0-100 rubric score at or above this counts as a green flag (the "Acceptable"
+# band floor — see _BANDS). Below it is a red flag.
+_FACTOR_PASS_100 = 50
+
+
+def _factors(track, dims, signals, meta, *, total, band, scored) -> list[dict[str, Any]]:
+    factors = [
+        _overall_factor(total, band, scored),
+        _tests_factor(dims.get("tests", {}), meta),
+        _code_quality_factor(dims.get("code_quality", {})),
+        _readme_factor(signals),
+        _review_alerts_factor(dims, meta),
+        _compiled_factor(meta),
+    ]
+    if meta.get("ai_assistance"):
+        factors.append(_ai_collaboration_factor(dims.get("llm_communication", {})))
+    return factors
+
+
+def _overall_factor(total: int, band: str, scored: list[dict[str, Any]]) -> dict[str, Any]:
+    """The headline verdict — recast from the old `summary_points`. Plain words:
+    the score, a green/red call, and the candidate's strongest and weakest area."""
     band_label = _BAND_LABEL.get(band, band)
-    article = "an" if band_label[:1].lower() in "aeiou" else "a"
-    points = [f"{total} / 100 overall — {article} {band_label} result on the {label.lower()} track."]
-    if scored:
-        lifters = sorted(scored, key=_contribution, reverse=True)[:2]
-        gaps = sorted(scored, key=_gap, reverse=True)[:2]
-        lifted = "; ".join(f"{e['label']} ({e['score']}/100 — {_best_reason(e)})" for e in lifters)
-        held = "; ".join(f"{e['label']} ({e['score']}/100 — {_worst_reason(e)})" for e in gaps)
-        points.append(f"What lifted it: {lifted}.")
-        points.append(f"What held it back: {held}.")
-    earned = [b for b in bonuses if b.get("attempted")]
-    if earned:
-        names = " and ".join(b.get("title", "bonus").lower() for b in earned)
-        points.append(f"Bonuses earned: the {names} are already reflected in the scores above.")
-    return points
+    status = "good" if total >= _FACTOR_PASS_100 else "bad"
+    lead = ("Strong enough to move forward." if status == "good"
+            else "Not strong enough to move forward.")
+    strengths = _strength_and_gap(scored)
+    description = f"{lead} {strengths}".strip()
+    return {"key": "overall", "label": "Overall result", "status": status,
+            "summary": f"{total}/100 — {band_label}", "description": description}
 
 
-def _best_reason(e: dict[str, Any]) -> str:
-    for sp in e.get("subpoints", []):
-        if sp.get("verdict") == "strong" and sp.get("detail"):
-            return sp["detail"]
-    return "scored well"
+def _strength_and_gap(scored: list[dict[str, Any]]) -> str:
+    if not scored:
+        return ""
+    best = max(scored, key=_contribution)
+    worst = max(scored, key=_gap)
+    parts = [f"Strongest on {best['label'].lower()}"]
+    if worst is not best:
+        parts.append(f"weakest on {worst['label'].lower()}")
+    return "; ".join(parts) + "."
 
 
-def _worst_reason(e: dict[str, Any]) -> str:
-    for verdict in ("missing", "weak"):
-        for sp in e.get("subpoints", []):
-            if sp.get("verdict") == verdict and sp.get("detail"):
-                return sp["detail"]
-    return "lost ground against its weight"
+def _dim_score_100(dim: dict[str, Any]) -> int | None:
+    raw = dim.get("score")
+    return round(raw * 10) if isinstance(raw, (int, float)) else None
+
+
+def _tests_factor(tests_dim: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    if meta.get("build_failed"):
+        return {"key": "tests", "label": "Tests", "status": "bad",
+                "summary": "Tests could not run",
+                "description": "The code did not compile, so no tests ran."}
+    subs = tests_dim.get("subpoints", []) or []
+    total = len(subs)
+    passed = sum(1 for sp in subs if sp.get("verdict") == "strong")
+    if total == 0:
+        return {"key": "tests", "label": "Tests", "status": "bad",
+                "summary": "No tests ran",
+                "description": "No automated tests were run on this submission."}
+    status = "good" if passed == total else "bad"
+    description = ("All automated tests passed." if status == "good"
+                  else f"{total - passed} of {total} tests failed.")
+    return {"key": "tests", "label": "Tests", "status": status,
+            "summary": f"{passed}/{total} tests passed", "description": description}
+
+
+def _code_quality_factor(cq_dim: dict[str, Any]) -> dict[str, Any]:
+    score = _dim_score_100(cq_dim)
+    if score is None:
+        return {"key": "code_quality", "label": "Does the code work", "status": "bad",
+                "summary": "Could not assess",
+                "description": "We could not assess whether the code works."}
+    status = "good" if score >= _FACTOR_PASS_100 else "bad"
+    description = ("The code works and is cleanly written." if status == "good"
+                  else "The code has clear problems or does not fully work.")
+    return {"key": "code_quality", "label": "Does the code work", "status": status,
+            "summary": f"Code quality {score}/100", "description": description}
+
+
+def _readme_factor(signals: Any) -> dict[str, Any]:
+    detail = getattr(signals, "files_explored_detail", []) or []
+    ms = sum(d.get("ms", 0) for d in detail if "readme" in (d.get("file") or "").lower())
+    secs = ms // 1000
+    if secs <= 0:
+        return {"key": "readme_time", "label": "Read the instructions", "status": "bad",
+                "summary": "README not opened",
+                "description": "Never opened the README — may not have read the task."}
+    status = "good" if secs >= 60 else "bad"
+    description = ("Took time to read the task before coding." if status == "good"
+                  else "Barely read the task before starting — under a minute.")
+    return {"key": "readme_time", "label": "Read the instructions", "status": status,
+            "summary": f"Read README for {_fmt_ms(ms)}", "description": description}
+
+
+def _review_alerts_factor(dims: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    items: list[str] = []
+    if meta.get("telemetry_tampered"):
+        items.append("Telemetry tampering detected — the session record was altered, "
+                     "so the signals below may not be trustworthy.")
+    if meta.get("no_show"):
+        items.append("Did not genuinely take part in the session.")
+    if dims.get("developer_signal", {}).get("verdict_label") == "non_developer":
+        items.append("Did not behave like a developer — did not build the project or "
+                     "run the tests as a real developer would.")
+    if items:
+        noun = "thing" if len(items) == 1 else "things"
+        return {"key": "review_alerts", "label": "Review alerts", "status": "bad",
+                "summary": f"{len(items)} {noun} to check", "items": items,
+                "description": "Things a reviewer should look at before deciding."}
+    return {"key": "review_alerts", "label": "Review alerts", "status": "good",
+            "summary": "No red flags", "items": [],
+            "description": "Nothing unusual was flagged in this session."}
+
+
+def _compiled_factor(meta: dict[str, Any]) -> dict[str, Any]:
+    failed = bool(meta.get("build_failed"))
+    return {"key": "compiled", "label": "Code compiled",
+            "status": "bad" if failed else "good",
+            "summary": "Did not compile" if failed else "Compiled successfully",
+            "description": ("The submitted code failed to build." if failed
+                            else "The submitted code built without errors.")}
+
+
+def _ai_collaboration_factor(comm_dim: dict[str, Any]) -> dict[str, Any]:
+    score = _dim_score_100(comm_dim)
+    if score is None:
+        return {"key": "ai_collaboration", "label": "AI collaboration", "status": "bad",
+                "summary": "Could not assess",
+                "description": "We could not assess how the candidate worked with AI."}
+    status = "good" if score >= _FACTOR_PASS_100 else "bad"
+    description = ("Worked well with the AI assistant to build the solution." if status == "good"
+                  else "Worked with the AI but the collaboration was weak.")
+    return {"key": "ai_collaboration", "label": "AI collaboration", "status": status,
+            "summary": f"AI teamwork {score}/100", "description": description}
 
 
 # ─── Telemetry catalogue (§1) ────────────────────────────────────────────────

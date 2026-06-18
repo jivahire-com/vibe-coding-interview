@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "lru_cache.hpp"
 
+// @doc: Round-trips values — what put() stores comes back from get(), and an absent key returns nullopt.
 TEST_CASE("basic get and put", "[basic]") {
     LRUCache<int, std::string> cache(3);
     cache.put(1, "one");
@@ -13,6 +14,7 @@ TEST_CASE("basic get and put", "[basic]") {
     REQUIRE(cache.get(99) == std::nullopt);
 }
 
+// @doc: get() promotes an entry to most-recently-used, so the next insert at capacity evicts the other key.
 TEST_CASE("LRU eviction order", "[basic]") {
     LRUCache<int, int> cache(2);
     cache.put(1, 10);
@@ -27,6 +29,7 @@ TEST_CASE("LRU eviction order", "[basic]") {
     REQUIRE(cache.get(3) == std::optional<int>(30));
 }
 
+// @doc: Re-putting an existing key updates its value in place — size stays the same and nothing is evicted.
 TEST_CASE("update existing key does not change size", "[basic]") {
     LRUCache<int, int> cache(2);
     cache.put(1, 1);
@@ -39,6 +42,7 @@ TEST_CASE("update existing key does not change size", "[basic]") {
     REQUIRE(cache.get(1) == std::optional<int>(100));
 }
 
+// @doc: clear() drops every entry — size() returns to 0 and previously-stored keys miss.
 TEST_CASE("clear empties the cache", "[basic]") {
     LRUCache<std::string, int> cache(3);
     cache.put("a", 1);

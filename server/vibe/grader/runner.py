@@ -347,6 +347,11 @@ def _floor_dims(dims: dict[str, dict[str, Any]], keys, reason: str, *, key: str)
         dim["score"] = min(float(dim["score"]), engagement_mod.NEAR_ZERO)
         dim["note"] = reason
         dim[key] = True
+        # A floored holistic score must not sit next to STRONG/WEAK badges — the
+        # evidence behind them didn't hold up (no-show or tampered telemetry).
+        for sp in dim.get("subpoints", []):
+            if sp.get("verdict") in ("strong", "weak"):
+                sp["verdict"] = "missing"
 
 
 def _count_commits(session_id: str) -> int:

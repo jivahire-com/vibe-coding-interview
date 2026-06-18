@@ -143,6 +143,35 @@ def _strip_active_file_block(text: str) -> str:
     return _ACTIVE_FILE_OMITTED.sub("", text, count=1)
 
 
+# Headers the extension's buildFileFence() / oversize-fallback emit for every
+# file the candidate attached or @-referenced. Parsing these (rather than the
+# raw "@mention" text) gives the set of files actually resolved and sent to the
+# AI — pin, right-click, and @-mention all collapse to these headers, so it is
+# the single ground-truth signal of "context the candidate chose to provide".
+_REFERENCED_FILE_HEADERS = (
+    re.compile(r"^# Current contents of (.+?) \(may include", re.MULTILINE),
+    re.compile(r"^# Attached file (.+?) \(omitted", re.MULTILINE),
+)
+
+
+def _extract_referenced_files(content: str) -> list[str]:
+    """Workspace-relative paths the candidate gave the AI as context this turn.
+
+    Reads the full last-user message (before prompt_text stripping) so a single
+    pinned/right-clicked file — whose fence the proxy strips out of prompt_text —
+    is still recorded. Order-preserving and deduped.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for pat in _REFERENCED_FILE_HEADERS:
+        for path in pat.findall(content or ""):
+            p = path.strip()
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+
 @router.post("/chat/completions")
 async def chat_completions(req: ChatRequest, session=Depends(get_session)):
     if session["status"] != "active":
@@ -201,6 +230,7 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
         (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
     )
     prompt_text = _strip_active_file_block(last_user_content)
+    referenced_files = _extract_referenced_files(last_user_content)
 
     async def generate():
         prompt_tokens = 0
@@ -301,6 +331,7 @@ async def chat_completions(req: ChatRequest, session=Depends(get_session)):
                     cached_input_tokens,
                     reasoning_tokens,
                     prompt_text,
+                    referenced_files,
                     cost,
                     aborted,
                 )
@@ -317,6 +348,7 @@ def _record_exchange(
     cached_input_tokens: int,
     reasoning_tokens: int,
     prompt_text: str,
+    referenced_files: list[str],
     cost: float,
     aborted: bool,
 ) -> None:
@@ -330,12 +362,13 @@ def _record_exchange(
     execute(
         "INSERT INTO chat_exchanges "
         "(session_id, ts, model, prompt_tokens, completion_tokens, cost_usd, aborted_over_budget, "
-        "cached_input_tokens, reasoning_tokens, prompt_text, candidate_prompt_tokens) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "cached_input_tokens, reasoning_tokens, prompt_text, referenced_files, candidate_prompt_tokens) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             session_id, int(time.time() * 1000), model,
             prompt_tokens, completion_tokens, cost, int(aborted),
             cached_input_tokens, reasoning_tokens, prompt_text,
+            json.dumps(referenced_files) if referenced_files else None,
             candidate_prompt_tokens,
         ),
     )

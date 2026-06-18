@@ -707,6 +707,43 @@ async def test_invite_email_mentions_end_video_when_required(client, monkeypatch
     assert captured[1]["require_end_video"] is False
 
 
+async def test_session_detail_includes_end_of_interview_questions_when_required(
+    client, monkeypatch
+):
+    """Async session (end video required) → the detail API echoes the explainer
+    prompts the candidate was asked, matching what the recording page shows."""
+    from vibe.video import STATIC_PROMPTS
+
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        sid = await _create_session(client, "VID-DETAIL-001")
+    r = await client.get(f"/api/v1/sessions/{sid}", headers=_ADMIN)
+    assert r.status_code == 200
+    assert r.json()["end_of_interview_questions"] == list(STATIC_PROMPTS)
+
+
+async def test_session_detail_no_questions_for_panel_default(client, monkeypatch):
+    """Panel session without override → no end video, so no questions asked."""
+    _enable_video_feature(monkeypatch)
+    with respx.mock:
+        _mock_github()
+        r = await client.post(
+            "/api/v1/sessions",
+            json={
+                "session_key": "VID-DETAIL-002",
+                "candidate_email": "c@test.com",
+                "challenge_id": "cpp-thread-safe-cache",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+            headers=_ADMIN,
+        )
+        sid = r.json()["session_id"]
+    detail = await client.get(f"/api/v1/sessions/{sid}", headers=_ADMIN)
+    assert detail.status_code == 200
+    assert detail.json()["end_of_interview_questions"] == []
+
+
 # ── org scoping (recruiter-backend proxy passes org_id) ───────────────────────
 
 async def _create_session_org(client, key: str, org_id: str | None) -> str:

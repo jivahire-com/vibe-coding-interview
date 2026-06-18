@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vibe.grader.rubric_common import subpoint
+from vibe.grader.rubric_common import subpoint, weighted_average
 from vibe.grader.signals import Signals
 
 _PRE_SUBMIT_FLOOR_CAP = 6.0
@@ -41,6 +41,13 @@ def score(signals: Signals) -> dict[str, Any]:
         subs, weighted = _vibe_subpoints(signals)
     else:
         subs, weighted = _non_ai_subpoints(signals)
+
+    if weighted is None:
+        # Nothing measurable — no AI accepts and no hand edits to verify. The
+        # rubric is N/A (dropped from the overall total) rather than a passing
+        # default; the engagement gate carries a true no-show.
+        return {"score": None, "subpoints": subs,
+                "note": "Nothing to verify — no accepted AI code and no hand edits in this session."}
 
     floor_applied = not signals.pre_submit_test_run.get("passed", True)
     final = min(weighted, _PRE_SUBMIT_FLOOR_CAP) if floor_applied else weighted
@@ -65,21 +72,21 @@ def _vibe_subpoints(s: Signals) -> tuple[list[dict[str, Any]], float]:
     sc_self = _band_self_authored(s.self_authored_ratio)
     sc_inc = _band_incremental(inc.get("mean_chars"), inc.get("between_rate"))
 
-    weighted = (
-        sc_taa * _WEIGHTS_VIBE["test_after_apply_ratio"]
-        + sc_ate * _WEIGHTS_VIBE["apply_then_edit_rate"]
-        + sc_self * _WEIGHTS_VIBE["self_authored_ratio"]
-        + sc_inc * _WEIGHTS_VIBE["incremental_apply_pattern"]
-    )
+    weighted = weighted_average([
+        (sc_taa, _WEIGHTS_VIBE["test_after_apply_ratio"]),
+        (sc_ate, _WEIGHTS_VIBE["apply_then_edit_rate"]),
+        (sc_self, _WEIGHTS_VIBE["self_authored_ratio"]),
+        (sc_inc, _WEIGHTS_VIBE["incremental_apply_pattern"]),
+    ])
     subs = [
         subpoint("test_after_apply_ratio", "Tests are run soon after accepting a change.",
-                 sc_taa, _taa_detail(taa)),
+                 sc_taa, _taa_detail(taa), na_when_none=True),
         subpoint("apply_then_edit_rate", "Accepted code is reviewed and edited, not trusted blindly.",
-                 sc_ate, _ate_detail(ate)),
+                 sc_ate, _ate_detail(ate), na_when_none=True),
         subpoint("self_authored_ratio", "A healthy share of the code is hand-written.",
-                 sc_self, _self_detail(s.self_authored_ratio)),
+                 sc_self, _self_detail(s.self_authored_ratio), na_when_none=True),
         subpoint("incremental_apply_pattern", "Changes land in small steps, not one big paste.",
-                 sc_inc, _inc_detail(inc)),
+                 sc_inc, _inc_detail(inc), na_when_none=True),
     ]
     return subs, weighted
 
@@ -111,9 +118,9 @@ def _non_ai_subpoints(s: Signals) -> tuple[list[dict[str, Any]], float]:
 # ─── Banding (the rubric's judgment) ─────────────────────────────────────────
 
 
-def _band_test_after(ratio: float | None, *, neutral: float = 7.0) -> float:
+def _band_test_after(ratio: float | None, *, neutral: float | None = None) -> float | None:
     if ratio is None:
-        return neutral
+        return neutral  # vibe track: N/A (no accepts to verify); non-AI passes neutral=5.0
     if ratio > 0.80:
         return 9.5
     if ratio > 0.50:
@@ -125,9 +132,9 @@ def _band_test_after(ratio: float | None, *, neutral: float = 7.0) -> float:
     return 1.0
 
 
-def _band_apply_then_edit(rate: float | None) -> float:
+def _band_apply_then_edit(rate: float | None) -> float | None:
     if rate is None:
-        return 7.0
+        return None  # no AI accepts — nothing to have reviewed
     if rate > 0.50:
         return 9.0
     if rate > 0.25:
@@ -139,9 +146,9 @@ def _band_apply_then_edit(rate: float | None) -> float:
     return 2.0
 
 
-def _band_self_authored(ratio: float | None) -> float:
+def _band_self_authored(ratio: float | None) -> float | None:
     if ratio is None:
-        return 5.0
+        return None  # no typed or AI-applied chars — no authorship to weigh
     if 0.40 <= ratio <= 0.70:
         return 9.0
     if 0.30 <= ratio < 0.40 or 0.70 < ratio <= 0.85:
@@ -151,9 +158,9 @@ def _band_self_authored(ratio: float | None) -> float:
     return 3.0
 
 
-def _band_incremental(mean_chars: float | None, between_rate: float | None) -> float:
+def _band_incremental(mean_chars: float | None, between_rate: float | None) -> float | None:
     if mean_chars is None:
-        return 7.0
+        return None  # no AI accepts — no apply cadence to judge
     if mean_chars < 200:
         base = 8.0
     elif mean_chars < 500:

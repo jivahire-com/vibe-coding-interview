@@ -172,3 +172,40 @@ async def test_proxy_injects_repo_dump_into_system_message(client, active_sessio
     assert "SHOULD_NOT_LEAK" not in sys_content
     # Original user message is preserved
     assert msgs[-1] == {"role": "user", "content": "what is this repo?"}
+
+
+# ── unit: _extract_referenced_files ────────────────────────────────────────
+
+from vibe.llm_proxy import _extract_referenced_files  # noqa: E402
+
+
+def _fence(path, lang, body):
+    return (f"# Current contents of {path} (may include candidate edits since initial repo)\n"
+            f"```{lang}\n{body}\n```\n\n")
+
+
+def test_extract_referenced_files_none_when_no_attachments():
+    assert _extract_referenced_files("just fix the race on line 42") == []
+
+
+def test_extract_referenced_files_collects_attached_fences_in_order():
+    content = _fence("src/cache.cpp", "cpp", "void f(){}") + _fence("src/util.h", "cpp", "#pragma once")
+    content += "fix the data race"
+    assert _extract_referenced_files(content) == ["src/cache.cpp", "src/util.h"]
+
+
+def test_extract_referenced_files_dedupes():
+    content = _fence("src/a.cpp", "cpp", "1") + _fence("src/a.cpp", "cpp", "1")
+    assert _extract_referenced_files(content) == ["src/a.cpp"]
+
+
+def test_extract_referenced_files_captures_oversize_marker():
+    content = "# Attached file big/data.json (omitted — exceeds 51200 bytes)\n\nsummarise this"
+    assert _extract_referenced_files(content) == ["big/data.json"]
+
+
+def test_extract_referenced_files_handles_single_pin_the_proxy_would_strip():
+    # A lone pinned file: prompt_text loses the fence, but the pre-strip content
+    # still records it — the whole point of capturing at the proxy.
+    content = _fence("src/only.cpp", "cpp", "x") + "fix this"
+    assert _extract_referenced_files(content) == ["src/only.cpp"]

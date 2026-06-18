@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from vibe.db import query
+from vibe.grader.git_ops import candidate_base
 
 log = logging.getLogger("vibe.grader")
 
@@ -62,9 +63,12 @@ NO_SHOW_NOTE = (
 def assess(session_id: str, clone_dir: Path | None) -> dict[str, Any]:
     """Return {attended: bool, reason: str|None, signals: {...}}.
 
-    `attended` is True if ANY engagement signal fired. The gate fails open: any
-    signal we cannot evaluate is treated as "engaged" so we never floor a real
-    attempt on the strength of a missing data source.
+    `attended` is True if ANY engagement signal fired. The authorship counters
+    (typed/pasted/AI-applied chars) and chat presence are the primary guards: a
+    real attempt always trips one of them. The git "code changed" signal only
+    *adds* engagement when it can positively prove a code diff — it never fires
+    on an unreadable diff (see `_code_changed`), so a no-show whose branch holds
+    only bookkeeping commits is no longer mistaken for a real attempt.
     """
     counters = _load_counters(session_id)
     engaged_chars = (
@@ -111,25 +115,27 @@ def _has_chat(session_id: str) -> bool:
 
 
 def _code_changed(clone_dir: Path | None) -> bool:
-    """True if the branch differs from its starter import (ignoring `.jivahire/`).
+    """True only if the candidate's own commits *positively* changed code
+    (ignoring `.jivahire/`).
 
-    Fails open (returns True) whenever the diff cannot be computed, so a git
-    hiccup never causes a real submission to be mistaken for a no-show.
+    Diffs the provisioning baseline — the workspace handed to the candidate —
+    against HEAD, so the starter import and the answer-key provisioning that sit
+    on the branch before the candidate started are NOT mistaken for their work.
+    Those setup commits (e.g. a 50+ line "update starter to canonical package"
+    sync) are exactly what let a no-show read as "changed code" and slip past the
+    floor.
+
+    This is a corroborating signal, not the primary one: a real attempt always
+    leaves typed/pasted/AI-applied characters in the session counters, which
+    `assess()` checks independently. So when the diff cannot be computed we
+    return False and let the authorship counters carry a genuine attempt.
     """
     if clone_dir is None or not Path(clone_dir).exists():
-        return True
+        return False
+    base = candidate_base(clone_dir)
+    if base is None:
+        return False
     try:
-        rev = subprocess.run(
-            ["git", "-C", str(clone_dir), "rev-list", "--max-parents=0", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30,
-        )
-        roots = rev.stdout.split()
-        if not roots:
-            return True
-        # In a shallow clone the oldest reachable commit (the starter import for
-        # the short histories a no-show produces) is grafted as a parentless
-        # root; take the last listed to be safe if more than one is reported.
-        base = roots[-1]
         diff = subprocess.run(
             ["git", "-C", str(clone_dir), "diff", "--quiet", base, "HEAD",
              "--", ".", _NON_CODE_PATHSPEC],
@@ -139,4 +145,4 @@ def _code_changed(clone_dir: Path | None) -> bool:
         return diff.returncode != 0
     except Exception:
         log.warning("engagement_code_diff_failed", exc_info=True)
-        return True
+        return False

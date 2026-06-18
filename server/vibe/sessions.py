@@ -15,7 +15,7 @@ from vibe.config import repo_for_challenge, settings
 from vibe.db import execute, query
 from vibe.email import send_invite, send_panelist_invite
 from vibe.github_app import mint_installation_token
-from vibe.video import _feature_enabled as video_feature_enabled
+from vibe.video import STATIC_PROMPTS, _feature_enabled as video_feature_enabled
 from vibe.logging_config import bind_session
 from vibe.models import (
     CreateSessionRequest,
@@ -238,6 +238,11 @@ def list_sessions(
     sessions = []
     for r in rows:
         d = dict(r)
+        # `total_score` is stored as REAL (e.g. 76.0). Surface it as an int on the
+        # 0-100 scale so the list matches the detail API's report.overall.score
+        # (which is a rounded int out of 100), rather than a bare float.
+        if d.get("total_score") is not None:
+            d["total_score"] = int(round(d["total_score"]))
         # `ai_assisted`: the invite-time AI-assistance toggle set by the recruiter
         # (sessions.ai_assistance, default enabled), not whether AI was actually used.
         d["ai_assisted"] = bool(d.get("ai_assistance", 1))
@@ -697,6 +702,25 @@ def get_session_detail(
         "SELECT id, ts, user_message, stage, error_class, traceback FROM grading_errors WHERE session_id = ? ORDER BY ts",
         (session_id,),
     )
+    # The prompts the candidate was asked to address in the post-submit explainer
+    # video — the same list video_init/browser_init hand the recording page. Only
+    # populated when an end video was required for this session (panel sessions
+    # without an override skip it, so no questions were asked); empty otherwise so
+    # the recruiter card can render "none asked" without inferring the gate itself.
+    end_of_interview_questions = (
+        list(STATIC_PROMPTS)
+        if _resolve_require_end_video(
+            rows[0].get("meet_link"), bool(rows[0].get("require_end_video") or 0)
+        )
+        else []
+    )
+    # Code-free descriptions of what this challenge checks: the hidden-test
+    # groups and the planted traps, each {id, description}. Driven by the
+    # challenge config (not the candidate's run), so present regardless of grade
+    # status. The actual test SOURCE is deliberately NOT returned here — it is
+    # fetched on demand from GET /api/v1/challenges/{cid}/tests/code (see
+    # challenge_tests.py) so a session poll never carries the heavy test files.
+    tests_traps = load_challenge_tests_traps(rows[0]["challenge_id"])
     return {
         "session": rows[0],
         # The single structured report — score + summary, every rubric with its
@@ -707,12 +731,21 @@ def get_session_detail(
         # Flat grade row (track / total_score / band / graded_at, plus any legacy
         # columns) for dashboards that only need the headline number.
         "grade": grade,
+        # The hidden-test groups and planted traps this challenge checks, each a
+        # short {id, description} string — code-free, for a list view alongside
+        # the grade's tests_passed/traps_detected counts. The test source is a
+        # separate fetch (GET /api/v1/challenges/{cid}/tests/code).
+        "challenge_tests": tests_traps["tests"],
+        "challenge_traps": tests_traps["traps"],
         "chat_exchanges": exchanges,
         "grading_errors": grading_errors,
         # Per-file time-on-file [{file, ms}, …] derived live from telemetry
         # file_open/file_focus events — available even before grading. Same
         # shape and ordering as the report's files_explored_detail.
         "file_time": _file_time_breakdown(session_id),
+        # The end-of-interview explainer-video prompts the candidate was asked
+        # to address (empty when no end video was required for this session).
+        "end_of_interview_questions": end_of_interview_questions,
     }
 
 

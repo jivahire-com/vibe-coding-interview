@@ -82,6 +82,11 @@ def _migrate() -> None:
         ("chat_exchanges", "prompt_reasoning", "TEXT"),
         ("chat_exchanges", "candidate_prompt_tokens", "INTEGER"),
         ("chat_exchanges", "prompt_level", "INTEGER"),
+        # JSON array of workspace-relative paths the candidate proactively gave
+        # the AI as context this turn (via @-mention, pin, or right-click → add
+        # to chat). Captured at the proxy before prompt_text is stripped, so it
+        # records all three mechanisms uniformly. NULL/[] = no files provided.
+        ("chat_exchanges", "referenced_files", "TEXT"),
         ("chat_exchanges", "applied", "INTEGER NOT NULL DEFAULT 0"),
         ("chat_exchanges", "correction_of", "INTEGER REFERENCES chat_exchanges(id)"),
         ("grades", "prompt_quality_score", "INTEGER"),

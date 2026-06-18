@@ -122,7 +122,7 @@
       "good": "Gives the AI the context it needs, states constraints, breaks work into focused prompts, and gives specific feedback when the AI is wrong.",
       "bad": "Vague one-liners like \"fix the bugs\" with no context and no follow-up.",
       "criteria": {
-        "context_framing": "Gave the AI the context it needed.",
+        "context_framing": "Gave the AI the context it needed, including attaching the relevant files (@-mention / pin) when useful.",
         "constraint_spec": "Stated the constraints.",
         "decomposition": "Broke the work into focused prompts.",
         "iterative_refinement": "Built on previous answers instead of restarting.",

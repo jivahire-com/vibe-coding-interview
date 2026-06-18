@@ -49,7 +49,7 @@ def _scored_rubrics(report: dict) -> list[dict]:
     ]
 
 
-def reband(report: dict, track: str) -> tuple[dict, str, str]:
+def reband(report: dict) -> tuple[dict, str, str]:
     """Return (new_report, old_band, new_band) without mutating the input."""
     new = json.loads(json.dumps(report))  # deep copy
     overall = new.get("overall", {})
@@ -58,9 +58,11 @@ def reband(report: dict, track: str) -> tuple[dict, str, str]:
     new_band = report_mod._band(total)
 
     overall["band"] = new_band
-    overall["summary_points"] = report_mod._summary_points(
-        total, new_band, track, _scored_rubrics(new), new.get("bonuses", [])
-    )
+    # Regenerate the headline "Overall result" factor in place (recast of the old
+    # summary_points); leave the other recruiter factors as graded.
+    overall_factor = report_mod._overall_factor(total, new_band, _scored_rubrics(new))
+    factors = [f for f in (overall.get("factors") or []) if f.get("key") != "overall"]
+    overall["factors"] = [overall_factor, *factors]
     new["legend"] = report_mod._LEGEND  # refresh score-ranges legend
     return new, old_band, new_band
 
@@ -91,7 +93,7 @@ def main() -> None:
             print(f"  {r['session_id']}: SKIP — bad report_json ({exc})")
             continue
 
-        new_report, old_band, new_band = reband(report, r["track"] or report.get("track", "vibe"))
+        new_report, old_band, new_band = reband(report)
         flag = "" if old_band == new_band else "  <-- band changes"
         print(f"  {r['session_id']}  score={r['total_score']:g}  {old_band} -> {new_band}{flag}")
 

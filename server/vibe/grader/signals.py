@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from vibe.db import execute, query
+from vibe.grader.git_ops import candidate_base
 
 # Window (ms) inside which a follow-up test_run "covers" an apply/edit, aligned
 # to the extension's POST_APPLY_WINDOW_MS (telemetry.ts).
@@ -84,6 +85,11 @@ class Signals:
     total_completion_tokens: int = 0
     num_chat_exchanges: int = 0
     prompt_specificity: float | None = None
+    # Files the candidate proactively attached as context (@-mention / pin /
+    # right-click), aggregated across the session. Modest positive signal for
+    # context-framing in the LLM-communication rubric.
+    prompts_with_file_context: int = 0
+    files_provided_as_context: list[str] = field(default_factory=list)
 
     # AI verification / judgment facts (vibe)
     test_after_apply: dict[str, Any] = field(default_factory=dict)
@@ -177,6 +183,7 @@ def build(
     s.total_chat_tokens = s.total_prompt_tokens + s.total_completion_tokens
     s.num_chat_exchanges = len(cx)
     s.prompt_specificity = _prompt_specificity(chat_prompts)
+    s.prompts_with_file_context, s.files_provided_as_context = _file_context_signal(session_id)
 
     # AI verification / judgment facts
     s.test_after_apply = _test_after_apply(events)
@@ -251,6 +258,32 @@ def _load_chat_prompts(session_id: str) -> list[str]:
         (session_id,),
     )
     return [r["prompt_text"] for r in rows if r["prompt_text"]]
+
+
+def _file_context_signal(session_id: str) -> tuple[int, list[str]]:
+    """How often, and which files, the candidate attached as context.
+
+    Returns (number of prompts that carried ≥1 attached file, deduped list of
+    distinct files provided across the session). Reads the proxy-captured
+    ``referenced_files`` column so @-mention, pin, and right-click all count.
+    """
+    rows = query(
+        "SELECT referenced_files FROM chat_exchanges "
+        "WHERE session_id=? AND prompt_text IS NOT NULL ORDER BY ts ASC",
+        (session_id,),
+    )
+    prompts_with = 0
+    distinct: list[str] = []
+    seen: set[str] = set()
+    for r in rows:
+        files = _parse_referenced_files(r["referenced_files"])
+        if files:
+            prompts_with += 1
+            for f in files:
+                if f not in seen:
+                    seen.add(f)
+                    distinct.append(f)
+    return prompts_with, distinct
 
 
 # ─── Direct-signal derivations ───────────────────────────────────────────────
@@ -435,9 +468,19 @@ def _hand_fixed_traps(attribution: dict[str, Any] | None) -> dict[str, Any]:
 def _recovery_events(clone_dir: Path | None) -> dict[str, Any]:
     if clone_dir is None or not clone_dir.exists():
         return {"count": 0, "available": False}
+    # Scope to the candidate's own commits only (`<base>..HEAD`). Walking the
+    # whole branch counts setup commits — the starter re-sync, the answer-key
+    # strip — as candidate "recoveries"; the canonical-package sync alone is a
+    # 50+ line deletion. If we can't isolate the candidate range, report no
+    # signal rather than fold setup history back in. `.jivahire/` is also
+    # excluded so the committed telemetry JSONL never registers.
+    base = candidate_base(clone_dir)
+    if base is None:
+        return {"count": 0, "available": False}
     try:
         log = subprocess.run(
-            ["git", "log", "--all", "--pretty=%H %s", "--numstat"],
+            ["git", "log", f"{base}..HEAD", "--pretty=%H %s", "--numstat",
+             "--", ".", ":(exclude).jivahire/**"],
             cwd=clone_dir, capture_output=True, text=True, timeout=30, check=False,
         )
     except Exception:
@@ -491,6 +534,17 @@ _LEVEL_TO_CLASSIFICATION = {5: "professional", 4: "professional",
                             3: "specific", 2: "vague", 1: "vague"}
 
 
+def _parse_referenced_files(raw: Any) -> list[str]:
+    """Decode the chat_exchanges.referenced_files JSON column to a path list."""
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [str(p) for p in val if p] if isinstance(val, list) else []
+
+
 def classify_prompts(session_id: str, client: Any) -> list[dict[str, Any]] | None:
     """Score + classify each candidate prompt and persist to chat_exchanges.
 
@@ -503,17 +557,21 @@ def classify_prompts(session_id: str, client: Any) -> list[dict[str, Any]] | Non
     from vibe.grader.llm_eval import CONFIG  # local import avoids a cycle at module load
 
     rows = query(
-        "SELECT id, prompt_text FROM chat_exchanges "
+        "SELECT id, prompt_text, referenced_files FROM chat_exchanges "
         "WHERE session_id=? AND prompt_text IS NOT NULL ORDER BY ts ASC",
         (session_id,),
     )
-    prompts = [(i, r["prompt_text"]) for i, r in enumerate(rows) if r["prompt_text"]]
+    prompts = [(i, r["prompt_text"], _parse_referenced_files(r["referenced_files"]))
+               for i, r in enumerate(rows) if r["prompt_text"]]
     if not prompts:
         return None
 
     ladder = CONFIG.get("prompt_classification_ladder", {})
     ladder_block = "\n".join(f"  {lvl} - {desc}" for lvl, desc in ladder.items()) or "  (none)"
-    numbered = "\n".join(f"[{i+1}] {p[:400]}" for i, p in prompts)
+    numbered = "\n".join(
+        f"[{i+1}] {p[:400]}" + (f"\n     (attached as context: {', '.join(files)})" if files else "")
+        for i, p, files in prompts
+    )
     prompt = f"""Rate each candidate prompt below. Return JSON only.
 
 CLASSIFICATION BUCKETS (recruiter-facing badge):
@@ -523,6 +581,13 @@ CLASSIFICATION BUCKETS (recruiter-facing badge):
 
 1-5 LADDER (for context; informs the 1-10 score):
 {ladder_block}
+
+CONTEXT THE CANDIDATE ATTACHED: some prompts note files the candidate proactively
+gave the AI (via @-mention or pinning the file). Pointing the AI at the right
+file is good prompting hygiene — treat it as mild positive evidence that nudges
+the score up by at most ~1 point and can move a borderline prompt up one bucket.
+It is NOT a substitute for stating the actual problem: a bare "fix this" with a
+file attached is still vague.
 
 PROMPTS:
 {numbered}

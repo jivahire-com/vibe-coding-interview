@@ -9,6 +9,7 @@
 
 // --- [basic] hidden ---
 
+// @doc: Inserting far past capacity must never grow the cache beyond its limit (catches the > vs >= off-by-one).
 TEST_CASE("cache does not exceed capacity on insert", "[basic]") {
     // Exercises the off-by-one bug: > vs >= in the eviction loop.
     LRUCache<int, int> cache(3);
@@ -16,6 +17,7 @@ TEST_CASE("cache does not exceed capacity on insert", "[basic]") {
     REQUIRE(cache.size() == 3);
 }
 
+// @doc: A get() between inserts re-orders recency, so the next eviction drops the genuinely least-recently-used key.
 TEST_CASE("eviction correctness under interleaved reads", "[basic]") {
     LRUCache<int, int> cache(3);
     cache.put(1, 1);
@@ -31,6 +33,7 @@ TEST_CASE("eviction correctness under interleaved reads", "[basic]") {
 
 // --- [thread] hidden ---
 
+// @doc: Many threads put()-ing distinct keys at once: every write must survive, so a lost entry means a data race.
 TEST_CASE("concurrent put does not corrupt state", "[thread]") {
     // Capacity exceeds the number of distinct keys, so eviction never fires.
     // This isolates thread-safety from the [basic] eviction off-by-one: every
@@ -52,6 +55,7 @@ TEST_CASE("concurrent put does not corrupt state", "[thread]") {
     REQUIRE(cache.size() == N * OPS);
 }
 
+// @doc: Interleaved get()/put() across threads must never return a torn value — only k or k*2, never garbage.
 TEST_CASE("concurrent get and put from many threads", "[thread]") {
     LRUCache<int, int> cache(32);
     for (int i = 0; i < 32; ++i) cache.put(i, i);
@@ -73,6 +77,7 @@ TEST_CASE("concurrent get and put from many threads", "[thread]") {
     REQUIRE(mismatches.load() == 0);
 }
 
+// @doc: get() mutates state (it promotes the entry), so even pure concurrent reads need an exclusive lock — a shared/read lock here races.
 TEST_CASE("concurrent reads of shared keys are race-free", "[thread]") {
     // get() promotes the entry it returns (it splices the node to the front),
     // so it MUTATES internal state — it is not a read-only operation. The
@@ -101,6 +106,7 @@ TEST_CASE("concurrent reads of shared keys are race-free", "[thread]") {
 
 // --- [edge] hidden ---
 
+// @doc: A capacity-0 cache is a no-op store — put() keeps it empty and every get() misses.
 TEST_CASE("capacity zero never stores entries", "[edge]") {
     // A cache with capacity 0 should be effectively a no-op store.
     LRUCache<int, int> cache(0);

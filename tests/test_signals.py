@@ -132,3 +132,29 @@ def test_llm_signals_none_without_client():
     sig = S.build(sid, ai_assistance=True, client=None)
     assert sig.prompt_classification is None
     assert sig.design_why is None
+
+
+def _chat_with_files(sid, ts, text, files):
+    execute("INSERT INTO chat_exchanges (session_id, ts, model, prompt_tokens, completion_tokens, "
+            "cost_usd, prompt_text, referenced_files) VALUES (?, ?, 'm', 100, 50, 0.0, ?, ?)",
+            (sid, ts, text, json.dumps(files) if files else None))
+
+
+def test_file_context_signal_aggregates_distinct_files_and_prompts():
+    sid = "sfc"
+    _seed(sid)
+    _chat_with_files(sid, 1, "@src/cache.cpp fix the race", ["src/cache.cpp"])
+    _chat_with_files(sid, 2, "now look at these", ["src/cache.cpp", "src/util.h"])  # cache.cpp repeats
+    _chat_with_files(sid, 3, "make it nicer", None)  # no files
+    sig = S.build(sid, ai_assistance=True, client=None)
+    assert sig.prompts_with_file_context == 2
+    assert sig.files_provided_as_context == ["src/cache.cpp", "src/util.h"]
+
+
+def test_file_context_signal_empty_when_no_attachments():
+    sid = "sfc2"
+    _seed(sid)
+    _chat_with_files(sid, 1, "fix this", None)
+    sig = S.build(sid, ai_assistance=True, client=None)
+    assert sig.prompts_with_file_context == 0
+    assert sig.files_provided_as_context == []

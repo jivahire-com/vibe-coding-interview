@@ -5,7 +5,8 @@ The gate floors every non-objective dimension when a candidate submitted
 without engaging. These tests pin:
   - assess() is conservative: ANY of {chars, chat, code change} → attended
   - the code-change probe ignores the extension's `.jivahire/` bookkeeping
-  - the probe fails open (attended) when it can't read a clone
+  - the probe fails closed (no false code-change) when it can't read a clone,
+    leaving the authorship counters to carry a genuine attempt
   - runner summary builders surface the no-show note instead of the weakest
     signal/criterion
 """
@@ -63,8 +64,11 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def _make_repo(tmp_path: Path, *, change_code=False, add_jivahire=False) -> Path:
-    """A branch clone: a starter root commit, an empty auto-commit, and
-    optionally a `.jivahire/` telemetry commit and/or a real code edit."""
+    """A branch clone mirroring real provisioning: non-`auto:` setup commits
+    (the starter the candidate is handed), then the candidate's own `auto:`
+    commits — an empty 3-min timer commit, and optionally a `.jivahire/`
+    telemetry commit and/or a real code edit. The candidate baseline is the
+    newest non-`auto:` commit, so only the `auto:` commits count as their work."""
     repo = tmp_path / "clone"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -72,18 +76,20 @@ def _make_repo(tmp_path: Path, *, change_code=False, add_jivahire=False) -> Path
     _git(repo, "config", "user.name", "t")
     (repo / "main.py").write_text("def f():\n    return 1\n")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "starter")
+    _git(repo, "commit", "-q", "-m", "Initial challenge starter")
+    _git(repo, "commit", "-q", "--allow-empty",
+         "-m", "chore: provision candidate workspace")
     # Empty auto-commit — what a no-show's 3-min timer produces.
-    _git(repo, "commit", "-q", "--allow-empty", "-m", "auto")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "auto: 2026-01-01T00:00:00Z")
     if add_jivahire:
         (repo / ".jivahire").mkdir(exist_ok=True)
         (repo / ".jivahire" / "telemetry.jsonl").write_text('{"e":1}\n')
         _git(repo, "add", "-A")
-        _git(repo, "commit", "-q", "-m", "telemetry")
+        _git(repo, "commit", "-q", "-m", "auto: 2026-01-01T00:03:00Z")
     if change_code:
         (repo / "main.py").write_text("def f():\n    return 2  # edit\n")
         _git(repo, "add", "-A")
-        _git(repo, "commit", "-q", "-m", "work")
+        _git(repo, "commit", "-q", "-m", "auto: 2026-01-01T00:06:00Z")
     return repo
 
 
@@ -101,6 +107,30 @@ def test_jivahire_telemetry_commit_does_not_count_as_engagement(tmp_path):
     repo = _make_repo(tmp_path, add_jivahire=True)
     out = engagement.assess("ns2", repo)
     # The committed telemetry JSONL is bookkeeping, not candidate code.
+    assert out["signals"]["code_changed"] is False
+    assert out["attended"] is False
+
+
+def test_setup_commit_before_candidate_is_not_engagement(tmp_path):
+    # Reproduces the real no-show: provisioning re-syncs the starter (a large
+    # code change) BEFORE the candidate starts, then the candidate only produces
+    # empty auto-commits. That setup change must not read as candidate work.
+    _seed("setup")
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t.com")
+    _git(repo, "config", "user.name", "t")
+    (repo / "main.py").write_text("def f():\n    return 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "Initial challenge starter")
+    # Non-auto setup commit that rewrites code — the provisioning re-sync.
+    (repo / "main.py").write_text("def f():\n    return 999  # canonical\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "Update starter to canonical challenge package")
+    # Candidate then does nothing but tick the 3-min timer.
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "auto: 2026-01-01T00:00:00Z")
+    out = engagement.assess("setup", repo)
     assert out["signals"]["code_changed"] is False
     assert out["attended"] is False
 
@@ -132,12 +162,20 @@ def test_attended_when_code_changed(tmp_path):
     assert out["attended"] is True
 
 
-def test_fails_open_when_no_clone():
+def test_no_clone_relies_on_authorship_counters():
+    # With no readable clone the git probe can't prove a code change, so it must
+    # NOT assert engagement on its own — otherwise a no-show slips past the
+    # floor. A true no-show (no chars, no chat) is flagged...
     _seed("noclone")
     out = engagement.assess("noclone", None)
-    # Can't prove no changes → never falsely flag a no-show.
-    assert out["signals"]["code_changed"] is True
-    assert out["attended"] is True
+    assert out["signals"]["code_changed"] is False
+    assert out["attended"] is False
+
+    # ...while a real attempt is still saved by its authorship counters.
+    _seed("noclone-coded", typed=200)
+    out2 = engagement.assess("noclone-coded", None)
+    assert out2["signals"]["code_changed"] is False
+    assert out2["attended"] is True
 
 
 def test_floor_constant_is_near_zero_not_zero():

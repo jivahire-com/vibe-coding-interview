@@ -77,12 +77,15 @@ def _verdicts_valid(result):
 # ─── verification_discipline ─────────────────────────────────────────────────
 
 
-def test_vd_no_applies_floor_applied():
+def test_vd_no_applies_is_na():
+    # No accepted AI code and no hand edits → nothing to verify. The rubric is
+    # N/A (score None, dropped from the overall total), not a passing
+    # pre-submit-floor 6.0 that reads as "checked their work".
     sid = "vd-empty"
     _seed_session(sid, submitted_at=2_000)
     out = verification_discipline.score(_sig(sid, submitted_at_s=2_000))
-    assert out["score"] <= 6.0
-    assert out["note"] and "Pre-submit floor" in out["note"]
+    assert out["score"] is None
+    assert all(sp["verdict"] == "na" for sp in out["subpoints"])
     _verdicts_valid(out)
 
 
@@ -146,6 +149,18 @@ def test_aj_zero_rejections_missing():
     out = ai_judgment.score(_sig(sid))
     rej = next(sp for sp in out["subpoints"] if sp["key"] == "explicit_rejections")
     assert rej["verdict"] == "missing"
+
+
+def test_aj_no_interaction_is_na():
+    # Opened the session and did nothing: no AI accepts, no rejections, no chat,
+    # no traps, no git history. There is nothing to judge — every sub-signal is
+    # N/A and the rubric drops out rather than showing STRONG on absence.
+    sid = "aj-noop"
+    _seed_session(sid)
+    out = ai_judgment.score(_sig(sid))
+    assert out["score"] is None
+    assert all(sp["verdict"] == "na" for sp in out["subpoints"])
+    _verdicts_valid(out)
 
 
 def test_aj_hand_fixed_trap_is_strong():

@@ -1,0 +1,4 @@
+# CMake build tree — never commit. A local cache (esp. Windows / NMake) pins
+# absolute paths + a generator and breaks the grader's out-of-tree build.
+/build/
+build/

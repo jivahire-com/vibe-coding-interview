@@ -202,6 +202,7 @@ def _eval_llm_communication(client, ctx, session_id, signals):
     ratio = round(total_tokens / max(expected, 1), 2)
     ladder = CONFIG.get("prompt_classification_ladder", {})
     ladder_block = "\n".join(f"  {lvl}: {desc}" for lvl, desc in ladder.items())
+    file_context_block = _file_context_block(signals)
 
     prompt = f"""You are grading LLM COMMUNICATION — how effectively the candidate prompted the
 AI (prompt-side skill only; what they DID with the output is scored elsewhere).
@@ -216,6 +217,7 @@ UNIFIED TIMELINE EXCERPT (chat + edits + tests, with sequence numbers):
 
 TOKEN USAGE: {total_tokens:,} chat tokens vs {expected:,} expected (ratio={ratio}).
 Use this for `token_discipline` only; don't penalise lean spend that worked.
+{file_context_block}
 
 PROMPT CLASSIFICATION LADDER (context; do not output classifications):
 {ladder_block}
@@ -358,6 +360,26 @@ def _signals_block(signals: Any) -> str:
         f" · Paste% {getattr(signals, 'paste_pct', 0)}\n"
         f"- AI-applied {getattr(signals, 'ai_applied_chars', 0):,} chars ({getattr(signals, 'ai_applied_pct', 0)}%)\n"
         f"- Suspicious pastes {getattr(signals, 'suspicious_pastes', 0)} · Window switches {getattr(signals, 'window_switches', 0)}"
+    )
+
+
+def _file_context_block(signals: Any) -> str:
+    """Bounded `context_framing` nudge: did the candidate attach relevant files?"""
+    if signals is None:
+        return ""
+    n_prompts = getattr(signals, "prompts_with_file_context", 0)
+    files = getattr(signals, "files_provided_as_context", []) or []
+    if not n_prompts or not files:
+        return ("\nFILE CONTEXT: the candidate attached no files to their prompts — they relied on the "
+                "AI's repo context alone. Neutral; don't penalise unless a prompt clearly needed a file "
+                "the AI couldn't see.\n")
+    shown = ", ".join(files[:8]) + (" …" if len(files) > 8 else "")
+    return (
+        f"\nFILE CONTEXT: the candidate proactively attached files as context on {n_prompts} prompt(s) "
+        f"(via @-mention / pin / right-click). Files provided: {shown}.\n"
+        "Pointing the AI at the right file is good context-framing — count it as MILD positive evidence "
+        "for `context_framing` only. It can lift a borderline verdict but must not by itself turn vague, "
+        "context-free prompting into a strong score.\n"
     )
 
 

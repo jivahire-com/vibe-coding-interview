@@ -32,6 +32,15 @@ def build_and_test(clone_dir: Path, hidden_test_src: Path, tags: list[str]) -> t
         return r
 
     build_dir = clone_dir / "build"
+    # A candidate who built locally may have committed their build/ tree: the
+    # challenge scaffold ships no .gitignore and the extension auto-commits with
+    # `git add -A`, so a local CMakeCache.txt rides along on the branch. That
+    # cache pins an absolute build path + generator from their machine (e.g.
+    # "NMake Makefiles" under C:/Users/.../build on Windows), and our cmake
+    # invocation aborts with a source/dir mismatch instead of configuring. Always
+    # start from a clean build tree so the committed cache can't poison the grade.
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
     challenge_build = Path(hidden_test_src).parent.parent / "build" / "_deps"
     run(
         ["cmake", "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Debug",
