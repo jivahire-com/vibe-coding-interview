@@ -68,6 +68,9 @@ def _migrate() -> None:
         # Tenant tag supplied by the recruiter-backend proxy so admin queries can
         # be scoped to a single organization. NULL on legacy/direct sessions.
         ("sessions", "org_id", "TEXT"),
+        # Email of the inviting recruiter, supplied by the recruiter-backend
+        # proxy. Shown in admin list/detail. NULL on legacy/direct sessions.
+        ("sessions", "recruiter_email", "TEXT"),
         # Anti-tamper invalidation (see schema.sql).
         ("sessions", "invalidated_at", "INTEGER"),
         ("sessions", "invalidation_reason", "TEXT"),

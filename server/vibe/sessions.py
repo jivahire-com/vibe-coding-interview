@@ -220,7 +220,7 @@ def list_sessions(
         "s.typed_chars, s.pasted_chars, s.ai_applied_chars, "
         "s.meet_link, s.video_platform, s.scheduled_at, s.panelist_emails, "
         "s.ai_assistance, "
-        "s.created_at, s.started_at, s.submitted_at, s.org_id, "
+        "s.created_at, s.started_at, s.submitted_at, s.org_id, s.recruiter_email, "
         "s.invalidated_at, s.invalidation_reason, "
         "g.total_score "
         "FROM sessions s LEFT JOIN grades g ON g.session_id = s.id "
@@ -342,14 +342,15 @@ async def create_session(req: CreateSessionRequest, x_admin_token: str = Header(
             "(id, session_key, candidate_email, challenge_id, branch_name, "
             "llm_budget_usd, max_minutes, meet_link, video_platform, "
             "scheduled_at, panelist_emails, require_end_video, ai_assistance, "
-            "source_ref, org_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_ref, org_id, recruiter_email) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, req.session_key, req.candidate_email, req.challenge_id,
              branch, req.llm_budget_usd, req.max_minutes,
              req.meet_link, req.video_platform,
              req.scheduled_at, panelists_csv,
              1 if req.require_end_video else 0,
-             1 if req.ai_assistance else 0, source_ref, req.org_id),
+             1 if req.ai_assistance else 0, source_ref, req.org_id,
+             req.recruiter_email),
         )
     except sqlite3.IntegrityError as e:
         if "session_key" in str(e):

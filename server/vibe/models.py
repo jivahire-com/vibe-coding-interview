@@ -39,6 +39,10 @@ class CreateSessionRequest(BaseModel):
     # Organization tag set by the recruiter-backend proxy. Used only to scope
     # admin list/detail queries to a single org; never surfaced to candidates.
     org_id: str | None = None
+    # Email of the recruiter who sent the invite, set by the recruiter-backend
+    # proxy. Surfaced in admin list/detail so the dashboard can show who
+    # invited the candidate; never surfaced to candidates.
+    recruiter_email: str | None = None
 
     @field_validator("meet_link")
     @classmethod
