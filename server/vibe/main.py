@@ -14,6 +14,7 @@ from vibe.video import router as video_router, public_router as video_public_rou
 from vibe.app_logs import router as app_logs_router
 from vibe.repo_files import router as repo_files_router
 from vibe.challenge_tests import router as challenge_tests_router
+from vibe.code_diff import router as code_diff_router
 
 configure_logging("server")
 
@@ -36,6 +37,7 @@ app.include_router(video_router)
 app.include_router(app_logs_router)
 app.include_router(repo_files_router)
 app.include_router(challenge_tests_router)
+app.include_router(code_diff_router)
 # Must be registered before the static `/` mount so /video-record reaches it.
 app.include_router(video_public_router)
 

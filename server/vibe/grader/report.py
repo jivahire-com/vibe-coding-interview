@@ -264,22 +264,26 @@ def _dim_score_100(dim: dict[str, Any]) -> int | None:
 
 
 def _tests_factor(tests_dim: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
-    if meta.get("build_failed"):
-        return {"key": "tests", "label": "Tests", "status": "bad",
-                "summary": "Tests could not run",
-                "description": "The code did not compile, so no tests ran."}
     subs = tests_dim.get("subpoints", []) or []
+    if meta.get("build_failed"):
+        items = [f"{sp.get('key', 'test')} — not run (code did not compile)" for sp in subs]
+        return {"key": "tests", "label": "Tests", "status": "bad",
+                "summary": "Tests could not run", "items": items,
+                "description": "The code did not compile, so no hidden tests ran."}
     total = len(subs)
     passed = sum(1 for sp in subs if sp.get("verdict") == "strong")
     if total == 0:
         return {"key": "tests", "label": "Tests", "status": "bad",
-                "summary": "No tests ran",
-                "description": "No automated tests were run on this submission."}
+                "summary": "No tests ran", "items": [],
+                "description": "No hidden tests were run on this submission."}
+    items = [f"{sp.get('key', 'test')} — {'passed' if sp.get('verdict') == 'strong' else 'failed'}"
+             for sp in subs]
     status = "good" if passed == total else "bad"
-    description = ("All automated tests passed." if status == "good"
-                  else f"{total - passed} of {total} tests failed.")
+    description = ("All hidden tests passed." if status == "good"
+                  else f"{total - passed} of {total} hidden tests failed.")
     return {"key": "tests", "label": "Tests", "status": status,
-            "summary": f"{passed}/{total} tests passed", "description": description}
+            "summary": f"{passed}/{total} hidden tests passed", "items": items,
+            "description": description}
 
 
 def _code_quality_factor(cq_dim: dict[str, Any]) -> dict[str, Any]:
@@ -326,8 +330,10 @@ def _review_alerts_factor(dims: dict[str, Any], meta: dict[str, Any]) -> dict[st
                 "summary": f"{len(items)} {noun} to check", "items": items,
                 "description": "Things a reviewer should look at before deciding."}
     return {"key": "review_alerts", "label": "Review alerts", "status": "good",
-            "summary": "No red flags", "items": [],
-            "description": "Nothing unusual was flagged in this session."}
+            "summary": "All integrity checks passed", "items": [],
+            "description": "Telemetry was intact, the candidate genuinely took part, "
+                           "and they behaved like a developer — nothing for a reviewer "
+                           "to double-check."}
 
 
 def _compiled_factor(meta: dict[str, Any]) -> dict[str, Any]:

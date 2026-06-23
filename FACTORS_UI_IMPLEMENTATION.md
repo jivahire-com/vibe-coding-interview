@@ -83,7 +83,7 @@ content is now the first factor (`key: "overall"`).
 
 ## Factor schema (the contract)
 
-Every factor has the same four fields; `review_alerts` adds one more.
+Every factor has the same four fields; `review_alerts` and `tests` add one more.
 
 | field         | type              | meaning |
 |---------------|-------------------|---------|
@@ -92,7 +92,7 @@ Every factor has the same four fields; `review_alerts` adds one more.
 | `status`      | `"good"`\|`"bad"` | The flag. `good` → green, `bad` → red. Drives all coloring. |
 | `summary`     | string            | Bold one-line headline (the "value"). |
 | `description` | string            | Sub-line, one sentence. May be `""`. |
-| `items`       | `string[]`        | **`review_alerts` only.** One bullet per alert. Empty `[]` when clean. |
+| `items`       | `string[]`        | **`review_alerts` and `tests` only.** One bullet per alert (review_alerts) or per hidden test (tests). Empty `[]` when none. |
 
 ### The factors and their order
 
@@ -116,8 +116,9 @@ The array is **already in display order** — render it in sequence, do not sort
 
 1. **`status` is the only thing that decides color.** Map `good → green`,
    `bad → red`. Never re-derive a flag from `summary`/`score` on the client.
-2. **`review_alerts` renders its `items` as a bullet list.** For every other
-   factor, show `summary` (bold) + `description` (muted). When `items` is empty
+2. **Factors with `items` (`review_alerts`, `tests`) render them as a bullet
+   list** under the `summary`. For every other factor, show `summary` (bold) +
+   `description` (muted). When `items` is empty
    the card is green ("No red flags") — still render it so a clean session reads
    as reassuringly green rather than absent.
 3. **`description` can be empty** — guard with `factor.description && (...)`.

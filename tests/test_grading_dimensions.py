@@ -142,13 +142,16 @@ def test_aj_rejections_drive_score_up():
     assert rej["verdict"] == "strong"
 
 
-def test_aj_zero_rejections_missing():
+def test_aj_zero_rejections_is_na():
+    # Engaged the AI (applied a block) but rejected nothing — the AI may simply
+    # have produced good code. Absence of rejections is ambiguous, so it must
+    # score N/A, not as a failure that drags the dimension down.
     sid = "aj-norej"
     _seed_session(sid, typed_chars=500, ai_applied_chars=500)
     _inject(sid, 1_000_000, "edit_ai_applied", {"file": "a.py", "block_id": "B1", "chars": 100})
     out = ai_judgment.score(_sig(sid))
     rej = next(sp for sp in out["subpoints"] if sp["key"] == "explicit_rejections")
-    assert rej["verdict"] == "missing"
+    assert rej["verdict"] == "na"
 
 
 def test_aj_no_interaction_is_na():

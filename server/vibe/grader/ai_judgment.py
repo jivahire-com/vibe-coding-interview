@@ -61,14 +61,19 @@ def score(signals: Signals) -> dict[str, Any]:
     return {"score": round(float(weighted), 2), "subpoints": subs, "note": None}
 
 
-def _band_rejections(count: int) -> float:
+def _band_rejections(count: int) -> float | None:
     if count >= 3:
         return 9.0
     if count == 2:
         return 7.0
     if count == 1:
         return 5.0
-    return 2.0
+    # No rejections is ambiguous — a candidate who only ever saw good AI output
+    # had nothing to reject. Score it N/A rather than as a failure (consistent
+    # with _band_recovery / _band_hand_fixed). Genuine blind acceptance of *wrong*
+    # AI code is caught where there's ground truth: traps (hand_fixed_traps) and
+    # modify_after_apply.
+    return None
 
 
 def _band_modify_after_apply(rate: float | None) -> float | None:
@@ -81,8 +86,11 @@ def _band_modify_after_apply(rate: float | None) -> float | None:
     if rate >= 0.10:
         return 5.0
     if rate > 0:
-        return 3.0
-    return 1.0
+        return 4.0
+    # Edited none of the applied blocks within 90s. The heuristic can't tell
+    # "read carefully and approved" from "blindly accepted", so this is a weak
+    # signal, not a failure — blind acceptance of *wrong* code is caught by traps.
+    return 3.0
 
 
 def _band_hand_fixed(facts: dict[str, Any]) -> float | None:

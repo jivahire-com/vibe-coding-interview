@@ -1,5 +1,5 @@
 from typing import Any
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 _ALLOWED_VIDEO_PLATFORMS = {"google_meet", "zoom", "teams", "other"}
@@ -90,6 +90,22 @@ class CreateSessionRequest(BaseModel):
             seen.add(low)
             cleaned.append(low)
         return cleaned
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> "CreateSessionRequest":
+        # The AI budget only matters when the candidate actually has the AI
+        # chat. For a normal (no-AI) interview the proxy refuses chat outright,
+        # so any budget value (0/null/default) is harmless — leave it as-is.
+        # When AI is enabled, reject a $0 budget (the candidate would get no AI
+        # at all, defeating the point of a vibe-coding interview) and cap it so
+        # a typo can't hand out an unbounded spend.
+        if self.ai_assistance:
+            if not (0.50 <= self.llm_budget_usd <= 10.00):
+                raise ValueError(
+                    "llm_budget_usd must be between 0.50 and 10.00 when "
+                    "ai_assistance is enabled"
+                )
+        return self
 
     @field_validator("scheduled_at")
     @classmethod

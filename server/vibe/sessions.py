@@ -58,6 +58,17 @@ def load_challenge_metadata(challenge_id: str) -> dict:
         return {}
 
 
+def _split_panelist_emails(value: Any) -> list[str]:
+    """Parse the comma-separated `panelist_emails` column (see create_session,
+    which joins the request list with ',') back into a list. None/empty yields
+    an empty list; already-a-list passes through unchanged."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    return [e.strip() for e in str(value).split(",") if e.strip()]
+
+
 def load_challenge_tests_traps(challenge_id: str) -> dict:
     """Short, recruiter-facing descriptions of a challenge's hidden-test groups
     and planted traps, read off the challenge's `.jivahire/` config.
@@ -235,6 +246,18 @@ def list_sessions(
         sql += "LIMIT -1 OFFSET ?"
         page_params.append(offset)
     rows = query(sql, tuple(page_params))
+    # Challenge language lives in the challenge's `.jivahire/metadata.json`, not on
+    # the session row. Cache per challenge_id so a page of sessions sharing a
+    # challenge reads the file once rather than once per row.
+    language_cache: dict[str, str] = {}
+
+    def _challenge_language(challenge_id: str) -> str:
+        if challenge_id not in language_cache:
+            language_cache[challenge_id] = (
+                load_challenge_metadata(challenge_id).get("language") or "unknown"
+            )
+        return language_cache[challenge_id]
+
     sessions = []
     for r in rows:
         d = dict(r)
@@ -246,9 +269,16 @@ def list_sessions(
         # `ai_assisted`: the invite-time AI-assistance toggle set by the recruiter
         # (sessions.ai_assistance, default enabled), not whether AI was actually used.
         d["ai_assisted"] = bool(d.get("ai_assistance", 1))
+        # `panelist_emails` is stored as a comma-separated string (see create_session);
+        # surface it as a list to match the create/validate shape. Empty stays an
+        # empty list, which is still falsy for the is_panel check below.
+        d["panelist_emails"] = _split_panelist_emails(d.get("panelist_emails"))
         # `is_panel`: a panel interview carries a meet link or panelist emails —
         # same definition the start/validate path uses (see is_panel in validate-session).
         d["is_panel"] = bool(d.get("meet_link")) or bool(d.get("panelist_emails"))
+        # `language`: the challenge's source language (cpp/python/…), read from the
+        # challenge metadata so the list can show it without a second fetch.
+        d["language"] = _challenge_language(d["challenge_id"])
         sessions.append(d)
     return {
         "sessions": sessions,
@@ -721,8 +751,16 @@ def get_session_detail(
     # fetched on demand from GET /api/v1/challenges/{cid}/tests/code (see
     # challenge_tests.py) so a session poll never carries the heavy test files.
     tests_traps = load_challenge_tests_traps(rows[0]["challenge_id"])
+    # Surface the panelist emails as a list (stored CSV; see create_session) and
+    # the challenge's source language (read from `.jivahire/metadata.json`, not on
+    # the session row) so the detail view matches the list API's shape.
+    session = dict(rows[0])
+    session["panelist_emails"] = _split_panelist_emails(session.get("panelist_emails"))
+    session["language"] = (
+        load_challenge_metadata(rows[0]["challenge_id"]).get("language") or "unknown"
+    )
     return {
-        "session": rows[0],
+        "session": session,
         # The single structured report — score + summary, every rubric with its
         # Good/Bad yardstick and strong/weak/missing subpoints, bonuses, and the
         # telemetry catalogue. Definitions ship inside it; the page does no math.
