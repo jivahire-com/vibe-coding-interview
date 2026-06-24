@@ -1,0 +1,32 @@
+{
+  "challenge_id": "python-money",
+  "title": "Money Value Type",
+  "description": "Harden a small Money value type: parse decimal strings to exact integer cents (no float truncation), reject arithmetic across mismatched currencies, and split an amount into parts without losing or inventing cents.",
+  "language": "python",
+  "code_fence": "python",
+  "difficulty": "junior",
+  "estimated_minutes": 40,
+  "max_minutes": 75,
+  "submission_files": ["src/money.py"],
+  "starter_code_note": "The class shape (integer-cents storage, slots, equality, repr) is provided in the starter. The candidate is expected to replace the float-based from_string with exact decimal parsing, add currency-mismatch guards to add/subtract, and distribute the remainder in allocate. Do NOT credit them for the integer-cents design or the equality/repr already present.",
+  "code_quality_criteria": [
+    "Correctness (does it pass the tests and fix the planted traps?)",
+    "Exact decimal handling (decimal.Decimal, explicit rounding mode, no float round-trip)",
+    "Idiomatic Python (typing, clear guard clauses, divmod for the split)",
+    "Clarity and naming"
+  ],
+  "architectural_criteria": [
+    "Money as an integer-cents value object (why not store floats)",
+    "Choice of rounding mode and where rounding happens (parse boundary vs arithmetic)",
+    "Currency as an invariant enforced on every binary operation",
+    "Remainder-distribution strategy in allocate (sum-preserving, deterministic)",
+    "Edge handling (parts < 1, more parts than cents, zero amounts)"
+  ],
+  "tasks": [
+    {"id": "basic",    "points": 25, "test_tag": "basic"},
+    {"id": "rounding", "points": 30, "test_tag": "rounding"},
+    {"id": "currency", "points": 20, "test_tag": "currency"},
+    {"id": "allocate", "points": 25, "test_tag": "allocate"}
+  ],
+  "total_points": 100
+}

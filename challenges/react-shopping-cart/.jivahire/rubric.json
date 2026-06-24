@@ -1,0 +1,40 @@
+{
+  "challenge_id": "react-shopping-cart",
+  "title": "Shopping Cart Hook (React)",
+  "description": "Extend a React shopping-cart hook (useReducer-based) with a discount-coupon system. The cart fundamentals already work; the new coupon layer has three correctness problems: percentage coupons are computed in raw floating point (so a 10%-off coupon on $9.99 yields 99.9 cents instead of a whole 100), the cart total can drop below zero when a coupon is worth more than the cart, and applyCoupon stacks duplicate codes and accepts codes that aren't real coupons. The candidate must keep money in integer cents, round each percentage discount to the nearest cent (half rounds up), floor the total at zero, and validate coupon codes — all while preserving the hook's public API and state shape.",
+  "language": "javascript",
+  "code_fence": "jsx",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 75,
+
+  "submission_files": ["src/useCart.js", "src/CartView.jsx"],
+
+  "starter_code_note": "The state shape ({ items: [{ id, name, price, quantity }], coupons: [code] }, all money in integer cents), the useReducer setup, the action names (add / setQuantity / remove / applyCoupon / removeCoupon / clear), the COUPONS catalogue, the addItem / setQuantity / removeItem / applyCoupon / removeCoupon / clear / cartCount / subtotal / discount / cartTotal public surface, and the CartView presentational component are all provided in the starter. The cart fundamentals (merge on re-add, subtotal = price * quantity, zero-quantity removal) already work and must NOT be credited. Do NOT credit the candidate for the reducer pattern, the state shape, the COUPONS catalogue, or the cents-as-integer representation. Credit ONLY: (a) rounding each percentage discount to the nearest cent with a documented half-up policy, (b) flooring cartTotal at zero so it never goes negative, (c) rejecting unknown coupon codes and refusing to apply the same coupon twice, and (d) the quality of the design decisions around where rounding happens (per-coupon vs. on the summed discount) and how validation is layered.",
+
+  "code_quality_criteria": [
+    "Correctness — percentage discounts round to whole cents (half-up), the total is floored at zero, and applyCoupon ignores duplicates and unknown codes.",
+    "Money discipline — every exposed money value (subtotal, discount, cartTotal) stays an integer number of cents; no floating-point dollars or fractional cents leak out.",
+    "Rounding placement — each coupon's discount is rounded independently before summing, matching the documented spec, rather than rounding the final total.",
+    "Idiomatic React — reducer stays pure, no direct state mutation, derived values (subtotal / discount / cartTotal) via useMemo, validation lives in the reducer not the component.",
+    "Minimal change — extend the coupon layer without rewriting the cart fundamentals or changing the public API.",
+    "Clarity and naming — the discount and validation logic reads cleanly; comments only where the WHY is non-obvious."
+  ],
+
+  "architectural_criteria": [
+    "Where rounding happens — rounding each coupon's discount independently vs. rounding the summed total, and whether the candidate notices these differ and follows the documented per-coupon spec.",
+    "Where coupon validation lives — guarding inside the reducer's applyCoupon case (single source of truth) vs. scattering checks at call sites, and how unknown vs. duplicate codes are distinguished.",
+    "How the zero-floor is modelled — clamping in the cartTotal selector vs. clamping each discount, and the reasoning about which keeps subtotal / discount honest for display.",
+    "Whether subtotal / discount / cartTotal stay derived (useMemo) rather than stored as separate state that can drift out of sync with items and coupons.",
+    "Money representation — staying in integer cents end-to-end and reasoning about the rounding policy (half-up) rather than introducing floating-point dollars."
+  ],
+
+  "tasks": [
+    {"id": "basic",    "points": 10, "test_tag": "basic"},
+    {"id": "discount", "points": 40, "test_tag": "discount"},
+    {"id": "clamp",    "points": 25, "test_tag": "clamp"},
+    {"id": "coupons",  "points": 25, "test_tag": "coupons"}
+  ],
+
+  "total_points": 100
+}

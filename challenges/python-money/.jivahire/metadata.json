@@ -1,0 +1,12 @@
+{
+  "challenge_id": "python-money",
+  "title": "Money Value Type",
+  "language": "python",
+  "difficulty": "junior",
+  "estimated_minutes": 40,
+  "max_minutes": 75,
+  "tags": ["value-objects", "decimal", "correctness"],
+  "public_test_file": "tests/test_public.py",
+  "hidden_test_file": "tests/test_hidden.py",
+  "grader": "python"
+}

@@ -1,0 +1,12 @@
+{
+  "challenge_id": "react-shopping-cart",
+  "title": "Shopping Cart Hook (React)",
+  "language": "javascript",
+  "difficulty": "mid",
+  "estimated_minutes": 45,
+  "max_minutes": 75,
+  "tags": ["react", "hooks", "state", "discounts", "money"],
+  "public_test_file": "tests/cart.public.test.jsx",
+  "hidden_test_file": "tests/cart.hidden.test.jsx",
+  "grader": "typescript"
+}

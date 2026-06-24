@@ -1,0 +1,39 @@
+{
+  "challenge_id": "typescript-deep-merge",
+  "title": "Deep Merge Utility (TypeScript)",
+  "description": "Fix a small recursive `deepMerge<T>` utility. The starter merges flat and nested plain objects correctly, but it mutates the target object instead of returning a fresh copy, it merges arrays element-by-element instead of replacing them, and it follows dangerous keys like `__proto__` straight onto `Object.prototype` (prototype pollution). Read the failing public tests, fix all three bugs, and keep the `deepMerge` signature and the `Plain` type intact.",
+  "language": "typescript",
+  "code_fence": "typescript",
+  "difficulty": "mid",
+  "estimated_minutes": 35,
+  "max_minutes": 60,
+
+  "submission_files": ["src/deep_merge.ts"],
+
+  "starter_code_note": "The `deepMerge<T extends Plain>(target, source): T` signature, the `Plain` type alias, the recursive skeleton, and the `isMergeable` helper are all provided in the starter. Do NOT credit the candidate for the recursive shape, the generic signature, or the idea of a type-guard helper. Credit ONLY: (a) making the merge pure — building a fresh object and deep-copying nested source values rather than mutating `target` or sharing references, (b) treating arrays as leaf values that replace rather than merge, (c) skipping dangerous keys (`__proto__` / `constructor` / `prototype`) so untrusted input cannot reach `Object.prototype`, and (d) any clarity or naming improvements layered on top of those fixes.",
+
+  "code_quality_criteria": [
+    "Correctness — the result is a new object, arrays replace wholesale, and __proto__ payloads cannot pollute Object.prototype.",
+    "Immutability — neither `target` nor any nested source object is mutated or shared into the result; descent deep-copies.",
+    "Idiomatic TypeScript — the type guard narrows correctly, generics stay intact, no unsafe `any` leaks into the public surface.",
+    "Minimal change — fix the three bugs without rewriting the recursion or changing the public signature.",
+    "Clarity and naming — the dangerous-key check and the array/object branching read cleanly; comments only where the WHY is non-obvious."
+  ],
+
+  "architectural_criteria": [
+    "How immutability is achieved — spreading/cloning at each level vs. mutating in place, and whether nested source objects are copied rather than referenced.",
+    "Where the array-vs-object decision is made — a single clear predicate (plain object only) rather than scattered `Array.isArray` checks.",
+    "How dangerous keys are handled — an explicit deny-list checked before recursion vs. relying on Object.keys ordering, and whether `constructor`/`prototype` are covered alongside `__proto__`.",
+    "Whether the fix generalises — deep nesting, mixed array/object values, and absent target keys are all handled by the same code path rather than special-cased.",
+    "Type safety — the guard narrows `unknown` to a plain record without weakening the generic return type."
+  ],
+
+  "tasks": [
+    {"id": "basic",     "points": 20, "test_tag": "basic"},
+    {"id": "immutable", "points": 30, "test_tag": "immutable"},
+    {"id": "arrays",    "points": 25, "test_tag": "arrays"},
+    {"id": "security",  "points": 25, "test_tag": "security"}
+  ],
+
+  "total_points": 100
+}

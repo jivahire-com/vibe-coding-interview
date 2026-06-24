@@ -1,0 +1,22 @@
+{
+  "traps": [
+    {
+      "id": "discount_rounding",
+      "description": "`couponDiscount` computes a percentage coupon as `(subtotal * value) / 100` in raw floating point, so a 10%-off coupon on a 999-cent subtotal returns 99.9 — a fractional cent that breaks the integer-cents invariant. The fix must round each coupon's discount to the nearest cent with a half-up policy (Math.round), and must round each coupon independently before summing, matching the documented spec. Rounding only the final total is a subtly different, incorrect behaviour.",
+      "detection_tag": "discount",
+      "severity": 3
+    },
+    {
+      "id": "total_allows_negative",
+      "description": "`cartTotal` is `subtotal - discount` with no lower bound, so a coupon worth more than the cart drives the total negative (e.g. a $10 coupon on a $1.50 cart yields -850 cents). The fix must floor the total at zero (Math.max(0, subtotal - discount)) while keeping subtotal and discount themselves honest for display.",
+      "detection_tag": "clamp",
+      "severity": 3
+    },
+    {
+      "id": "coupon_stacks_and_unknown",
+      "description": "The reducer's `applyCoupon` case appends the code unconditionally, so the same coupon can be applied twice (doubling its discount) and a made-up code that isn't in COUPONS is stored just the same. The fix must reject codes not present in the COUPONS catalogue and refuse to add a coupon that is already applied — ideally guarded in one place inside the reducer rather than scattered across call sites.",
+      "detection_tag": "coupons",
+      "severity": 2
+    }
+  ]
+}

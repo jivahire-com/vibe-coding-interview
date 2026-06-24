@@ -1,0 +1,12 @@
+{
+  "challenge_id": "typescript-deep-merge",
+  "title": "Deep Merge Utility (TypeScript)",
+  "language": "typescript",
+  "difficulty": "mid",
+  "estimated_minutes": 35,
+  "max_minutes": 60,
+  "tags": ["typescript", "recursion", "immutability", "security"],
+  "public_test_file": "tests/deep_merge.public.test.ts",
+  "hidden_test_file": "tests/deep_merge.hidden.test.ts",
+  "grader": "typescript"
+}

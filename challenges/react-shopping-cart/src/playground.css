@@ -1,0 +1,220 @@
+/* Optional dev-playground styles — not graded, not part of the challenge. */
+
+:root {
+  --bg: #0f172a;
+  --panel: #ffffff;
+  --ink: #0f172a;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --warn: #b91c1c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.5;
+}
+
+.playground {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 3rem;
+}
+
+.banner {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid var(--line);
+}
+
+.banner h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.4rem;
+}
+
+.banner p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.banner code {
+  background: #f1f5f9;
+  padding: 0.05rem 0.35rem;
+  border-radius: 5px;
+  color: var(--ink);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+@media (max-width: 720px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--line);
+}
+
+.panel h2 {
+  font-size: 1rem;
+  margin: 1.25rem 0 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.panel h2:first-child {
+  margin-top: 0;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.catalog li,
+.applied li,
+.qty-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.catalog .name,
+.qty-row .name {
+  flex: 1;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.small {
+  font-size: 0.85rem;
+}
+
+button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 7px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.05);
+}
+
+.qty-row button {
+  min-width: 2rem;
+  padding: 0.2rem 0;
+}
+
+.coupon-apply {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.coupon-apply input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+}
+
+.applied li button {
+  background: transparent;
+  color: var(--warn);
+  border-color: var(--line);
+}
+
+[data-testid="cart"] {
+  margin: 0;
+}
+
+[data-testid="cart"] li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+[data-testid="cart"] .name {
+  flex: 1;
+  font-weight: 600;
+}
+
+[data-testid="total"] {
+  justify-content: flex-end;
+  font-weight: 700;
+}
+
+[data-testid="empty"] {
+  color: var(--muted);
+}
+
+.summary {
+  margin: 0;
+}
+
+.summary > div {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+}
+
+.summary dt,
+.summary dd {
+  margin: 0;
+}
+
+.summary .grand {
+  border-top: 2px solid var(--line);
+  margin-top: 0.4rem;
+  padding-top: 0.6rem;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.clear {
+  margin-top: 1rem;
+  background: transparent;
+  color: var(--warn);
+  border-color: var(--line);
+}
+
+.hints {
+  margin-top: 1.25rem;
+  padding: 0 0.5rem;
+  color: #cbd5e1;
+  font-size: 0.9rem;
+  text-align: center;
+}

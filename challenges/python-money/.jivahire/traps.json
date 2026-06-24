@@ -1,0 +1,25 @@
+{
+  "traps": [
+    {
+      "id": "float_truncation",
+      "description": "from_string parses with int(float(amount) * 100), so binary-float error truncates everyday prices one cent low (\"4.35\" -> 434, \"19.99\" -> 1998). Fix uses decimal.Decimal with an explicit rounding mode.",
+      "detection_tag": "rounding",
+      "points": 25,
+      "severity": 3
+    },
+    {
+      "id": "currency_mismatch",
+      "description": "add and subtract ignore the currency and silently combine raw cents, so USD and EUR get added together. Each must raise ValueError on a currency mismatch.",
+      "detection_tag": "currency",
+      "points": 20,
+      "severity": 3
+    },
+    {
+      "id": "allocate_remainder_lost",
+      "description": "allocate uses integer division only and returns equal pieces, dropping the remainder (500 split 3 ways returns 498). Fix distributes leftover cents one each to the leading pieces so the parts sum back to the original.",
+      "detection_tag": "allocate",
+      "points": 15,
+      "severity": 2
+    }
+  ]
+}

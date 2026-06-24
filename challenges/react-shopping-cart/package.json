@@ -1,0 +1,28 @@
+{
+  "name": "react-shopping-cart-challenge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React shopping-cart hook coding challenge",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --reporter=verbose",
+    "test:tag": "vitest run --reporter=verbose -t",
+    "dev": "vite"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.4.8",
+    "@testing-library/react": "16.0.1",
+    "@vitejs/plugin-react": "4.3.1",
+    "jsdom": "24.1.3",
+    "vite": "5.2.11",
+    "vitest": "1.6.0"
+  }
+}

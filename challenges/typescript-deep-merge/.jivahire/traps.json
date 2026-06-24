@@ -1,0 +1,22 @@
+{
+  "traps": [
+    {
+      "id": "mutates_target_in_place",
+      "description": "`deepMerge` writes straight back into `target` and returns it, so the caller's object is mutated. On the scalar branch it assigns the source value by reference, so nested source objects are shared between the input and the result. A correct version builds a fresh object and deep-copies as it descends, leaving both inputs untouched.",
+      "detection_tag": "immutable",
+      "severity": 2
+    },
+    {
+      "id": "arrays_merged_by_index",
+      "description": "`isMergeable` returns true for arrays, so two arrays at the same key are merged index-by-index (the source array's elements overwrite the target's, leaving the tail behind) instead of the source array replacing the target array. A deep-merge must treat an array as a leaf value and replace it.",
+      "detection_tag": "arrays",
+      "severity": 2
+    },
+    {
+      "id": "prototype_pollution",
+      "description": "Every own key of `source` is followed, including `__proto__`. A payload parsed from untrusted JSON such as {\"__proto__\": {\"isAdmin\": true}} therefore walks onto Object.prototype and pollutes every object in the process. Dangerous keys (`__proto__`, `constructor`, `prototype`) must be skipped before recursion.",
+      "detection_tag": "security",
+      "severity": 3
+    }
+  ]
+}

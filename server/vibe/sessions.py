@@ -301,10 +301,16 @@ def list_challenges(x_admin_token: str = Header(None)):
     except FileNotFoundError:
         entries = []
 
-    # Only cpp-thread-safe-cache is offered to recruiters right now. Other
-    # challenge dirs remain on disk (grading/existing sessions still need them)
-    # but are filtered out of this listing.
-    entries = [d for d in entries if d == "cpp-thread-safe-cache"]
+    # Challenges offered to recruiters right now. Other challenge dirs remain
+    # on disk (grading/existing sessions still need them) but are filtered out
+    # of this listing until they are ready to be assigned.
+    _OFFERED = {
+        "cpp-thread-safe-cache",
+        "python-money",
+        "react-shopping-cart",
+        "typescript-deep-merge",
+    }
+    entries = [d for d in entries if d in _OFFERED]
 
     items: list[dict] = []
     for cid in entries:
