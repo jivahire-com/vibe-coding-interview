@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { execFile, execFileSync } from "child_process";
 import { promisify } from "util";
-import { SessionConfig, submitSession, videoBrowserLink } from "./api";
+import { SessionConfig, submitSession, videoBrowserLink, sessionDeadlineMs } from "./api";
 import { getLogger } from "./logger";
 
 const execFileAsync = promisify(execFile);
@@ -107,46 +107,69 @@ export interface SubmitDeps {
   onShowVideoLink?: (url: string, expiresUnix: number) => void;
 }
 
+export interface RunSubmitOptions {
+  /**
+   * Auto-submit triggered by the countdown reaching zero, NOT a candidate
+   * clicking Submit. Skips the confirmation modal (there is no one to confirm —
+   * time is already up), tolerates a missing workspace, and swaps the toasts /
+   * progress title to "time's up" wording.
+   */
+  auto?: boolean;
+}
+
 export async function runSubmit(
   config: SessionConfig,
-  deps: SubmitDeps = {}
+  deps: SubmitDeps = {},
+  opts: RunSubmitOptions = {}
 ): Promise<void> {
-  const remainingMs = config.startedAt + config.maxMinutes * 60_000 - Date.now();
-  const remainingMin = Math.max(0, Math.round(remainingMs / 60_000));
-  const detail = `${remainingMin} min remaining. Tests: status unknown.`;
-  // Default focus goes to the FIRST item — keep "Submit" away from the front
-  // unless the candidate is clearly out of time (<=5 min left).
-  const submitFirst = remainingMs <= 5 * 60_000;
-  const buttons = submitFirst ? ["Submit", "Cancel"] : ["Cancel", "Submit"];
-  const confirm = await vscode.window.showWarningMessage(
-    "Submit your final answer? You won't be able to edit after.",
-    { modal: true, detail },
-    ...buttons
-  );
-  if (confirm !== "Submit") return;
+  if (!opts.auto) {
+    const remainingMs = sessionDeadlineMs(config) - Date.now();
+    const remainingMin = Math.max(0, Math.round(remainingMs / 60_000));
+    const detail = `${remainingMin} min remaining. Tests: status unknown.`;
+    // Default focus goes to the FIRST item — keep "Submit" away from the front
+    // unless the candidate is clearly out of time (<=5 min left).
+    const submitFirst = remainingMs <= 5 * 60_000;
+    const buttons = submitFirst ? ["Submit", "Cancel"] : ["Cancel", "Submit"];
+    const confirm = await vscode.window.showWarningMessage(
+      "Submit your final answer? You won't be able to edit after.",
+      { modal: true, detail },
+      ...buttons
+    );
+    if (confirm !== "Submit") return;
+  }
 
   const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!ws) {
+  // A manual submit needs the workspace to commit the final tree. An auto-submit
+  // must still notify the candidate and POST /submit even with no folder open
+  // (window reloaded to an empty workspace at the moment of expiry) — the
+  // server-side sweep still has the last pushed commit, so we skip only the git
+  // step, never the notification + video link.
+  if (!ws && !opts.auto) {
     vscode.window.showErrorMessage("No workspace folder open.");
     return;
   }
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "JivaHire: Submitting…" },
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: opts.auto ? "JivaHire: Time's up — submitting…" : "JivaHire: Submitting…",
+    },
     async () => {
       const log = getLogger();
-      log?.info("submit_started", { challengeId: config.challengeId });
+      log?.info("submit_started", { challengeId: config.challengeId, auto: !!opts.auto });
       try {
-        const ts = new Date().toISOString();
-        // Take the git mutex so the final commit/push can't race an in-flight
-        // auto-commit (which would collide on `.git/index.lock` or clobber the
-        // authed remote URL mid-push). The lock is released before the network
-        // submit so an auto-commit isn't blocked on a slow POST.
-        const releaseLock = await _acquireGitLock();
-        try {
-          gitCommitAndPush(ws, config, `submit: ${ts}`, true);
-        } finally {
-          releaseLock();
+        if (ws) {
+          const ts = new Date().toISOString();
+          // Take the git mutex so the final commit/push can't race an in-flight
+          // auto-commit (which would collide on `.git/index.lock` or clobber the
+          // authed remote URL mid-push). The lock is released before the network
+          // submit so an auto-commit isn't blocked on a slow POST.
+          const releaseLock = await _acquireGitLock();
+          try {
+            gitCommitAndPush(ws, config, `submit: ${ts}`, true);
+          } finally {
+            releaseLock();
+          }
         }
         const resp = await submitSession(config);
         log?.info("submit_succeeded", { hasVideoUpload: !!resp.video_upload });
@@ -156,21 +179,16 @@ export async function runSubmit(
         await deps.onSubmitted?.();
         deps.onMarkSubmitted?.();
         vscode.window.showInformationMessage(
-          "Submitted! Grading will appear in the recruiter dashboard shortly."
+          opts.auto
+            ? "Time's up — your interview was submitted automatically. Grading " +
+              "will appear in the recruiter dashboard shortly."
+            : "Submitted! Grading will appear in the recruiter dashboard shortly."
         );
         // Post-submit identity-verification video. Server gates this behind a
         // config check and returns `video_upload` only when S3/CloudFront are
-        // configured. Recording is optional and runs in parallel with grading.
-        // We mint a browser-recording link and surface it in the dashboard —
-        // the candidate opens it in a real browser (camera/mic do not work
-        // inside VS Code webviews). Errors are swallowed: never block submit.
-        if (resp.video_upload && deps.onShowVideoLink) {
-          try {
-            const link = await videoBrowserLink(config);
-            deps.onShowVideoLink(link.url, link.expires_unix);
-          } catch (e) {
-            log?.errorFromException("video_link_mint_failed", e);
-          }
+        // configured AND this session is meant to record one.
+        if (resp.video_upload) {
+          await _showVideoLink(config, deps, log);
         }
       } catch (err: unknown) {
         // A 409 means the server no longer considers the session `active` —
@@ -189,6 +207,15 @@ export async function runSubmit(
             "submitted automatically. Your work is being graded; results will " +
             "appear in the recruiter dashboard shortly."
           );
+          // The server already submitted, so we never saw a `video_upload` flag
+          // in a response — but the candidate is still owed the recording link
+          // when this session is meant to record one. Mirror the server's gating
+          // (skip for live panel sessions that don't force an end-video) and
+          // mint the link directly; `_showVideoLink` swallows the 503/409 the
+          // server returns when recording is off or not yet configured.
+          if (!config.meetLink || config.requireEndVideo === true) {
+            await _showVideoLink(config, deps, log);
+          }
           return;
         }
         log?.errorFromException("submit_failed", err);
@@ -196,6 +223,27 @@ export async function runSubmit(
       }
     }
   );
+}
+
+/**
+ * Best-effort: mint a short-lived browser-recording link and hand it to the
+ * dashboard. Camera/mic APIs do not work inside VS Code webviews, so the only
+ * working recording path is the candidate opening this link in a real browser
+ * (or on a phone). Errors are swallowed — recording is optional and must never
+ * block or undo a successful submit. No-op when no `onShowVideoLink` was wired.
+ */
+async function _showVideoLink(
+  config: SessionConfig,
+  deps: SubmitDeps,
+  log: ReturnType<typeof getLogger>
+): Promise<void> {
+  if (!deps.onShowVideoLink) return;
+  try {
+    const link = await videoBrowserLink(config);
+    deps.onShowVideoLink(link.url, link.expires_unix);
+  } catch (e) {
+    log?.errorFromException("video_link_mint_failed", e);
+  }
 }
 
 /**

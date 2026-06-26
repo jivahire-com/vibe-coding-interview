@@ -20,6 +20,25 @@ interface Message {
 
 export const STREAM_TIMEOUT_MS = 60_000;
 
+// Trailing-debounce window for workspace-file rescans. A dev server starting up
+// (e.g. the React challenge's `npm install` + Vite) creates thousands of files
+// under node_modules in a burst; coalescing them into one rescan keeps the
+// extension-host event loop free so the timer and LLM streaming don't freeze.
+const WS_FILE_REFRESH_DEBOUNCE_MS = 400;
+
+// Directories whose contents must never trigger a workspace-file rescan. These
+// mirror the exclude glob used by refreshWorkspaceFiles' findFiles call — the
+// watcher fires on creates/deletes ANYWHERE (findFiles' exclude doesn't apply
+// to the watcher), so we filter here too or a node_modules write storm slips
+// straight through to a full rescan.
+const WS_FILE_IGNORED_DIRS = [
+  "node_modules", ".git", "dist", "build", ".jivahire",
+  "out", ".next", "target", "__pycache__", ".venv", "venv",
+];
+const WS_FILE_IGNORED_RE = new RegExp(
+  `(^|[\\\\/])(${WS_FILE_IGNORED_DIRS.map((d) => d.replace(/\./g, "\\.")).join("|")})([\\\\/]|$)`,
+);
+
 /**
  * Drilled into every chat request. The Apply button in the chat UI is
  * disabled for code blocks without `file=path`, so an answer that omits it
@@ -58,7 +77,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private streamingText = "";
   private spentUsd = 0;
   private config: SessionConfig | undefined;
-  private selectedModel: string = "openai/gpt-4o";
+  private selectedModel: string = "anthropic/claude-haiku-4.5";
   private budgetExhausted = false;
   // Chat-toolbar state — the timer pill, offline banner, and Run tests /
   // Submit / Join call buttons all live in the chat webview now, so the
@@ -78,6 +97,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // file-system watcher; never used to leak file CONTENT to the LLM.
   private workspaceFiles: string[] = [];
   private fileWatcher?: vscode.FileSystemWatcher;
+  private _refreshTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -133,7 +153,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.config = config;
-    this.selectedModel = config.availableChatModels[0] ?? config.chatModel;
+    // Default the chat to Haiku when the session offers it; otherwise fall back
+    // to the server's first advertised model.
+    const defaultModel = "anthropic/claude-haiku-4.5";
+    this.selectedModel = config.availableChatModels.includes(defaultModel)
+      ? defaultModel
+      : config.availableChatModels[0] ?? config.chatModel;
     void this.refreshWorkspaceFiles();
     this.render();
   }
@@ -208,6 +233,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   dispose(): void {
     try { this.fileWatcher?.dispose(); } catch { /* watcher may not have been created */ }
     this.fileWatcher = undefined;
+    if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = undefined; }
   }
 
   resolveWebviewView(
@@ -234,13 +260,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }).createFileSystemWatcher;
       if (typeof createWatcher !== "function") return;
       const w = vscode.workspace.createFileSystemWatcher("**/*", false, true, false);
-      w.onDidCreate(() => { void this.refreshWorkspaceFiles(); });
-      w.onDidDelete(() => { void this.refreshWorkspaceFiles(); });
+      w.onDidCreate((uri) => this._scheduleWorkspaceRefresh(uri));
+      w.onDidDelete((uri) => this._scheduleWorkspaceRefresh(uri));
       this.fileWatcher = w;
     } catch {
       // Watcher unavailable (e.g. test env). The dropdown still works — it
       // just won't update mid-session when files are added/removed.
     }
+  }
+
+  /**
+   * Coalesce file create/delete events into a single debounced rescan. Events
+   * inside heavy/build dirs (node_modules, .git, dist, …) are dropped outright
+   * — they never appear in the @-mention dropdown anyway, and a dev-server
+   * startup writing thousands of node_modules files would otherwise trigger a
+   * full-workspace findFiles per event and freeze the extension host (timer +
+   * LLM streaming included).
+   */
+  private _scheduleWorkspaceRefresh(uri: vscode.Uri): void {
+    if (WS_FILE_IGNORED_RE.test(uri.fsPath)) return;
+    if (this._refreshTimer) clearTimeout(this._refreshTimer);
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = undefined;
+      void this.refreshWorkspaceFiles();
+    }, WS_FILE_REFRESH_DEBOUNCE_MS);
   }
 
   private async handleMessage(msg: { command: string; text?: string; filePath?: string; codeText?: string; blockId?: string; model?: string; lang?: string }): Promise<void> {

@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as https from "https";
 import * as crypto from "crypto";
 import { execSync } from "child_process";
-import { SessionConfig } from "../api";
+import { SessionConfig, sessionDeadlineMs } from "../api";
 
 interface PrereqChecks {
   git: boolean | null;
@@ -57,7 +57,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     // instead of leaving the panel stuck on a stale brief.
     if (!this.config && !this._dismissed) {
       const saved = this.context.globalState.get<SessionConfig>("vibe.session");
-      if (saved && Date.now() - saved.startedAt <= saved.maxMinutes * 60_000) {
+      if (saved && Date.now() < sessionDeadlineMs(saved)) {
         this.config = saved;
         // setConfig() arms the refresh interval; ensure it is armed on restore too.
         this._armRefresh();
@@ -203,10 +203,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     timeStr: string;
     urgent: "critical" | "warn" | "normal";
   } {
-    const remaining = Math.max(
-      0,
-      config.startedAt + config.maxMinutes * 60_000 - Date.now(),
-    );
+    const remaining = Math.max(0, sessionDeadlineMs(config) - Date.now());
     const mins = Math.floor(remaining / 60_000);
     const secs = Math.floor((remaining % 60_000) / 1000);
     const timeStr = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
@@ -224,8 +221,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
   private _sessionExpired(): boolean {
     if (!this.config) return false;
-    const deadline = this.config.startedAt + this.config.maxMinutes * 60_000;
-    return Date.now() >= deadline;
+    return Date.now() >= sessionDeadlineMs(this.config);
   }
 
   private _runPrereqChecks(): void {

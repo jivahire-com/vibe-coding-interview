@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 # disk. Override with VIBE_LOG_RETENTION_DAYS.
 RETENTION_DAYS = int(os.environ.get("VIBE_LOG_RETENTION_DAYS", "30"))
 
+# An active session whose clock never started (started_at NULL — the candidate
+# validated but never finished cloning / opening the workspace) would otherwise
+# sit active forever, since `started_at + max_minutes*60` is NULL and never
+# trips the expiry below. Reap it once it's clearly abandoned. Override with
+# VIBE_UNSTARTED_GRACE_HOURS.
+UNSTARTED_GRACE_SECONDS = int(os.environ.get("VIBE_UNSTARTED_GRACE_HOURS", "12")) * 3600
+
 sched = BlockingScheduler()
 
 
@@ -24,9 +31,11 @@ def auto_submit_sweep() -> None:
     try:
         with immediate_transaction() as conn:
             expired = conn.execute(
-                "SELECT id FROM sessions "
-                "WHERE status='active' AND started_at + max_minutes*60 < ?",
-                (now,),
+                "SELECT id FROM sessions WHERE status='active' AND ("
+                "  (started_at IS NOT NULL AND started_at + max_minutes*60 < ?) "
+                "  OR (started_at IS NULL AND created_at + ? < ?)"
+                ")",
+                (now, UNSTARTED_GRACE_SECONDS, now),
             ).fetchall()
             if not expired:
                 return

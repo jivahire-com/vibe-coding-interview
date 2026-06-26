@@ -56,7 +56,15 @@ export interface SessionConfig {
   language: string;
   chatModel: string;
   availableChatModels: string[];
-  startedAt: number; // epoch ms, recorded client-side on validate
+  /**
+   * Epoch ms the interview countdown is anchored to. 0 until the clock starts:
+   * validate-session deliberately does NOT start it (cloning the repo + the
+   * window reload can take minutes the candidate shouldn't lose). The extension
+   * calls reportSessionStarted() from the freshly-opened clone workspace, which
+   * sets the server-authoritative start and fills this in. The deadline is
+   * `startedAt + maxMinutes`.
+   */
+  startedAt: number;
   /**
    * Per-million-token pricing for each available chat model, supplied by the
    * server so the client's budget meter never diverges from the proxy's
@@ -86,6 +94,18 @@ export interface SessionConfig {
    * when the server omits the field, so older servers keep AI on.
    */
   aiAssistance: boolean;
+}
+
+/**
+ * The interview countdown deadline, in epoch ms. A startedAt of 0 means the
+ * clock hasn't been anchored yet (the clone just finished / is finishing and
+ * reportSessionStarted hasn't recorded the server start) — treat it as starting
+ * "now" so the candidate sees full time remaining and the session is never
+ * judged expired during that window. Once anchored, startedAt > 0 and this is
+ * just `startedAt + maxMinutes`.
+ */
+export function sessionDeadlineMs(config: SessionConfig): number {
+  return (config.startedAt || Date.now()) + config.maxMinutes * 60_000;
 }
 
 /** Default pricing fallback when the server omits the pricing table.
@@ -177,7 +197,10 @@ export async function validateSession(
     language: typeof res.language === "string" ? res.language : "unknown",
     chatModel: res.chat_model ?? "openai/gpt-4o",
     availableChatModels: res.available_chat_models ?? [res.chat_model ?? "openai/gpt-4o"],
-    startedAt: Date.now(),
+    // 0 = clock not yet anchored. The countdown must not include the clone +
+    // window-reload time, so we don't stamp a start here; the extension reports
+    // clone-completion via reportSessionStarted() and fills this in then.
+    startedAt: 0,
     pricingPerMillion: _normalisePricing(res.pricing_per_million),
     meetLink,
     videoPlatform,
@@ -289,6 +312,27 @@ export async function refreshGithubToken(
     token: res.github_clone_token,
     expiresAt: res.github_clone_token_expires_at * 1000,
   };
+}
+
+/**
+ * Report that the challenge clone has finished and the candidate is in the
+ * workspace — this is what actually starts the interview countdown. The server
+ * anchors started_at on the first call and returns the same value on every
+ * later call (window reopens), so the deadline never drifts. Returns the
+ * server-authoritative start time in epoch ms.
+ */
+export async function reportSessionStarted(
+  serverUrl: string,
+  sessionKey: string
+): Promise<number> {
+  const base = serverUrl.replace(/\/+$/, "");
+  const res = (await post(`${base}/api/v1/session-started`, "{}", sessionKey)) as {
+    started_at?: unknown;
+  };
+  if (typeof res.started_at !== "number" || res.started_at <= 0) {
+    throw new Error("session-started: missing started_at in response");
+  }
+  return res.started_at * 1000;
 }
 
 export interface VideoUploadInfo {

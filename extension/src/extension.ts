@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { execFileSync } from "child_process";
-import { validateSession, preflightSession, refreshGithubToken, invalidateSession, SessionConfig, Dependency, SessionPreflight } from "./api";
+import { validateSession, preflightSession, refreshGithubToken, reportSessionStarted, invalidateSession, SessionConfig, Dependency, SessionPreflight } from "./api";
 import { Timer } from "./timer";
 import { DashboardViewProvider } from "./welcome/panel";
 import { ChatViewProvider } from "./chat/view";
@@ -65,7 +65,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   const savedSessionPrecheck = context.globalState.get<SessionConfig>(SESSION_KEY);
-  if (savedSessionPrecheck) {
+  // Only expire a session whose clock has actually started. startedAt is 0
+  // between clone and the first clone-workspace activation (the clock is
+  // anchored later, by reportSessionStarted); treating that 0 as "elapsed since
+  // 1970" here would wipe every freshly-cloned session before it ever begins.
+  if (savedSessionPrecheck && savedSessionPrecheck.startedAt) {
     const elapsed = Date.now() - savedSessionPrecheck.startedAt;
     if (elapsed > savedSessionPrecheck.maxMinutes * 60_000) {
       await context.globalState.update(SESSION_KEY, undefined);
@@ -90,6 +94,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     dashboardProvider,
     chatProvider
   );
+
+  // Deps shared by the manual `vibe.submit` command and the time-up auto-submit
+  // below, so both paths run identical DONE-state cleanup and surface the video
+  // link the same way.
+  const buildSubmitDeps = () => ({
+    onStopTimer: () => timer.stop(),
+    onSubmitted: async () => {
+      // Bug fix: clear the session AFTER a successful submit so the IDLE →
+      // SUBMITTING → DONE state machine advances. Without this the dashboard
+      // buttons stay live, the AI chat budget keeps draining, and the candidate
+      // can resubmit.
+      await context.globalState.update(SESSION_KEY, undefined);
+      await context.globalState.update(OPENED_WS_KEY, undefined);
+      // Hide the chat view (which gates on vibe.session.active) and drop the
+      // meet-link flag so a post-submit reload renders the dashboard alone,
+      // matching the IDLE/DONE state.
+      await vscode.commands.executeCommand("setContext", "vibe.session.active", false);
+      await vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", false);
+      // Bug fix: also stop the auto-commit interval. The closure still holds the
+      // old `config` (with a now-cleared globalState session), so leaving the
+      // interval running keeps pushing with a token that will silently expire
+      // ~1h later. Stop it cleanly on submit.
+      _stopAutoCommit?.();
+      // And the token-refresh timer for the same reason — keeping it armed past
+      // submit would burn a GitHub API call every ~55 min for a DONE session.
+      _stopTokenRefresh?.();
+    },
+    onMarkSubmitted: () => dashboardProvider.markSubmitted(),
+    onShowVideoLink: (url: string, expiresUnix: number) =>
+      dashboardProvider.setVideoLink(url, expiresUnix),
+  });
+
+  // Auto-submit when the countdown hits zero. The server's sweep also submits
+  // expired sessions, but if VS Code is open at 00:00 the candidate would
+  // otherwise see nothing — no "submitted" confirmation and, when the session
+  // records one, no identity-verification video link. Firing the submit
+  // client-side closes that gap; the 409 branch inside runSubmit handles the
+  // race where the server's sweep submitted first.
+  let _autoSubmitInFlight = false;
+  timer.onTick((tick) => {
+    // Natural expiry emits exactly one tick with 0 seconds left and not
+    // running. The idle tick reports -1, and a manual stop keeps the prior
+    // secondsLeft, so neither trips this guard.
+    if (tick.secondsLeft !== 0 || tick.running || _autoSubmitInFlight) return;
+    const config = context.globalState.get<SessionConfig>(SESSION_KEY);
+    if (!config) return; // already submitted / cleared — nothing to do
+    _autoSubmitInFlight = true;
+    void runSubmit(config, buildSubmitDeps(), { auto: true }).finally(() => {
+      _autoSubmitInFlight = false;
+    });
+  });
 
   // Commands are registered unconditionally so they are always available,
   // even when activate() needs to redirect to a different workspace.
@@ -119,34 +174,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("vibe.submit", async () => {
       const config = context.globalState.get<SessionConfig>(SESSION_KEY);
       if (!config) { vscode.window.showErrorMessage("No active session."); return; }
-      await runSubmit(config, {
-        onStopTimer: () => timer.stop(),
-        onSubmitted: async () => {
-          // Bug fix: clear the session AFTER a successful submit so the IDLE →
-          // SUBMITTING → DONE state machine advances. Without this the
-          // dashboard buttons stay live, the AI chat budget keeps draining,
-          // and the candidate can resubmit.
-          await context.globalState.update(SESSION_KEY, undefined);
-          await context.globalState.update(OPENED_WS_KEY, undefined);
-          // Hide the chat view (which gates on vibe.session.active) and drop
-          // the meet-link flag so a post-submit reload renders the dashboard
-          // alone, matching the IDLE/DONE state.
-          await vscode.commands.executeCommand("setContext", "vibe.session.active", false);
-          await vscode.commands.executeCommand("setContext", "vibe.session.hasMeet", false);
-          // Bug fix: also stop the auto-commit interval. The closure still
-          // holds the old `config` (with a now-cleared globalState session),
-          // so leaving the interval running keeps pushing with a token that
-          // will silently expire ~1h later. Stop it cleanly on submit.
-          _stopAutoCommit?.();
-          // And the token-refresh timer for the same reason — keeping it
-          // armed past submit would burn a GitHub API call every ~55 min
-          // for a session that has already DONE.
-          _stopTokenRefresh?.();
-        },
-        onMarkSubmitted: () => dashboardProvider.markSubmitted(),
-        onShowVideoLink: (url, expiresUnix) =>
-          dashboardProvider.setVideoLink(url, expiresUnix),
-      });
+      await runSubmit(config, buildSubmitDeps());
     }),
     vscode.commands.registerCommand("vibe.joinMeet", () => {
       const config = context.globalState.get<SessionConfig>(SESSION_KEY);
@@ -287,9 +315,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // manual intervention. Tailor the prompt to whether the workspace is
     // simply mismatched vs. missing entirely — the latter means "Reopen"
     // will re-clone, which the candidate should know before clicking.
+    // startedAt is 0 until the clock is anchored (clone done + workspace
+    // opened). Treat an unanchored session as "full time remaining" rather
+    // than letting `Date.now() - 0` report it as already expired.
+    const effectiveStart = savedSession.startedAt || Date.now();
     const remainingMin = Math.max(
       0,
-      Math.ceil((savedSession.maxMinutes * 60_000 - (Date.now() - savedSession.startedAt)) / 60_000),
+      Math.ceil((savedSession.maxMinutes * 60_000 - (Date.now() - effectiveStart)) / 60_000),
     );
     const promptBody = cloneDirExists
       ? `JivaHire: You have an active interview session for "${savedSession.challengeId}" with about ${remainingMin} min left. Reopen its workspace, or start fresh (this discards the active session)?`
@@ -364,7 +396,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     catch { await context.globalState.update(OPENED_WS_KEY, currentWs); }
   }
 
-  timer.start(savedSession);
+  // Start the countdown here — in the opened clone workspace — NOT at
+  // validate-session. The clone + window reload that got us here can take
+  // minutes on a slow network, and the candidate shouldn't lose them. On the
+  // first activation after a fresh clone, startedAt is still 0: report
+  // clone-completion to the server, which anchors the authoritative start and
+  // hands it back. The call is idempotent, so reopens just get the same value.
+  let sessionForTimer = savedSession;
+  if (!savedSession.startedAt) {
+    const serverUrl = context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL;
+    try {
+      const startedAtMs = await reportSessionStarted(serverUrl, savedSession.sessionKey);
+      savedSession.startedAt = startedAtMs;
+      await context.globalState.update(SESSION_KEY, savedSession);
+      dashboardProvider.setConfig(savedSession);
+      logger.info("session_clock_started", { startedAt: startedAtMs });
+    } catch (err) {
+      // Transient network failure — don't block the candidate or burn their
+      // time. Show a countdown anchored to now (display only — NOT persisted,
+      // startedAt stays 0) and retry the anchor on the next activation. The
+      // server clock is still unset, so no interview time is actually lost.
+      getLogger()?.errorFromException("session_started_failed", err);
+      sessionForTimer = { ...savedSession, startedAt: Date.now() };
+    }
+  }
+  timer.start(sessionForTimer);
   // The previous on-branch chat log (.jivahire_chat_log.json) has been retired:
   // every chat exchange lives in `chat_exchanges` and every telemetry event in
   // `telemetry`, both authoritative on the server. Clean up any stale local
@@ -439,9 +495,14 @@ function _gitClone(session: SessionConfig, cloneDir: string): void {
   const authedUrl =
     baseUrl.replace("https://", `https://x-access-token:${session.githubToken}@`) + ".git";
   try {
+    // Shallow, single-branch clone. The candidate branch is freshly created
+    // server-side and they only ever work on its tip — full history is dead
+    // weight that turns a slow-network clone into minutes. --depth 1 fetches
+    // just the tip commit; --single-branch avoids pulling every other branch's
+    // refs. Auto-commit's `git push` works fine from a shallow checkout.
     execFileSync(
       "git",
-      ["clone", "-b", session.branch, authedUrl, cloneDir],
+      ["clone", "--depth", "1", "--single-branch", "-b", session.branch, authedUrl, cloneDir],
       { stdio: "pipe", shell: false }
     );
   } catch (err) {

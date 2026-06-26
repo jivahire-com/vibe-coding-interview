@@ -34,6 +34,10 @@ jest.mock('../api', () => {
   return {
     ...actual,
     submitSession: jest.fn().mockResolvedValue(undefined),
+    videoBrowserLink: jest.fn().mockResolvedValue({
+      url: 'https://app.example/video-record?t=tok',
+      expires_unix: 1234567890,
+    }),
   };
 });
 
@@ -626,5 +630,132 @@ describe('runSubmit on an already-submitted session (HTTP 409)', () => {
     expect(showInfo).toHaveBeenCalled();
     const msg = (showInfo.mock.calls[0][0] as string);
     expect(msg.toLowerCase()).toMatch(/already submitted|submitted automatically|being graded/);
+  });
+
+  test('409 → recording link is still minted for an async (non-panel) session', async () => {
+    const videoBrowserLink = api.videoBrowserLink as jest.Mock;
+    videoBrowserLink.mockClear();
+    const onShowVideoLink = jest.fn();
+    // No meetLink → async session → server would have recorded a video; the
+    // server already submitted (409) so we mint the link directly.
+    const config = makeConfig({ startedAt: Date.now() - 91 * 60_000, maxMinutes: 90 });
+
+    await runSubmit(config, { onShowVideoLink }, { auto: true });
+
+    expect(videoBrowserLink).toHaveBeenCalledTimes(1);
+    expect(onShowVideoLink).toHaveBeenCalledWith(
+      'https://app.example/video-record?t=tok',
+      1234567890,
+    );
+  });
+
+  test('409 → NO recording link for a live panel session (meetLink, no end-video override)', async () => {
+    const videoBrowserLink = api.videoBrowserLink as jest.Mock;
+    videoBrowserLink.mockClear();
+    const onShowVideoLink = jest.fn();
+    const config = makeConfig({
+      startedAt: Date.now() - 91 * 60_000,
+      maxMinutes: 90,
+      meetLink: 'https://meet.example/abc',
+      requireEndVideo: false,
+    });
+
+    await runSubmit(config, { onShowVideoLink }, { auto: true });
+
+    // Panel session verified identity live — no spurious post-submit recording.
+    expect(videoBrowserLink).not.toHaveBeenCalled();
+    expect(onShowVideoLink).not.toHaveBeenCalled();
+  });
+});
+
+// ── Auto-submit on timer expiry: the countdown reaching 00:00 fires runSubmit
+//    with { auto: true }, which must NOT prompt the candidate, must still POST
+//    /submit, and must surface the recording link. ───────────────────────────
+
+describe('runSubmit auto mode (timer expiry)', () => {
+  const ws = '/tmp/fake-workspace';
+  const showWarn = vscode.window.showWarningMessage as jest.Mock;
+  const showInfo = vscode.window.showInformationMessage as jest.Mock;
+  const submitSession = api.submitSession as jest.Mock;
+  const videoBrowserLink = api.videoBrowserLink as jest.Mock;
+
+  beforeEach(() => {
+    mockExecFile.mockReset();
+    mockExecFile.mockReturnValue(Buffer.from(''));
+    showWarn.mockReset();
+    showInfo.mockReset();
+    submitSession.mockReset();
+    submitSession.mockResolvedValue({ status: 'submitted' });
+    videoBrowserLink.mockClear();
+    videoBrowserLink.mockResolvedValue({
+      url: 'https://app.example/video-record?t=tok',
+      expires_unix: 1234567890,
+    });
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = [
+      { uri: { fsPath: ws } },
+    ];
+  });
+
+  test('skips the confirmation modal and runs DONE-state cleanup + info toast', async () => {
+    const onSubmitted = jest.fn().mockResolvedValue(undefined);
+    const onMarkSubmitted = jest.fn();
+    const config = makeConfig({ startedAt: Date.now() - 90 * 60_000, maxMinutes: 90 });
+
+    await runSubmit(config, { onSubmitted, onMarkSubmitted }, { auto: true });
+
+    // No "Submit your final answer?" prompt — time is already up.
+    expect(showWarn).not.toHaveBeenCalled();
+    expect(submitSession).toHaveBeenCalledTimes(1);
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    expect(onMarkSubmitted).toHaveBeenCalledTimes(1);
+    expect(showInfo).toHaveBeenCalled();
+    expect((showInfo.mock.calls[0][0] as string).toLowerCase()).toMatch(/time'?s up|automatically/);
+  });
+
+  test('happy path with video_upload surfaces the recording link', async () => {
+    submitSession.mockResolvedValue({
+      status: 'submitted',
+      video_upload: { deadline_unix: 1, min_duration_seconds: 30, max_duration_seconds: 300 },
+    });
+    const onShowVideoLink = jest.fn();
+    const config = makeConfig({ startedAt: Date.now() - 90 * 60_000, maxMinutes: 90 });
+
+    await runSubmit(config, { onShowVideoLink }, { auto: true });
+
+    expect(videoBrowserLink).toHaveBeenCalledTimes(1);
+    expect(onShowVideoLink).toHaveBeenCalledWith(
+      'https://app.example/video-record?t=tok',
+      1234567890,
+    );
+  });
+
+  test('still submits when no workspace folder is open', async () => {
+    (vscode.workspace as { workspaceFolders: unknown }).workspaceFolders = undefined;
+    const onSubmitted = jest.fn().mockResolvedValue(undefined);
+    const config = makeConfig({ startedAt: Date.now() - 90 * 60_000, maxMinutes: 90 });
+
+    await runSubmit(config, { onSubmitted }, { auto: true });
+
+    // No git commit (no workspace) but the server submit + cleanup still run.
+    expect(gitCalls().find((c) => c.args[0] === 'commit')).toBeUndefined();
+    expect(submitSession).toHaveBeenCalledTimes(1);
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+  });
+
+  test('a video-link minting failure never undoes the submit', async () => {
+    submitSession.mockResolvedValue({
+      status: 'submitted',
+      video_upload: { deadline_unix: 1, min_duration_seconds: 30, max_duration_seconds: 300 },
+    });
+    videoBrowserLink.mockRejectedValue(new Error('HTTP 503: video not configured'));
+    const onSubmitted = jest.fn().mockResolvedValue(undefined);
+    const onShowVideoLink = jest.fn();
+    const config = makeConfig({ startedAt: Date.now() - 90 * 60_000, maxMinutes: 90 });
+
+    await expect(
+      runSubmit(config, { onSubmitted, onShowVideoLink }, { auto: true }),
+    ).resolves.toBeUndefined();
+    expect(onSubmitted).toHaveBeenCalledTimes(1);
+    expect(onShowVideoLink).not.toHaveBeenCalled();
   });
 });

@@ -70,8 +70,10 @@ describe('validateSession', () => {
     expect(typeof config.startedAt).toBe('number');
   });
 
-  test('sets startedAt to approximately the current time', async () => {
-    const before = Date.now();
+  test('does NOT anchor startedAt at validate — the clock starts after the clone', async () => {
+    // validate-session must not start the countdown: the clone + window reload
+    // that follow can take minutes the candidate shouldn't lose. startedAt is
+    // left at 0 until reportSessionStarted() anchors it from the clone workspace.
     const responsePayload = {
       session_id: 'abc', repo_url: 'https://x', branch: 'b', github_clone_token: 't',
       llm_proxy_url: 'http://server:8080', max_minutes: 60, llm_budget_usd: 2,
@@ -81,10 +83,8 @@ describe('validateSession', () => {
     mockHttpResponse({ statusCode: 200, body: JSON.stringify(responsePayload) });
     const { validateSession: validate } = await import('../api');
     const config = await validate('http://server:8080', 'KEY');
-    const after = Date.now();
 
-    expect(config.startedAt).toBeGreaterThanOrEqual(before);
-    expect(config.startedAt).toBeLessThanOrEqual(after);
+    expect(config.startedAt).toBe(0);
   });
 
   test('falls back to challengeId when challenge_description is absent', async () => {
@@ -499,6 +499,36 @@ describe('GitHub installation token plumbing', () => {
     mockHttpResponse({ statusCode: 409, body: 'Session is submitted' });
     const { refreshGithubToken } = await import('../api');
     await expect(refreshGithubToken('http://server:8080', 'KEY')).rejects.toThrow(
+      /HTTP 409/,
+    );
+  });
+});
+
+describe('reportSessionStarted (clock anchored after clone)', () => {
+  beforeEach(() => jest.resetModules());
+
+  test('returns the server-authoritative started_at converted to ms', async () => {
+    mockHttpResponse({
+      statusCode: 200,
+      body: JSON.stringify({ started_at: 1_950_000_000 }),
+    });
+    const { reportSessionStarted } = await import('../api');
+    const startedAtMs = await reportSessionStarted('http://server:8080/', 'KEY');
+    expect(startedAtMs).toBe(1_950_000_000 * 1000);
+  });
+
+  test('throws when the server omits started_at (defensive)', async () => {
+    mockHttpResponse({ statusCode: 200, body: JSON.stringify({}) });
+    const { reportSessionStarted } = await import('../api');
+    await expect(reportSessionStarted('http://server:8080', 'KEY')).rejects.toThrow(
+      /missing started_at/i,
+    );
+  });
+
+  test('surfaces HTTP error responses (e.g. 409 wrong status)', async () => {
+    mockHttpResponse({ statusCode: 409, body: 'Session is submitted' });
+    const { reportSessionStarted } = await import('../api');
+    await expect(reportSessionStarted('http://server:8080', 'KEY')).rejects.toThrow(
       /HTTP 409/,
     );
   });

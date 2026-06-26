@@ -415,6 +415,53 @@ describe('vibe.submit command (Review-Bug 14)', () => {
   });
 });
 
+describe('timer expiry → auto-submit', () => {
+  test('when the countdown hits 00:00, runSubmit is invoked with { auto: true }', async () => {
+    const { Timer } = require('../timer');
+    const submitMod = require('../submit');
+    submitMod.runSubmit = jest.fn().mockResolvedValue(undefined);
+
+    mockedFs.existsSync.mockReturnValue(true);
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: CLONE_DIR } }];
+    const config = makeConfig();
+    const ctx = makeMockContext({ 'vibe.session': config });
+    await activate(ctx);
+
+    // The expiry listener is the only onTick registration on the timer in
+    // activate() (ChatViewProvider is mocked, so its attachTimer is a no-op).
+    const onTickCalls = (Timer.prototype.onTick as jest.Mock).mock.calls;
+    expect(onTickCalls.length).toBeGreaterThanOrEqual(1);
+    const listener = onTickCalls[onTickCalls.length - 1][0] as (t: unknown) => void;
+
+    // A non-expiry tick (still running) must NOT submit.
+    listener({ text: '00:05', secondsLeft: 5, severity: 'error', running: true });
+    expect(submitMod.runSubmit).not.toHaveBeenCalled();
+
+    // The terminal 00:00 / not-running tick fires the auto-submit.
+    listener({ text: '00:00', secondsLeft: 0, severity: 'error', running: false });
+    expect(submitMod.runSubmit).toHaveBeenCalledTimes(1);
+    const [, , opts] = submitMod.runSubmit.mock.calls[0];
+    expect(opts).toEqual(expect.objectContaining({ auto: true }));
+  });
+
+  test('does not auto-submit once the session has been cleared', async () => {
+    const { Timer } = require('../timer');
+    const submitMod = require('../submit');
+    submitMod.runSubmit = jest.fn().mockResolvedValue(undefined);
+
+    mockedFs.existsSync.mockReturnValue(true);
+    (vscode.workspace as any).workspaceFolders = [{ uri: { fsPath: CLONE_DIR } }];
+    // No saved session → globalState lookup inside the listener returns nothing.
+    const ctx = makeMockContext({});
+    await activate(ctx);
+
+    const onTickCalls = (Timer.prototype.onTick as jest.Mock).mock.calls;
+    const listener = onTickCalls[onTickCalls.length - 1][0] as (t: unknown) => void;
+    listener({ text: '00:00', secondsLeft: 0, severity: 'error', running: false });
+    expect(submitMod.runSubmit).not.toHaveBeenCalled();
+  });
+});
+
 describe('Reopen dialog → next activation does not re-prompt (Bug #3)', () => {
   test('once the user has accepted Reopen, OPENED_WS_KEY shortcut prevents the dialog from re-firing', async () => {
     mockedFs.existsSync.mockReturnValue(true);

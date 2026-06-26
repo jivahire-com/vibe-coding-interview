@@ -544,9 +544,15 @@ async def validate_session(req: ValidateSessionRequest, request: Request):
             source_ref=session.get("source_ref") or "main",
             session_id=session["id"],
         )
+        # Activate the session (create branch + mint token below) but DON'T
+        # anchor the countdown yet: started_at stays NULL. Cloning the challenge
+        # repo on the candidate's machine — plus the window reload that follows —
+        # can take minutes on a slow network, and the candidate shouldn't lose
+        # that time. The extension reports clone-completion via POST
+        # /session-started, which sets started_at. See session_started below.
         execute(
-            "UPDATE sessions SET status='active', started_at=? WHERE id=?",
-            (int(time.time()), session["id"]),
+            "UPDATE sessions SET status='active' WHERE id=?",
+            (session["id"],),
         )
         log.info("session_activated", extra={"context": {"challenge_id": session["challenge_id"]}})
 
@@ -613,6 +619,34 @@ async def refresh_github_token(session: dict = Depends(get_session)):
         "github_clone_token": token.token,
         "github_clone_token_expires_at": token.expires_at,
     }
+
+
+@router.post("/session-started")
+def session_started(session: dict = Depends(get_session)):
+    """Anchor the interview countdown to clone-completion, not validate-session.
+
+    validate-session creates the candidate branch and flips the session to
+    'active' but leaves started_at NULL on purpose — the candidate hasn't even
+    started cloning yet. The extension calls this once, from inside the freshly
+    opened clone workspace, to start the clock. Idempotent: a second call (a
+    window reopen, a retry) returns the already-recorded started_at, so the
+    deadline never drifts forward. The UPDATE's `started_at IS NULL` guard makes
+    the first caller win a concurrent race; we re-read to return the winner.
+    """
+    if session["status"] != "active":
+        raise HTTPException(409, f"Session is {session['status']}")
+    started_at = session["started_at"]
+    if not started_at:
+        started_at = int(time.time())
+        execute(
+            "UPDATE sessions SET started_at=? WHERE id=? AND started_at IS NULL",
+            (started_at, session["id"]),
+        )
+        rows = query("SELECT started_at FROM sessions WHERE id=?", (session["id"],))
+        if rows and rows[0]["started_at"]:
+            started_at = rows[0]["started_at"]
+        log.info("session_clock_started", extra={"context": {"started_at": started_at}})
+    return {"started_at": started_at}
 
 
 class InvalidateRequest(BaseModel):
