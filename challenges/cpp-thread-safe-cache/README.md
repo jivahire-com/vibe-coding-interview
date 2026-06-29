@@ -97,8 +97,32 @@ Then write a short **`NOTES.md`**:
 
 ## Build & run
 
-**You need:** CMake 3.14+, a C++17 compiler (GCC 11+, Clang 14+, or MSVC 2019+),
-and Git. Nothing else to install — Catch2 is fetched automatically on the first build.
+**Fastest way — run the setup script** (installs CMake + a C++ compiler if
+needed, then configures and builds).
+
+**macOS / Linux** — from this challenge folder:
+
+```bash
+bash setup.sh
+```
+
+**Windows** — do this challenge in **WSL** (Ubuntu). That's how most C++
+developers work on Windows, and it matches the Linux environment the grader
+uses. If you don't have WSL yet, run this once in PowerShell:
+
+```powershell
+wsl --install          # first time only, then reopen this folder in WSL
+```
+
+Then, inside WSL, from this challenge folder, run the same script:
+
+```bash
+bash setup.sh
+```
+
+Prefer to do it by hand? **You need:** CMake 3.14+, a C++17 compiler (GCC 11+
+or Clang 14+) and Git. Nothing else to install — Catch2 is fetched automatically
+on the first build.
 
 ```bash
 # First time only — fetches Catch2 (~10s on first run, cached after)
@@ -122,6 +146,7 @@ test passes, you're on a modified tree; re-clone.
 - **`cmake: command not found`** — macOS `brew install cmake`; Ubuntu `sudo apt install cmake`.
 - **`c++` / `clang++` not found** — macOS `xcode-select --install`; Ubuntu `sudo apt install build-essential clang`.
 - **FetchContent fails** — the first build needs internet to download Catch2; after that `build/_deps/` is cached and offline builds work.
+- **Compiler too old / C++17 missing** — use GCC 11+ or Clang 14+; an older compiler may not fully support C++17.
 - **ThreadSanitizer not available** — TSan needs Clang/GCC on Linux/macOS (MSVC doesn't support it). The visible tests don't use TSan; the grader always runs it on Linux.
 
 ---
