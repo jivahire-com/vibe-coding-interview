@@ -23,7 +23,7 @@ const MEET_TOAST_SHOWN_KEY = "vibe.meetToastShown";
 // symlink/case-normalization differences.
 const OPENED_WS_KEY = "vibe.openedWs";
 const DEFAULT_SERVER_URL = "https://interview.jivahire.com";
-const STALE_SERVER_URLS = ["http://18.209.171.199:8080", "http://localhost:8080", "http://34.193.116.47", "http://34.193.116.47:8080"];
+const PRODUCTION_HOSTNAME = "interview.jivahire.com";
 const AUTO_COMMIT_INTERVAL_MS = 180_000; // 3 minutes
 // Bounds the auto-commit push so a hung network can't pile up overlapping
 // timers. Kept below the interval so each tick has a chance to finish before
@@ -42,6 +42,22 @@ const TOKEN_REFRESH_FALLBACK_MS = 45 * 60_000;
 const TOKEN_REFRESH_MIN_DELAY_MS = 30_000;
 
 /**
+ * Returns true when `url` is a stale server URL that should be evicted from
+ * globalState. Any URL that is not HTTPS or not pointing at the production
+ * hostname is considered stale — this is intentionally broad so we don't
+ * need to maintain a growing list of old IPs and localhost variants.
+ */
+function _isStaleServerUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol !== "https:" || parsed.hostname !== PRODUCTION_HOSTNAME;
+  } catch {
+    return true; // unparseable URL is always stale
+  }
+}
+
+/**
  * Hooks for stopping the per-session services (auto-commit interval) without
  * tearing down the entire extension host. Populated by _startSessionServices
  * and called from the submit success path so we don't keep pushing to a
@@ -58,8 +74,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Clear stale server URLs from previous installs so the new default takes effect.
   // Also clear the saved session — its llmProxyUrl came from the old server and is wrong.
+  // Match broadly: any non-HTTPS URL or any URL not pointing at the production hostname
+  // is stale. The old exact-list approach missed variants with trailing slashes or
+  // minor formatting differences.
   const cachedUrl = context.globalState.get<string>(SERVER_URL_KEY);
-  if (cachedUrl && STALE_SERVER_URLS.includes(cachedUrl)) {
+  if (_isStaleServerUrl(cachedUrl)) {
     await context.globalState.update(SERVER_URL_KEY, undefined);
     await context.globalState.update(SESSION_KEY, undefined);
   }
