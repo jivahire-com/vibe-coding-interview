@@ -72,14 +72,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(logger);
   logger.info("extension_activated");
 
-  // Clear stale server URLs from previous installs so the new default takes effect.
-  // Also clear the saved session — its llmProxyUrl came from the old server and is wrong.
-  // Match broadly: any non-HTTPS URL or any URL not pointing at the production hostname
-  // is stale. The old exact-list approach missed variants with trailing slashes or
-  // minor formatting differences.
+  // Clear any stale server URL key left by previous installs.
   const cachedUrl = context.globalState.get<string>(SERVER_URL_KEY);
   if (_isStaleServerUrl(cachedUrl)) {
     await context.globalState.update(SERVER_URL_KEY, undefined);
+    await context.globalState.update(SESSION_KEY, undefined);
+  }
+  // Also clear saved sessions whose llmProxyUrl points to an old server — the
+  // SERVER_URL_KEY check above only handles the URL key, not sessions that were
+  // persisted before we stopped saving the key.
+  const cachedSession = context.globalState.get<SessionConfig>(SESSION_KEY);
+  if (cachedSession && _isStaleServerUrl(cachedSession.llmProxyUrl)) {
     await context.globalState.update(SESSION_KEY, undefined);
   }
 
@@ -423,9 +426,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // hands it back. The call is idempotent, so reopens just get the same value.
   let sessionForTimer = savedSession;
   if (!savedSession.startedAt) {
-    const serverUrl = context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL;
     try {
-      const startedAtMs = await reportSessionStarted(serverUrl, savedSession.sessionKey);
+      const startedAtMs = await reportSessionStarted(DEFAULT_SERVER_URL, savedSession.sessionKey);
       savedSession.startedAt = startedAtMs;
       await context.globalState.update(SESSION_KEY, savedSession);
       dashboardProvider.setConfig(savedSession);
@@ -794,10 +796,8 @@ function _scheduleTokenRefresh(
 
   const tick = async () => {
     if (stopped) return;
-    const serverUrl =
-      context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL;
     try {
-      const fresh = await refreshGithubToken(serverUrl, config.sessionKey);
+      const fresh = await refreshGithubToken(DEFAULT_SERVER_URL, config.sessionKey);
       // Mutate in place — auto-commit / submit read this value fresh on every
       // git invocation, so they pick up the new token without any wiring.
       config.githubToken = fresh.token;
@@ -927,20 +927,12 @@ async function promptForSession(
   dashboardProvider: DashboardViewProvider,
   prefillKey?: string
 ): Promise<void> {
-  let serverUrl: string;
+  const serverUrl = DEFAULT_SERVER_URL;
   let sessionKey: string | undefined;
 
   if (prefillKey) {
-    serverUrl = context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL;
     sessionKey = prefillKey.trim();
   } else {
-    const urlInput = await vscode.window.showInputBox({
-      prompt: "JivaHire server URL",
-      value: context.globalState.get<string>(SERVER_URL_KEY) ?? DEFAULT_SERVER_URL,
-    });
-    if (!urlInput) return;
-    serverUrl = urlInput;
-
     sessionKey = await vscode.window.showInputBox({
       prompt: "Enter your session key (provided by the recruiter)",
       placeHolder: "e.g. XYZ-123",
@@ -963,7 +955,6 @@ async function promptForSession(
 
     const config = await validateSession(serverUrl, sessionKey);
     await context.globalState.update(SESSION_KEY, config);
-    await context.globalState.update(SERVER_URL_KEY, serverUrl);
 
     // Key the clone dir on the FULL session id. The old `slice(0, 8)` risked two
     // sessions colliding on the same `~/vibe-<8hex>` path, and the existence
